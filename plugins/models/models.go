@@ -10,6 +10,7 @@ import (
 	"go-sre-harness/internal/cognitive"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/gateway/anthropic"
+	"go-sre-harness/internal/gateway/gemini"
 	"go-sre-harness/internal/gateway/openai"
 	"go-sre-harness/internal/plugin"
 )
@@ -38,6 +39,15 @@ type AnthropicConfig struct {
 	BaseURL string          `json:"base_url,omitempty"`
 	Effort  string          `json:"effort,omitempty"`
 	Timeout plugin.Duration `json:"timeout,omitempty"`
+}
+
+type GeminiConfig struct {
+	Common
+	APIKey        string `json:"api_key"`
+	BaseURL       string `json:"base_url,omitempty"`
+	Model         string `json:"model,omitempty"` // default gemini-flash-latest
+	ContextWindow int64  `json:"context_window,omitempty"`
+	MaxOutput     int64  `json:"max_output,omitempty"`
 }
 
 type OpenAIConfig struct {
@@ -75,6 +85,23 @@ func init() {
 			return cfg.apply(plugin.ModelBackend{Provider: p, Endpoints: gw.AnthropicEndpoints(),
 				Aliases: map[string][]string{"sre-reasoning": {"anthropic-opus-5-5", "anthropic-sonnet-5-5"},
 					"sre-fast": {"anthropic-haiku-5-5"}}}), nil
+		})
+	plugin.Register(plugin.ModelProvider, "gemini", "Google Gemini via the generativelanguage API",
+		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ModelBackend, error) {
+			var cfg GeminiConfig
+			if err := c.Decode(&cfg); err != nil {
+				return plugin.ModelBackend{}, err
+			}
+			if cfg.APIKey == "" {
+				return plugin.ModelBackend{}, errors.New("api_key is required (use ${GEMINI_API_KEY})")
+			}
+			if cfg.Model == "" {
+				cfg.Model = "gemini-flash-latest"
+			}
+			p := gemini.New(gemini.Config{APIKey: cfg.APIKey, BaseURL: cfg.BaseURL})
+			return cfg.apply(plugin.ModelBackend{Provider: p,
+				Endpoints: []gw.Endpoint{gw.GeminiEndpoint(cfg.Model, cfg.ContextWindow, cfg.MaxOutput)},
+				Aliases:   map[string][]string{"sre-reasoning": {"gemini"}, "sre-fast": {"gemini"}}}), nil
 		})
 	plugin.Register(plugin.ModelProvider, "openai", "OpenAI-compatible chat completions (vLLM, SGLang, ...)",
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ModelBackend, error) {

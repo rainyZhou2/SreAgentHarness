@@ -2,15 +2,19 @@ package extensions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/gateway/anthropic"
+	"go-sre-harness/internal/gateway/gemini"
 	"go-sre-harness/internal/gateway/openai"
 )
 
@@ -21,15 +25,27 @@ const KindModel Kind = "model"
 
 // ModelSpec configures one tenant model.
 type ModelSpec struct {
-	Provider string `json:"provider"` // anthropic | openai (OpenAI-compatible)
-	Model    string `json:"model"`
-	APIKey   string `json:"api_key,omitempty"`
-	BaseURL  string `json:"base_url,omitempty"`
+	// Provider is the wire protocol: anthropic | openai (OpenAI-compatible
+	// chat completions, which also covers OpenAI itself, DeepSeek, Qwen,
+	// ERNIE, GLM, Kimi, Doubao and self-hosted servers) | gemini.
+	Provider string `json:"provider"`
+	// Preset names the vendor template the client used (display only).
+	Preset  string `json:"preset,omitempty"`
+	Model   string `json:"model"`
+	APIKey  string `json:"api_key,omitempty"`
+	BaseURL string `json:"base_url,omitempty"`
 	// Effort (anthropic): low | medium | high | xhigh | max; empty = API default.
 	Effort        string `json:"effort,omitempty"`
 	ContextWindow int64  `json:"context_window,omitempty"`
 	MaxOutput     int64  `json:"max_output,omitempty"`
+	// MaxCompletionTokens (openai) sends max_completion_tokens instead of
+	// max_tokens, as OpenAI's reasoning models require.
+	MaxCompletionTokens bool `json:"max_completion_tokens,omitempty"`
+	// Default makes this the tenant's preferred model; the others are fallbacks.
+	Default bool `json:"default,omitempty"`
 }
+
+var presetRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // ModelAliases are the aliases a tenant model serves.
 var ModelAliases = []string{"sre-reasoning", "sre-fast"}
@@ -59,8 +75,24 @@ func (s *ModelSpec) check(o Options) error {
 		if s.Effort != "" {
 			return errors.New("effort applies to anthropic only")
 		}
+	case "gemini":
+		if s.Model == "" {
+			s.Model = "gemini-flash-latest"
+		}
+		if s.APIKey == "" {
+			return errors.New("api_key is required for gemini")
+		}
+		if s.Effort != "" {
+			return errors.New("effort applies to anthropic only")
+		}
 	default:
-		return errors.New(`provider must be "anthropic" or "openai"`)
+		return errors.New(`provider must be "anthropic", "openai" or "gemini"`)
+	}
+	if s.MaxCompletionTokens && s.Provider != "openai" {
+		return errors.New("max_completion_tokens applies to openai only")
+	}
+	if s.Preset != "" && !presetRE.MatchString(s.Preset) {
+		return errors.New("preset must be a short lowercase slug")
 	}
 	if s.BaseURL != "" {
 		if err := checkURL(s.BaseURL, o.Network); err != nil {
@@ -100,8 +132,11 @@ func buildModel(tenant, name string, s ModelSpec, client *http.Client) (gw.Provi
 				ep = t
 			}
 		}
+	case "gemini":
+		p = gemini.New(gemini.Config{APIKey: s.APIKey, BaseURL: s.BaseURL, HTTPClient: client})
+		ep = gw.GeminiEndpoint(s.Model, s.ContextWindow, s.MaxOutput)
 	default:
-		p = openai.New(openai.Config{BaseURL: s.BaseURL, APIKey: s.APIKey, HTTPClient: client})
+		p = openai.New(openai.Config{BaseURL: s.BaseURL, APIKey: s.APIKey, UseMaxCompletionTokens: s.MaxCompletionTokens, HTTPClient: client})
 		ep = gw.OpenAICompatibleEndpoint(s.Model, s.ContextWindow, s.MaxOutput)
 	}
 	if s.ContextWindow > 0 {
@@ -111,6 +146,9 @@ func buildModel(tenant, name string, s ModelSpec, client *http.Client) (gw.Provi
 		ep.MaxOutput = s.MaxOutput
 	}
 	ep.ID, ep.ProviderID, ep.Tenants, ep.Priority = id, id, []string{tenant}, -10
+	if s.Default {
+		ep.Priority = -20
+	}
 	return namedProvider{id: id, Provider: p}, ep
 }
 
@@ -136,7 +174,14 @@ func (r *Runtime) overlayLocked() gw.Overlay {
 				keys = append(keys, k.name)
 			}
 		}
-		sort.Strings(keys)
+		// The default model first, then by name: alias order is the fallback order.
+		sort.Slice(keys, func(i, j int) bool {
+			di, dj := ts.entries[key{KindModel, keys[i]}].model.ep.Priority, ts.entries[key{KindModel, keys[j]}].model.ep.Priority
+			if di != dj {
+				return di < dj
+			}
+			return keys[i] < keys[j]
+		})
 		for _, n := range keys {
 			m := ts.entries[key{KindModel, n}].model
 			o.Endpoints = append(o.Endpoints, m.ep)
@@ -170,4 +215,85 @@ func (r *Runtime) TestModel(ctx context.Context, tenant, name string, s ModelSpe
 		}
 	})
 	return strings.TrimSpace(b.String()), ep.ModelID, err
+}
+
+// ListModels asks the provider which models the key can use (GET /models),
+// so an admin can pick a current model ID instead of typing one. It goes
+// through the same network policy as model calls.
+func (r *Runtime) ListModels(ctx context.Context, s ModelSpec) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	base := strings.TrimRight(s.BaseURL, "/")
+	var u string
+	hdr := http.Header{}
+	switch s.Provider {
+	case "anthropic":
+		if base == "" {
+			base = "https://api.anthropic.com"
+		}
+		u = base + "/v1/models?limit=1000"
+		hdr.Set("x-api-key", s.APIKey)
+		hdr.Set("anthropic-version", "2023-06-01")
+	case "gemini":
+		if base == "" {
+			base = gemini.DefaultBaseURL
+		}
+		u = base + "/models?pageSize=1000"
+		hdr.Set("x-goog-api-key", s.APIKey)
+	default:
+		u = base + "/models"
+		if s.APIKey != "" {
+			hdr.Set("Authorization", "Bearer "+s.APIKey)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = hdr
+	resp, err := r.Options.Network.Client(0).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []struct {
+			Name    string   `json:"name"`
+			Methods []string `json:"supportedGenerationMethods"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("unexpected response: %w", err)
+	}
+	var ids []string
+	for _, d := range out.Data {
+		ids = append(ids, d.ID)
+	}
+	for _, m := range out.Models {
+		for _, meth := range m.Methods {
+			if meth == "generateContent" || meth == "streamGenerateContent" {
+				ids = append(ids, strings.TrimPrefix(m.Name, "models/"))
+				break
+			}
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) > 500 {
+		ids = ids[:500]
+	}
+	return ids, nil
 }

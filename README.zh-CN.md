@@ -222,7 +222,10 @@ HARNESS_AUTH_MODE=token,oidc HARNESS_AUTH_TOKENS_FILE=/etc/harness/tokens.json H
 | Provider | Spec |
 |---|---|
 | `anthropic` | `{"provider":"anthropic","model":"claude-opus-5-5","api_key":"…","effort":"high"}`（model 默认为 `claude-opus-5-5`；effort 取 `low`…`max`） |
-| `openai`（兼容接口） | `{"provider":"openai","model":"…","base_url":"https://…/v1","api_key":"…"}` |
+| `openai`（兼容接口） | `{"provider":"openai","model":"…","base_url":"https://…/v1","api_key":"…","max_completion_tokens"?:true}`：OpenAI、DeepSeek、通义千问（百炼）、文心（千帆 v2）、智谱 GLM、Kimi、豆包（方舟）、vLLM/Ollama |
+| `gemini` | `{"provider":"gemini","model":"gemini-flash-latest","api_key":"…"}` |
+
+任一模型可以设置 `"default": true`，排在本租户回退顺序的最前面。`POST /v1/extensions/models/{name}/list` 返回该 Key 可用的模型 ID（`model` 可以留空）。桌面客户端在 **设置 → 模型** 中按服务商预设管理模型。
 
 配置的模型会成为网关中的一个端点（`tenant:<tenant>:<name>`），只对该租户开放。它优先于全局端点承接 `sre-reasoning` 和 `sre-fast` 两个别名，失败时自动回退到全局端点。使用 `llm` 策略时，由模型自行选择工具，但仍受同一套 profile、策略和审批规则约束。`api_key` 只写不读。`POST /v1/extensions/models/{name}/test` 会发一条简短请求做测试，不保存配置；`GET /v1/extensions` 返回 `current_model`，即新 Run 实际会解析到的端点和模型。`model` 类型需要先执行迁移 `0007_tenant_models.sql`。
 
@@ -307,6 +310,7 @@ Kubernetes 清单见 `deploy/k8s/harness.yaml`（外部 Postgres/NATS，Secret `
 | `HARNESS_STRATEGY` | `llm` | `rule` 时完全不经模型网关 |
 | `ANTHROPIC_API_KEY` / `HARNESS_ANTHROPIC_BASE_URL` / `HARNESS_ANTHROPIC_EFFORT` | — | Claude 适配器 |
 | `HARNESS_OPENAI_BASE_URL` / `HARNESS_OPENAI_MODEL` / `HARNESS_OPENAI_API_KEY` | — | OpenAI 兼容适配器 |
+| `GEMINI_API_KEY` / `HARNESS_GEMINI_MODEL` / `HARNESS_GEMINI_BASE_URL` | — / `gemini-flash-latest` / 官方地址 | Gemini 适配器（原生 `streamGenerateContent`） |
 | `HARNESS_MODEL_ALIAS` / `HARNESS_MODEL_EFFORT` | `sre-reasoning` / 空 | Profile 未指定时的默认值 |
 | `HARNESS_MODEL_DAILY_BUDGET_USD` / `HARNESS_MODEL_MAX_INFLIGHT_PER_TENANT` | `0`（不限）/ `32` | 网关准入 |
 | `HARNESS_MEMORY_RETRIEVAL` / `HARNESS_MEMORY_TOP_K` | `true` / `5` | 每个 Run 首个推理前检索记忆 |

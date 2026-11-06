@@ -222,7 +222,10 @@ By default runs use the models configured in the route policy (the built-in `scr
 | Provider | Spec |
 |---|---|
 | `anthropic` | `{"provider":"anthropic","model":"claude-opus-5-5","api_key":"…","effort":"high"}` (model defaults to `claude-opus-5-5`; effort `low`…`max`) |
-| `openai` (compatible) | `{"provider":"openai","model":"…","base_url":"https://…/v1","api_key":"…"}` |
+| `openai` (compatible) | `{"provider":"openai","model":"…","base_url":"https://…/v1","api_key":"…","max_completion_tokens"?:true}`: OpenAI, DeepSeek, Qwen (DashScope), ERNIE (Qianfan v2), Zhipu GLM, Kimi, Doubao (Ark), vLLM/Ollama |
+| `gemini` | `{"provider":"gemini","model":"gemini-flash-latest","api_key":"…"}` |
+
+Any model may set `"default": true` to lead the tenant's fallback order. `POST /v1/extensions/models/{name}/list` returns the model IDs the key can use (blank `model` allowed). The desktop client manages models under **Settings → Models** with vendor presets.
 
 The model becomes a gateway endpoint (`tenant:<tenant>:<name>`) entitled to that tenant only. It serves the `sre-reasoning` and `sre-fast` aliases ahead of the global endpoints and falls back to them when it fails. With the `llm` strategy the model chooses the tools itself, under the same profile, policy and approval rules. `api_key` is write-only. `POST /v1/extensions/models/{name}/test` sends a short request without saving, and `GET /v1/extensions` reports `current_model` (the endpoint and model that new runs resolve to). The `model` kind needs migration `0007_tenant_models.sql`.
 
@@ -307,6 +310,7 @@ Kubernetes manifests are in `deploy/k8s/harness.yaml` (external Postgres/NATS, S
 | `HARNESS_STRATEGY` | `llm` | `rule` bypasses the model gateway entirely |
 | `ANTHROPIC_API_KEY` / `HARNESS_ANTHROPIC_BASE_URL` / `HARNESS_ANTHROPIC_EFFORT` | — | Claude adapter |
 | `HARNESS_OPENAI_BASE_URL` / `HARNESS_OPENAI_MODEL` / `HARNESS_OPENAI_API_KEY` | — | OpenAI-compatible adapter |
+| `GEMINI_API_KEY` / `HARNESS_GEMINI_MODEL` / `HARNESS_GEMINI_BASE_URL` | — / `gemini-flash-latest` / public API | Gemini adapter (native `streamGenerateContent`) |
 | `HARNESS_MODEL_ALIAS` / `HARNESS_MODEL_EFFORT` | `sre-reasoning` / empty | defaults when a profile does not set them |
 | `HARNESS_MODEL_DAILY_BUDGET_USD` / `HARNESS_MODEL_MAX_INFLIGHT_PER_TENANT` | `0` (unlimited) / `32` | gateway admission |
 | `HARNESS_MEMORY_RETRIEVAL` / `HARNESS_MEMORY_TOP_K` | `true` / `5` | retrieve memories before each run's first reasoning step |
