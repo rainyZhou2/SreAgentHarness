@@ -22,3 +22,7 @@
 testdata/
 coverage.*
 *.coverprofile
+
+# design RFC stays local
+/GoAgentHarness.md
+/GoAgentHarness.zh-CN.md
