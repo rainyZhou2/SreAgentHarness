@@ -16,6 +16,7 @@ import (
 	"go-sre-harness/internal/eventbus"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/memory"
+	"go-sre-harness/internal/netguard"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/store/pg"
@@ -37,6 +38,7 @@ type Host struct {
 	Tools     *tools.Registry
 	Deltas    stream.Bus
 	Events    eventbus.Bus
+	Network   netguard.NetPolicy
 	Policy    policy.Gate
 	Gateway   *gw.Gateway
 	Embedder  memory.Embedder

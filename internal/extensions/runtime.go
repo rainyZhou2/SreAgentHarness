@@ -13,6 +13,7 @@ import (
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/mcpexec"
+	"go-sre-harness/internal/tools/web"
 )
 
 // Runtime turns stored records into live tools and skills. It implements
@@ -270,6 +271,28 @@ func (r *Runtime) build(ctx context.Context, rec Record) *entry {
 			return e
 		}
 		e.tools = ts
+	case KindWeb:
+		var s WebSpec
+		if err := json.Unmarshal(rec.Spec, &s); err != nil {
+			e.err = err.Error()
+			return e
+		}
+		cfg := web.SearchConfig{Provider: s.Provider, Endpoint: s.Endpoint, APIKey: s.APIKey,
+			MaxResults: s.MaxResults, Policy: r.Options.Network, Client: r.HTTPClient}
+		if s.Timeout != "" {
+			d, err := time.ParseDuration(s.Timeout)
+			if err != nil {
+				e.err = "invalid timeout: " + err.Error()
+				return e
+			}
+			cfg.Timeout = d
+		}
+		t, err := web.NewSearchTool(rec.Name, cfg)
+		if err != nil {
+			e.err = err.Error()
+			return e
+		}
+		e.tools = []tools.Tool{t}
 	}
 	return e
 }

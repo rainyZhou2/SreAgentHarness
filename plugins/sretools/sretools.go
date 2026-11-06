@@ -12,7 +12,13 @@ import (
 	"go-sre-harness/internal/tools/mcpexec"
 	"go-sre-harness/internal/tools/remote"
 	"go-sre-harness/internal/tools/sretools"
+	"go-sre-harness/internal/tools/web"
 )
+
+type WebConfig struct {
+	MaxBytes int64           `json:"max_bytes,omitempty"`
+	Timeout  plugin.Duration `json:"timeout,omitempty"`
+}
 
 type KubernetesConfig struct {
 	sretools.KubernetesConfig
@@ -54,6 +60,15 @@ func init() {
 	plugin.Register(plugin.Tools, "demo", "demo.metrics (R0) and demo.restart (R2) for local runs",
 		func(context.Context, *plugin.Host, plugin.Config) (plugin.ToolSource, error) {
 			return static(tools.DemoTools()), nil
+		})
+	plugin.Register(plugin.Tools, "web", "web.fetch (R0): read a public page as text; untrusted output",
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {
+			var cfg WebConfig
+			if err := c.Decode(&cfg); err != nil {
+				return nil, err
+			}
+			return static([]tools.Tool{web.NewFetchTool(web.FetchConfig{
+				MaxBytes: cfg.MaxBytes, Timeout: cfg.Timeout.D(), Policy: h.Network})}), nil
 		})
 	plugin.Register(plugin.Tools, "prometheus", "prom.query / prom.alerts (read-only, R0)",
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {

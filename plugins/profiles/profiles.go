@@ -25,6 +25,10 @@ const DemoSpec = `{"strategy":"llm","tools":["demo.metrics","demo.restart"],"max
 // /v1/extensions. Policy and approvals still apply to every call.
 const ExtensionsSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*"],"max_steps":12}`
 
+// WebSpec (sre-diagnosis@3, the default) also allows the built-in web tools.
+// web.fetch is always available; web.search needs a tenant backend.
+const WebSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":12}`
+
 // BuiltinConfig configures the builtin source.
 type BuiltinConfig struct {
 	ID      string          `json:"id,omitempty"`      // default sre-diagnosis
@@ -54,6 +58,8 @@ func init() {
 				cfg.Tenants, h.Settings.DefaultTenant)
 			if cfg.ID == "sre-diagnosis" && cfg.Version == 1 && string(cfg.Spec) == DemoSpec {
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 2, Spec: json.RawMessage(ExtensionsSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 3, Spec: json.RawMessage(WebSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 			}
 			return profile.SourceFunc(func(context.Context) ([]profile.Definition, error) { return defs, nil }), nil
