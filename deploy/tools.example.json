@@ -1,0 +1,15 @@
+{
+  "demo_tools": true,
+  "prometheus": {"url": "http://127.0.0.1:9090", "max_series": 20},
+  "kubernetes": {"api_server": "https://127.0.0.1:6443", "token_file": "/path/to/sa-token",
+                 "ca_file": "/path/to/ca.crt", "namespaces": ["staging"], "dry_run": true},
+  "mcp_servers": [
+    {"name": "ops", "command": "/usr/local/bin/ops-mcp", "args": [],
+     "allow": {"get_logs": {"risk": "R0", "target_arg": "service"}},
+     "call_timeout": "30s"}
+  ],
+  "remote_executors": [
+    {"name": "py", "address": "127.0.0.1:50051", "insecure": true,
+     "allow": {"anomaly_detect": {"risk": "R0"}}}
+  ]
+}

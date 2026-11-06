@@ -1,0 +1,64 @@
+# Multi-process deployment: postgres + NATS JetStream + scheduler + workers + api.
+# Static tokens: create deploy/tokens.json (see README) before `docker compose up`.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: harness
+      POSTGRES_PASSWORD: harness
+      POSTGRES_DB: harness
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harness"]
+      interval: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.11
+    command: ["-js", "-sd", "/data"]
+    volumes: [natsdata:/data]
+
+  migrate:
+    build: ..
+    command: ["migrate"]
+    environment: &env
+      HARNESS_DATABASE_URL: postgres://harness:harness@postgres:5432/harness
+      HARNESS_NATS_URL: nats://nats:4222
+      HARNESS_AUTO_MIGRATE: "false"
+      HARNESS_ARTIFACT_DIR: /data/artifacts
+      HARNESS_AUTH_MODE: token
+      HARNESS_AUTH_TOKENS_FILE: /config/tokens.json
+      HARNESS_METRICS_ADDR: 0.0.0.0:9090
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  scheduler:
+    build: ..
+    command: ["scheduler"]
+    environment: *env
+    volumes: [artifacts:/data, ./tokens.json:/config/tokens.json:ro]
+    depends_on: {migrate: {condition: service_completed_successfully}, nats: {condition: service_started}}
+
+  worker:
+    build: ..
+    command: ["worker"]
+    environment: *env
+    deploy: {replicas: 2}
+    volumes: [artifacts:/data, ./tokens.json:/config/tokens.json:ro]
+    depends_on: {migrate: {condition: service_completed_successfully}, nats: {condition: service_started}}
+
+  api:
+    build: ..
+    command: ["api"]
+    environment:
+      <<: *env
+      HARNESS_HTTP_ADDR: 0.0.0.0:8080
+    ports: ["8080:8080"]
+    volumes: [artifacts:/data, ./tokens.json:/config/tokens.json:ro]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+
+volumes:
+  pgdata: {}
+  natsdata: {}
+  artifacts: {}

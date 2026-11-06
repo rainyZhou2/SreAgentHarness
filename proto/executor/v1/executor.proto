@@ -1,0 +1,56 @@
+// Remote executor contract (§16.2). Remote workers receive inputs and return
+// results; they never touch the Run/Step tables. Risk classes are assigned by
+// the harness operator, not by GetCapabilities.
+syntax = "proto3";
+package harness.executor.v1;
+option go_package = "go-sre-harness/proto/executor/v1;executorv1";
+
+service ExecutorService {
+  rpc GetCapabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc ExecuteStep(ExecuteStepRequest) returns (ExecuteStepResponse);
+  rpc CancelAttempt(CancelAttemptRequest) returns (CancelAttemptResponse);
+}
+
+message CapabilitiesRequest {
+  string protocol_version = 1; // harness side, e.g. "v1"
+}
+
+message ToolSpec {
+  string name = 1;
+  string version = 2;
+  string description = 3;      // untrusted metadata
+  string input_schema_json = 4;
+}
+
+message CapabilitiesResponse {
+  repeated string names = 1;
+  string protocol_version = 2;
+  repeated ToolSpec tools = 3;
+}
+
+message ExecuteStepRequest {
+  string tenant_id = 1;
+  string run_id = 2;
+  string step_id = 3;
+  string attempt_id = 4;
+  string executor = 5;
+  string input_ref = 6;
+  string context_snapshot_id = 7;
+  int64 fence_token = 8;
+  string idempotency_key = 9;
+  int64 deadline_unix_ms = 10;
+  bytes input_json = 11;       // inline tool arguments
+}
+
+message ExecuteStepResponse {
+  string result_ref = 1;
+  string result_hash = 2;
+  string status = 3;           // SUCCEEDED | FAILED | REJECTED (not dispatched) | UNKNOWN
+  string error_code = 4;
+  string external_operation_id = 5;
+  bytes result_json = 6;       // inline result
+  string error_message = 7;
+}
+
+message CancelAttemptRequest { string attempt_id = 1; }
+message CancelAttemptResponse { bool accepted = 1; }

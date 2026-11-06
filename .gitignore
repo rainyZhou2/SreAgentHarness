@@ -1,0 +1,17 @@
+# runtime data (local artifact store)
+/data/
+
+# build output
+/desktop/build/bin/
+/harness
+*.test
+*.out
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# local env and secrets
+.env
+.env.*

@@ -1,0 +1,23 @@
+# Plugin configuration. Kinds left out keep their environment-derived
+# defaults (see README). ${VAR} and ${VAR:-default} are expanded.
+settings:
+  model_alias: sre-reasoning
+
+strategy:
+  default: llm
+  aliases: {rule_based_demo: llm}
+
+plugins:
+  artifact_store: {name: fs, config: {root: "${HARNESS_ARTIFACT_DIR:-./data/artifacts}"}}
+  tools:
+    - demo
+    - name: hello
+      config: {greeting: "Hi"}
+  policy:
+    name: freeze_window
+    config: {deny: ["demo.restart"]}
+  api: [memory, eval, hello]
+  job:
+    - {name: consolidator, config: {interval: 10s}}
+    - {name: rollout_monitor, config: {interval: 1m}}
+    - {name: retention, config: {interval: 5m, outbox_retention: 24h}}

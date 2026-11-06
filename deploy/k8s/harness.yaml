@@ -1,0 +1,173 @@
+# Minimal Kubernetes manifests. Assumes an external PostgreSQL and NATS, and a
+# Secret "harness" with keys database-url, nats-url, tokens.json
+# (and optionally anthropic-api-key). The FS artifact store needs a
+# ReadWriteMany volume shared by api/worker/scheduler; use S3/MinIO in production.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sre-harness, namespace: sre-harness}
+---
+# The worker restarts Deployments only in namespaces listed in tools.json;
+# grant patch on deployments there (example: prod).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sre-harness-restart, namespace: prod}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sre-harness-restart, namespace: prod}
+subjects: [{kind: ServiceAccount, name: sre-harness, namespace: sre-harness}]
+roleRef: {kind: Role, name: sre-harness-restart, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: harness-tools, namespace: sre-harness}
+data:
+  tools.json: |
+    {"demo_tools": false,
+     "prometheus": {"url": "http://prometheus.monitoring:9090"},
+     "kubernetes": {"in_cluster": true, "namespaces": ["prod"], "dry_run": true}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: harness-artifacts, namespace: sre-harness}
+spec:
+  accessModes: [ReadWriteMany]
+  resources: {requests: {storage: 20Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: harness-migrate, namespace: sre-harness}
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: go-sre-harness:latest
+          args: ["migrate"]
+          env:
+            - {name: HARNESS_DATABASE_URL, valueFrom: {secretKeyRef: {name: harness, key: database-url}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: harness-api, namespace: sre-harness}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: harness-api}}
+  template:
+    metadata: {labels: {app: harness-api}}
+    spec:
+      serviceAccountName: sre-harness
+      containers:
+        - name: api
+          image: go-sre-harness:latest
+          args: ["api"]
+          ports: [{containerPort: 8080, name: http}]
+          env:
+            - {name: HARNESS_DATABASE_URL, valueFrom: {secretKeyRef: {name: harness, key: database-url}}}
+            - {name: HARNESS_NATS_URL, valueFrom: {secretKeyRef: {name: harness, key: nats-url}}}
+            - {name: ANTHROPIC_API_KEY, valueFrom: {secretKeyRef: {name: harness, key: anthropic-api-key, optional: true}}}
+            - {name: HARNESS_AUTO_MIGRATE, value: "false"}
+            - {name: HARNESS_HTTP_ADDR, value: "0.0.0.0:8080"}
+            - {name: HARNESS_METRICS_ADDR, value: "0.0.0.0:9090"}
+            - {name: HARNESS_AUTH_MODE, value: "token"}
+            - {name: HARNESS_AUTH_TOKENS_FILE, value: /secrets/tokens.json}
+            - {name: HARNESS_TOOLS_CONFIG, value: /config/tools.json}
+            - {name: HARNESS_REQUIRE_DISTINCT_APPROVER, value: "true"}
+            - {name: HARNESS_ARTIFACT_DIR, value: /data/artifacts}
+          volumeMounts:
+            - {name: artifacts, mountPath: /data}
+            - {name: secrets, mountPath: /secrets, readOnly: true}
+            - {name: tools, mountPath: /config, readOnly: true}
+          readinessProbe: {httpGet: {path: /healthz, port: http}}
+          securityContext: {runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+      volumes:
+        - {name: artifacts, persistentVolumeClaim: {claimName: harness-artifacts}}
+        - {name: secrets, secret: {secretName: harness}}
+        - {name: tools, configMap: {name: harness-tools}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: harness-worker, namespace: sre-harness}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: harness-worker}}
+  template:
+    metadata:
+      labels: {app: harness-worker}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "9090"}
+    spec:
+      serviceAccountName: sre-harness
+      terminationGracePeriodSeconds: 150
+      containers:
+        - name: worker
+          image: go-sre-harness:latest
+          args: ["worker"]
+          env:
+            - {name: HARNESS_DATABASE_URL, valueFrom: {secretKeyRef: {name: harness, key: database-url}}}
+            - {name: HARNESS_NATS_URL, valueFrom: {secretKeyRef: {name: harness, key: nats-url}}}
+            - {name: ANTHROPIC_API_KEY, valueFrom: {secretKeyRef: {name: harness, key: anthropic-api-key, optional: true}}}
+            - {name: HARNESS_AUTO_MIGRATE, value: "false"}
+            - {name: HARNESS_HTTP_ADDR, value: "0.0.0.0:8080"}
+            - {name: HARNESS_METRICS_ADDR, value: "0.0.0.0:9090"}
+            - {name: HARNESS_AUTH_MODE, value: "token"}
+            - {name: HARNESS_AUTH_TOKENS_FILE, value: /secrets/tokens.json}
+            - {name: HARNESS_TOOLS_CONFIG, value: /config/tools.json}
+            - {name: HARNESS_REQUIRE_DISTINCT_APPROVER, value: "true"}
+            - {name: HARNESS_ARTIFACT_DIR, value: /data/artifacts}
+          volumeMounts:
+            - {name: artifacts, mountPath: /data}
+            - {name: secrets, mountPath: /secrets, readOnly: true}
+            - {name: tools, mountPath: /config, readOnly: true}
+          securityContext: {runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+      volumes:
+        - {name: artifacts, persistentVolumeClaim: {claimName: harness-artifacts}}
+        - {name: secrets, secret: {secretName: harness}}
+        - {name: tools, configMap: {name: harness-tools}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: harness-scheduler, namespace: sre-harness}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: harness-scheduler}}
+  template:
+    metadata: {labels: {app: harness-scheduler}}
+    spec:
+      serviceAccountName: sre-harness
+      containers:
+        - name: scheduler
+          image: go-sre-harness:latest
+          args: ["scheduler"]
+          env:
+            - {name: HARNESS_DATABASE_URL, valueFrom: {secretKeyRef: {name: harness, key: database-url}}}
+            - {name: HARNESS_NATS_URL, valueFrom: {secretKeyRef: {name: harness, key: nats-url}}}
+            - {name: ANTHROPIC_API_KEY, valueFrom: {secretKeyRef: {name: harness, key: anthropic-api-key, optional: true}}}
+            - {name: HARNESS_AUTO_MIGRATE, value: "false"}
+            - {name: HARNESS_HTTP_ADDR, value: "0.0.0.0:8080"}
+            - {name: HARNESS_METRICS_ADDR, value: "0.0.0.0:9090"}
+            - {name: HARNESS_AUTH_MODE, value: "token"}
+            - {name: HARNESS_AUTH_TOKENS_FILE, value: /secrets/tokens.json}
+            - {name: HARNESS_TOOLS_CONFIG, value: /config/tools.json}
+            - {name: HARNESS_REQUIRE_DISTINCT_APPROVER, value: "true"}
+            - {name: HARNESS_ARTIFACT_DIR, value: /data/artifacts}
+          volumeMounts:
+            - {name: artifacts, mountPath: /data}
+            - {name: secrets, mountPath: /secrets, readOnly: true}
+            - {name: tools, mountPath: /config, readOnly: true}
+          securityContext: {runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+      volumes:
+        - {name: artifacts, persistentVolumeClaim: {claimName: harness-artifacts}}
+        - {name: secrets, secret: {secretName: harness}}
+        - {name: tools, configMap: {name: harness-tools}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: harness-api, namespace: sre-harness}
+spec:
+  selector: {app: harness-api}
+  ports: [{name: http, port: 80, targetPort: http}]

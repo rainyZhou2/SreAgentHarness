@@ -1,0 +1,69 @@
+# Full plugin configuration for the stock binary (cmd/harness).
+# Run `harness plugins` to list every compiled-in plugin.
+# ${VAR} / ${VAR:-default} are expanded from the environment.
+settings:
+  model_alias: sre-reasoning   # default alias for strategies
+  model_effort: ""             # low|medium|high|xhigh|max
+
+models:
+  daily_budget_usd: 50
+  max_inflight_per_tenant: 32
+
+strategy:
+  default: llm
+  aliases: {rule_based_demo: llm}
+
+plugins:
+  telemetry: [otlp]                      # OTEL_EXPORTER_OTLP_ENDPOINT enables export
+  artifact_store: {name: fs, config: {root: /var/lib/harness/artifacts}}
+  broker: {name: nats, config: {url: "${HARNESS_NATS_URL}"}}
+  stream_bus: {name: nats, config: {url: "${HARNESS_NATS_URL}"}}
+  policy: {name: default, config: {environment: production, approval_ttl: 30m}}
+
+  model_provider:                        # route preference follows this order
+    - {name: anthropic, config: {api_key: "${ANTHROPIC_API_KEY}"}}
+    - name: openai
+      enabled: false
+      config: {base_url: "http://vllm:8000/v1", model: "qwen3-32b"}
+    - scripted                           # deterministic fallback
+
+  tools:
+    - {name: demo, enabled: false}
+    - name: prometheus
+      config: {url: "http://prometheus:9090", max_series: 50}
+    - name: kubernetes
+      config: {in_cluster: true, namespaces: [shop], dry_run: true}
+    - name: mcp
+      instance: mcp:runbooks
+      config:
+        name: runbooks
+        url: "http://runbooks-mcp:8080/mcp"
+        allow: {search: {risk: R0}}
+
+  embedder: hashing
+  memory_retriever: {name: hybrid, config: {top_k: 5}}
+  strategy: [llm, rule_based]
+  grader: substring
+  job:
+    - {name: consolidator, config: {interval: 10s}}
+    - {name: rollout_monitor, config: {interval: 1m}}
+    - {name: retention, config: {interval: 5m, outbox_retention: 24h, audit_retention: 2160h}}
+  authenticator:
+    - {name: oidc, config: {issuer: "https://idp.example.com", audience: sre-harness}}
+    - {name: token, config: {tokens_file: /etc/harness/tokens.json}}
+  api: [memory, eval, extensions]
+
+  # Agent profile versions (immutable per version; bump the version to change one).
+  profile_source:
+    - builtin
+    # - {name: file, config: {path: /etc/harness/profiles}}
+  # Soft score for model endpoints; hard filters always apply.
+  route_policy: priority
+  # route_policy: {name: weighted, config: {cost_usd: 100, failures: 20}}
+  context_assembler: sectioned
+  # context_assembler: {name: sectioned, config: {instructions_file: /etc/harness/instructions.md}}
+  compactor: {name: deterministic, config: {keep: 2}}
+  # Notifications from the committed event log (at-least-once, de-duplicate on event_id).
+  event_sink: []
+  # event_sink:
+  #   - {name: webhook, instance: slack-approvals, config: {url: "${SLACK_WEBHOOK_URL}", format: slack, types: ["approval.requested", "run.failed"]}}

@@ -1,0 +1,5 @@
+[
+  {"sha256": "<output of: harness hash-token YOUR_TOKEN>", "tenant": "tenant-a", "subject": "oncall-bot", "roles": ["operator"]},
+  {"sha256": "<…>", "tenant": "tenant-a", "subject": "alice", "roles": ["approver"]},
+  {"sha256": "<…>", "tenant": "tenant-a", "subject": "admin", "roles": ["admin"]}
+]
