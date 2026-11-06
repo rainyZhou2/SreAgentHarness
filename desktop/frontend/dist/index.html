@@ -10,16 +10,17 @@
 <div class="app">
   <aside class="sidebar">
     <div class="side-head">
-      <div class="brand"><span class="logo">◆</span> SRE Harness</div>
+      <div class="brand"><img class="brand-logo" src="logo.png" alt=""> SRE Harness</div>
     </div>
-    <button id="btn-new" class="new-chat"><span class="plus">＋</span> New chat</button>
-    <button id="btn-inbox" class="side-link inbox-link"><span class="side-ico">✓</span> Approvals <span id="inbox-count" class="inbox-count" hidden></span></button>
-    <div class="side-search"><input id="chat-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false"></div>
+    <button id="btn-new" class="new-chat"><svg class="ico-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> <span data-i18n="New chat">New chat</span></button>
+    <button id="btn-inbox" class="side-link inbox-link"><span class="side-ico"><svg class="ico-svg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></span> <span data-i18n="Approvals">Approvals</span> <span id="inbox-count" class="inbox-count" hidden></span></button>
+    <div class="side-search"><input id="chat-search" type="search" data-i18n-placeholder="Search chats" placeholder="Search chats" autocomplete="off" spellcheck="false"></div>
     <div class="side-label"><span id="chats-label">Chats</span><button id="btn-archived" class="link-btn tiny">Archived</button></div>
     <ul id="chats" class="chats"></ul>
     <div class="side-foot">
-      <button id="btn-customize" class="side-link"><span class="side-ico">⚙</span> Customize</button>
-      <button id="btn-plugins" class="side-link"><span class="side-ico">▦</span> Plugins</button>
+      <button id="btn-customize" class="side-link"><span class="side-ico"><svg class="ico-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></span> <span data-i18n="Customize">Customize</span></button>
+      <button id="btn-plugins" class="side-link"><span class="side-ico"><svg class="ico-svg" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg></span> <span data-i18n="Plugins">Plugins</span></button>
+      <button id="btn-settings" class="side-link"><span class="side-ico"><svg class="ico-svg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></svg></span> <span data-i18n="Settings">Settings</span></button>
       <button id="btn-conn" class="side-link who-btn"><span class="avatar-sm" id="who-initial">?</span><span id="who" class="who">Not connected</span></button>
     </div>
   </aside>
@@ -32,10 +33,11 @@
     <div class="composer-wrap" id="composer-wrap">
       <form id="composer" class="composer">
         <div id="slash" class="slash" hidden></div>
-        <textarea id="input" rows="1" placeholder="Describe the incident, or ask a follow-up…" spellcheck="false"></textarea>
+        <textarea id="input" rows="1" data-i18n-placeholder="Describe the incident, or ask a follow-up…" placeholder="Describe the incident, or ask a follow-up…" spellcheck="false"></textarea>
         <div class="composer-bar">
-          <span class="hint" id="hint">Enter to send · Shift+Enter for a new line</span>
-          <button type="submit" id="send" class="send" title="Send" disabled>↑</button>
+          <button type="button" id="btn-slash" class="composer-tool" data-i18n-title="Skills & tools" title="Skills & tools"><span class="slash-key">/</span> <span data-i18n="Skills & tools">Skills & tools</span></button>
+          <span class="hint" id="hint"></span>
+          <button type="submit" id="send" class="send" title="Send" disabled></button>
         </div>
       </form>
     </div>
@@ -44,25 +46,25 @@
 
 <dialog id="dlg-conn">
   <form id="form-conn" method="dialog">
-    <h2>Connection</h2>
-    <label>Server URL <input name="server_url" required autocomplete="off" spellcheck="false"></label>
+    <h2 data-i18n="Connection">Connection</h2>
+    <label><span data-i18n="Server URL">Server URL</span> <input name="server_url" required autocomplete="off" spellcheck="false"></label>
     <div class="seg">
-      <label><input type="radio" name="mode" value="dev"> Development headers</label>
-      <label><input type="radio" name="mode" value="bearer"> Bearer token</label>
+      <label><input type="radio" name="mode" value="dev"> <span data-i18n="Development headers">Development headers</span></label>
+      <label><input type="radio" name="mode" value="bearer"> <span data-i18n="Bearer token">Bearer token</span></label>
     </div>
     <div class="grid2" data-mode="dev">
-      <label>Tenant <input name="tenant" autocomplete="off" spellcheck="false"></label>
-      <label>Actor <input name="actor" autocomplete="off" spellcheck="false"></label>
-      <label class="span2">Roles <input name="roles" placeholder="viewer, operator, approver, admin" autocomplete="off" spellcheck="false"></label>
+      <label><span data-i18n="Tenant">Tenant</span> <input name="tenant" autocomplete="off" spellcheck="false"></label>
+      <label><span data-i18n="Actor">Actor</span> <input name="actor" autocomplete="off" spellcheck="false"></label>
+      <label class="span2"><span data-i18n="Roles">Roles</span> <input name="roles" placeholder="viewer, operator, approver, admin" autocomplete="off" spellcheck="false"></label>
     </div>
     <div data-mode="bearer">
-      <label>Token <input name="token" type="password" autocomplete="off"></label>
-      <p class="muted small">The token stays in memory and is not saved to disk.</p>
+      <label><span data-i18n="Token">Token</span> <input name="token" type="password" autocomplete="off"></label>
+      <p class="muted small" data-i18n="The token stays in memory and is not saved to disk.">The token stays in memory and is not saved to disk.</p>
     </div>
     <p id="conn-error" class="error" hidden></p>
     <div class="actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
-      <button type="submit" class="btn primary">Connect</button>
+      <button type="button" class="btn ghost" data-close data-i18n="Cancel">Cancel</button>
+      <button type="submit" class="btn primary" data-i18n="Connect">Connect</button>
     </div>
   </form>
 </dialog>
@@ -70,9 +72,9 @@
 <dialog id="dlg-reason">
   <form id="form-reason" method="dialog">
     <h2 id="reason-title">Reason</h2>
-    <label>Reason (optional) <textarea name="reason" rows="3"></textarea></label>
+    <label><span data-i18n="Reason (optional)">Reason (optional)</span> <textarea name="reason" rows="3"></textarea></label>
     <div class="actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="button" class="btn ghost" data-close data-i18n="Cancel">Cancel</button>
       <button type="submit" class="btn primary" id="reason-ok">OK</button>
     </div>
   </form>
@@ -84,7 +86,7 @@
     <p id="ask-text" class="muted"></p>
     <label id="ask-label" hidden><span id="ask-label-text"></span> <input name="value" autocomplete="off" spellcheck="false"></label>
     <div class="actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="button" class="btn ghost" data-close data-i18n="Cancel">Cancel</button>
       <button type="submit" class="btn primary" id="ask-ok">OK</button>
     </div>
   </form>
@@ -92,6 +94,7 @@
 
 <div id="menu" class="menu" hidden></div>
 <div id="toast" class="toast" hidden></div>
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

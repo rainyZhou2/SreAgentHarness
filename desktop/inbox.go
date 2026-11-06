@@ -68,7 +68,7 @@ func (a *App) chatMarkdown(sessionID string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	title := "Chat"
+	title := a.tr("Chat", "对话")
 	if v, ok := tr["view"].(map[string]any); ok {
 		if s, ok := v["session"].(map[string]any); ok {
 			if t, _ := s["title"].(string); t != "" {
@@ -77,19 +77,20 @@ func (a *App) chatMarkdown(sessionID string) (string, string, error) {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n\n_Exported from SRE Harness on %s_\n\n", title, time.Now().Format("2006-01-02 15:04"))
+	fmt.Fprintf(&b, a.tr("# %s\n\n_Exported from SRE Harness on %s_\n\n", "# %s\n\n_导出自 SRE Harness，%s_\n\n"), title, time.Now().Format("2006-01-02 15:04"))
+	you, agent := a.tr("You", "你"), a.tr("Agent", "Agent")
 	for _, t := range tr["turns"].([]TurnView) {
-		fmt.Fprintf(&b, "## You\n\n%s\n\n", strings.TrimSpace(t.Text))
+		fmt.Fprintf(&b, "## %s\n\n%s\n\n", you, strings.TrimSpace(t.Text))
 		if t.RunID == "" {
 			fmt.Fprintf(&b, "_(%s)_\n\n", strings.ToLower(t.Status))
 			continue
 		}
 		view, err := a.RunView(t.RunID)
 		if err != nil {
-			fmt.Fprintf(&b, "_(could not load the reply: %v)_\n\n", err)
+			fmt.Fprintf(&b, a.tr("_(could not load the reply: %v)_\n\n", "_（无法加载回复：%v）_\n\n"), err)
 			continue
 		}
-		b.WriteString("## Agent\n\n")
+		fmt.Fprintf(&b, "## %s\n\n", agent)
 		if steps, ok := view["steps"].(map[string]any); ok {
 			for _, x := range asList(steps["steps"]) {
 				st, _ := x.(map[string]any)
@@ -98,7 +99,7 @@ func (a *App) chatMarkdown(sessionID string) (string, string, error) {
 				}
 				in, _ := st["input"].(map[string]any)
 				name, _ := in["name"].(string)
-				fmt.Fprintf(&b, "- tool `%s` %s → %v\n", name, compactJSON(in["args"]), st["status"])
+				fmt.Fprintf(&b, a.tr("- tool `%s` %s → %v\n", "- 工具 `%s` %s → %v\n"), name, compactJSON(in["args"]), st["status"])
 			}
 		}
 		answer, status := "", ""
@@ -148,7 +149,7 @@ func (a *App) ExportChat(sessionID string) (string, error) {
 	}
 	name := strings.TrimSpace(unsafeName.ReplaceAllString(title, " "))
 	if name == "" {
-		name = "chat"
+		name = a.tr("chat", "对话")
 	}
 	if len(name) > 60 {
 		name = name[:60]
@@ -157,7 +158,7 @@ func (a *App) ExportChat(sessionID string) (string, error) {
 	home, _ := os.UserHomeDir()
 	path := filepath.Join(home, "Downloads", name)
 	if a.native {
-		path, err = runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{DefaultFilename: name, Title: "Export chat",
+		path, err = runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{DefaultFilename: name, Title: a.tr("Export chat", "导出对话"),
 			DefaultDirectory: filepath.Join(home, "Downloads"),
 			Filters:          []runtime.FileFilter{{DisplayName: "Markdown", Pattern: "*.md"}}})
 		if err != nil {
@@ -182,7 +183,7 @@ func (a *App) PendingApprovals() (map[string]any, error) { return a.get("/v1/app
 // chat: it reads the run version and sends the command.
 func (a *App) ApproveFromInbox(runID, approvalID, actionHash string, approve bool, reason string) (map[string]any, error) {
 	if runID == "" || approvalID == "" {
-		return nil, errors.New("run and approval are required")
+		return nil, errors.New(a.tr("run and approval are required", "缺少 Run 或审批"))
 	}
 	run, err := a.get("/v1/runs/" + url.PathEscape(runID))
 	if err != nil {
@@ -219,10 +220,14 @@ func (a *App) watchApprovals() {
 			})
 		}
 	}
-	t := time.NewTicker(8 * time.Second)
-	defer t.Stop()
+	failing := false
 	for {
-		if out, err := a.PendingApprovals(); err == nil {
+		out, err := a.PendingApprovals()
+		if err != nil && !failing && a.Connected() {
+			a.logEvent("warn", "approvals refresh failed: %v", err)
+		}
+		failing = err != nil
+		if err == nil {
 			list := asList(out["approvals"])
 			a.emit("approvals:update", list)
 			now := map[string]bool{}
@@ -237,25 +242,41 @@ func (a *App) watchApprovals() {
 			}
 			seen, first = now, false
 		}
+		t := time.NewTimer(a.pollInterval()) // read every round: the setting can change
 		select {
 		case <-a.ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 		case <-a.inboxKick:
+			t.Stop()
 		}
 	}
 }
 
+// pollInterval is how often the approvals inbox refreshes.
+func (a *App) pollInterval() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if s := a.settings.PollSeconds; s >= 3 && s <= 300 {
+		return time.Duration(s) * time.Second
+	}
+	return 8 * time.Second
+}
+
 func (a *App) notifyApproval(ap map[string]any) {
-	if !a.native {
+	a.mu.Lock()
+	off := a.settings.NotifyOff
+	a.mu.Unlock()
+	if !a.native || off {
 		return
 	}
 	str := func(k string) string { s, _ := ap[k].(string); return s }
-	body := fmt.Sprintf("%s %s on %s", str("risk_class"), str("tool_name"), str("target"))
+	body := fmt.Sprintf(a.tr("%s %s on %s", "%s %s，目标 %s"), str("risk_class"), str("tool_name"), str("target"))
 	if t := str("session_title"); t != "" {
 		body += " · " + t
 	}
-	_ = runtime.SendNotification(a.ctx, runtime.NotificationOptions{ID: str("id"), Title: "Approval needed", Body: body,
+	_ = runtime.SendNotification(a.ctx, runtime.NotificationOptions{ID: str("id"), Title: a.tr("Approval needed", "需要审批"), Body: body,
 		Data: map[string]interface{}{"run_id": str("run_id"), "session_id": str("session_id"), "approval_id": str("id")}})
 }
 
