@@ -876,13 +876,15 @@ async function showPlugins() {
   const active = new Set((data.active || []).map((p) => p.kind + "/" + p.name));
   const body = (data.kinds || []).map((k) => {
     const list = (data.compiled || []).filter((p) => p.kind === k.name);
-    return h("div", { class: "kind" }, h("h3", {}, k.name, k.multi ? " · " + t("multiple") : ""), h("div", { class: "muted small" }, k.doc || ""),
-      list.length > 0 && h("table", {}, h("tbody", {}, list.map((p) => h("tr", {},
-        h("td", { class: "mono" }, p.name),
-        h("td", {}, active.has(p.kind + "/" + p.name) ? badge("ACTIVE") : h("span", { class: "muted small" }, t("available"))),
-        h("td", { class: "muted" }, p.doc || ""))))));
+    return h("section", { class: "kind" }, h("h3", {}, k.name, k.multi ? " · " + t("multiple") : ""), h("div", { class: "muted small" }, k.doc || ""),
+      list.length > 0 && h("div", { class: "plugin-grid" }, list.map((p) => h("article", { class: "plugin-card" },
+        h("div", { class: "plugin-top" },
+          h("span", { class: "plugin-name mono" }, p.name),
+          active.has(p.kind + "/" + p.name) ? badge("ACTIVE") : h("span", { class: "badge s-idle" }, t("available"))),
+        p.doc ? h("p", { class: "plugin-doc" }, p.doc) : null))));
   });
-  if ((data.tools || []).length) body.push(h("div", { class: "kind" }, h("h3", {}, t("registered tools")), h("div", { class: "mono" }, data.tools.join("   "))));
+  if ((data.tools || []).length) body.push(h("section", { class: "kind" }, h("h3", {}, t("registered tools")),
+    h("div", { class: "plugin-tools" }, data.tools.map((x) => h("span", { class: "plugin-chip mono" }, x)))));
   thread.replaceChildren(h("div", { class: "plugins" }, h("h1", {}, t("Plugins")), body));
 }
 
