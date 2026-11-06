@@ -15,3 +15,10 @@
 # local env and secrets
 .env
 .env.*
+
+# tests stay local (not uploaded)
+*_test.go
+/internal/testutil/
+testdata/
+coverage.*
+*.coverprofile
