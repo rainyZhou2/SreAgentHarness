@@ -53,6 +53,7 @@ const ZH = {
   "Reason (optional)": "原因（可选）",
   // connection
   "Connection": "连接",
+  "Connect to your harness workspace": "连接到你的 harness 工作区",
   "Server URL": "服务器地址",
   "Development headers": "开发模式请求头",
   "Bearer token": "Bearer Token",
@@ -60,6 +61,7 @@ const ZH = {
   "Actor": "操作者",
   "Roles": "角色",
   "Token": "Token",
+  "Development mode trusts request headers; use it locally only.": "开发模式信任请求头，仅用于本机调试。",
   "The token stays in memory and is not saved to disk.": "Token 只保存在内存中，不会写入磁盘。",
   "Connect": "连接",
   // settings

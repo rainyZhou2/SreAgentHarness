@@ -46,9 +46,15 @@
 
 <dialog id="dlg-conn">
   <form id="form-conn" method="dialog">
-    <h2 data-i18n="Connection">Connection</h2>
-    <label><span data-i18n="Server URL">Server URL</span> <input name="server_url" required autocomplete="off" spellcheck="false"></label>
-    <div class="seg">
+    <header class="dlg-head">
+      <img class="dlg-mark" src="logo.png" alt="">
+      <div>
+        <h2 data-i18n="Connection">Connection</h2>
+        <p class="dlg-sub" data-i18n="Connect to your harness workspace">Connect to your harness workspace</p>
+      </div>
+    </header>
+    <label class="field"><span data-i18n="Server URL">Server URL</span> <input name="server_url" required autocomplete="off" spellcheck="false"></label>
+    <div class="seg" role="radiogroup" aria-label="Authentication">
       <label><input type="radio" name="mode" value="dev"> <span data-i18n="Development headers">Development headers</span></label>
       <label><input type="radio" name="mode" value="bearer"> <span data-i18n="Bearer token">Bearer token</span></label>
     </div>
@@ -57,6 +63,7 @@
       <label><span data-i18n="Actor">Actor</span> <input name="actor" autocomplete="off" spellcheck="false"></label>
       <label class="span2"><span data-i18n="Roles">Roles</span> <input name="roles" placeholder="viewer, operator, approver, admin" autocomplete="off" spellcheck="false"></label>
     </div>
+    <p class="conn-hint" data-mode="dev" data-i18n="Development mode trusts request headers; use it locally only.">Development mode trusts request headers; use it locally only.</p>
     <div data-mode="bearer">
       <label><span data-i18n="Token">Token</span> <input name="token" type="password" autocomplete="off"></label>
       <p class="muted small" data-i18n="The token stays in memory and is not saved to disk.">The token stays in memory and is not saved to disk.</p>
