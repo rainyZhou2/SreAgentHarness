@@ -138,10 +138,13 @@ const ZH = {
   "OpenAI-compatible / self-hosted": "OpenAI 兼容 / 自建服务",
   "Ark endpoint ID (ep-…) or model name": "方舟推理接入点 ID（ep-…）或模型名",
   // chat
-  "What's going on?": "发生了什么？",
-  "Describe an incident. The agent investigates with tools and asks you before risky actions.":
-    "描述一个故障。Agent 会用工具排查，执行高风险操作前会先征求你的同意。",
-  "Describe the incident, or ask a follow-up…": "描述故障，或继续追问…",
+  "What can I help with?": "有什么可以帮你？",
+  "Ask a question, describe an incident, or request a change. The agent answers directly, investigates with tools when needed, and asks before risky actions.":
+    "提问、描述故障或发起变更都可以。Agent 会直接回答，需要时用工具排查，高风险操作前会先征求你的同意。",
+  "Ask a question, or describe an incident…": "提问，或描述故障…",
+  "What's the difference between a Deployment and a StatefulSet?": "Deployment 和 StatefulSet 有什么区别？",
+  "Why did checkout p99 latency rise this week?": "checkout 这周的 p99 延迟为什么升高了？",
+  "Restart the checkout deployment and confirm recovery": "重启 checkout 并确认恢复",
   "Send failed: {err}": "发送失败：{err}",
   "{cmd} rejected: {reason}": "{cmd} 被拒绝：{reason}",
   "{cmd} failed: {err}": "{cmd} 失败：{err}",
