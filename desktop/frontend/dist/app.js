@@ -8,9 +8,9 @@ const $ = (sel, root = document) => root.querySelector(sel);
 
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 const SUGGESTIONS = [
-  "checkout p99 latency doubled after the last deploy",
-  "remediate latency service=checkout",
-  "payments error rate is spiking, what changed?",
+  "What's the difference between a Deployment and a StatefulSet?",
+  "Why did checkout p99 latency rise this week?",
+  "Restart the checkout deployment and confirm recovery",
 ];
 
 const state = {
@@ -447,9 +447,9 @@ function render(scrollToEnd) {
   if (!state.turns.length) {
     thread.replaceChildren(h("div", { class: "hero" },
       h("img", { class: "hero-logo", src: "logo.png", alt: "" }),
-      h("h1", {}, t("What's going on?")),
-      h("div", { class: "muted" }, t("Describe an incident. The agent investigates with tools and asks you before risky actions.")),
-      h("div", { class: "chips" }, SUGGESTIONS.map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)))));
+      h("h1", {}, t("What can I help with?")),
+      h("div", { class: "muted" }, t("Ask a question, describe an incident, or request a change. The agent answers directly, investigates with tools when needed, and asks before risky actions.")),
+      h("div", { class: "chips" }, SUGGESTIONS.map((s) => h("button", { class: "chip", onclick: () => send(t(s)) }, t(s))))));
   } else {
     thread.replaceChildren(...state.turns.map(renderTurn));
   }
