@@ -448,7 +448,7 @@ function render(scrollToEnd) {
     thread.replaceChildren(h("div", { class: "hero" },
       h("img", { class: "hero-logo", src: "logo.png", alt: "" }),
       h("h1", {}, t("What can I help with?")),
-      h("div", { class: "muted" }, t("Ask a question, describe an incident, or request a change. The agent answers directly, investigates with tools when needed, and asks before risky actions.")),
+      h("div", { class: "muted" }, t("Tell me what's on your mind. I'll work out what you need and help from there.")),
       h("div", { class: "chips" }, SUGGESTIONS.map((s) => h("button", { class: "chip", onclick: () => send(t(s)) }, t(s))))));
   } else {
     thread.replaceChildren(...state.turns.map(renderTurn));
