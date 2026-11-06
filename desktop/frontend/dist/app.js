@@ -1451,7 +1451,7 @@ function renderToolsTab() {
       const allowed = !!d.allowed_by_profile;
       const on = allowed && d.enabled !== false;
       return h("article", { class: "tool-card" + (on ? "" : " off"), title: desc },
-        h("div", { class: "tool-head" },
+        h("div", { class: "tool-card-head" },
           h("span", { class: "tool-name mono" }, d.name),
           h("span", { class: "risk-tag r" + (d.risk || "R0").slice(1) }, d.risk),
           !allowed ? h("span", { class: "badge s-idle" }, t("blocked"))
