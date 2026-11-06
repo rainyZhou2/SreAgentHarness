@@ -392,6 +392,27 @@ const ZH = {
   "Disabled {name}": "已关闭 {name}",
   "allowed": "允许",
   "blocked": "禁止",
+  // gallery
+  "Gallery": "广场",
+  "Ready-made playbooks for common SRE work. Add one and it becomes a skill in Customize.":
+    "常用 SRE 场景的现成技能。添加后会出现在自定义的技能列表里。",
+  "Search skills": "搜索技能",
+  "All": "全部",
+  "Diagnosis": "排障",
+  "Changes": "变更",
+  "Observability": "可观测性",
+  "Incident response": "故障响应",
+  "No matching skills": "没有匹配的技能",
+  "Try another keyword or category.": "换个关键词或分类试试。",
+  "Installed": "已安装",
+  "Open": "打开",
+  "Add": "添加",
+  "Added {name}": "已添加 {name}",
+  "Adding skills needs the admin role.": "添加技能需要 admin 角色。",
+  "You're on the built-in scripted model. Add a real model for better answers.":
+    "当前使用内置脚本模型，配置真实模型后回答会更好。",
+  "Configure a model": "配置模型",
+  "Toggle {name}": "切换 {name}",
 };
 
 const i18n = { lang: "en" };
