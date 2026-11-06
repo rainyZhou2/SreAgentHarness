@@ -1432,18 +1432,22 @@ function uniqueModelName(base) {
 function renderToolsTab() {
   const tl = cz.tools || {};
   const list = tl.tools || [];
-  const src = (d) => d.source || t("built-in");
+  const src = (d) => (!d.source || d.source === "native") ? t("built-in") : d.source;
   return h("div", {},
     h("p", { class: "muted small" }, t("Default profile") + " ", h("span", { class: "mono" }, tl.profile || "?"),
       t(". Tools it does not allow are hidden from runs that use it. In a chat, “use <tool> {json}” asks the agent to call a tool.")),
-    h("table", { class: "tool-table" },
-      h("thead", {}, h("tr", {}, h("th", {}, t("Tool")), h("th", {}, t("Source")), h("th", {}, t("Risk")), h("th", {}, t("Profile")))),
-      h("tbody", {}, list.map((d) => h("tr", { class: d.allowed_by_profile ? "" : "off" },
-        h("td", {}, h("div", { class: "mono" }, d.name), h("div", { class: "muted small" }, (d.description || "").replace(/^\[[^\]]*\]\s*/, ""))),
-        h("td", { class: "small" }, src(d)),
-        h("td", {}, h("span", { class: "risk-tag r" + (d.risk || "R0").slice(1) }, d.risk), d.trust ? h("span", { class: "muted small" }, " " + d.trust) : null),
-        h("td", {}, d.allowed_by_profile ? h("span", { class: "badge s-ok" }, t("allowed")) : h("span", { class: "badge s-idle" }, t("blocked"))),
-      )))));
+    h("div", { class: "tool-grid" }, list.map((d) => {
+      const desc = (d.description || "").replace(/^\[[^\]]*\]\s*/, "");
+      return h("article", { class: "tool-card" + (d.allowed_by_profile ? "" : " off"), title: desc },
+        h("div", { class: "tool-head" },
+          h("span", { class: "tool-name mono" }, d.name),
+          h("span", { class: "risk-tag r" + (d.risk || "R0").slice(1) }, d.risk),
+          d.allowed_by_profile ? h("span", { class: "badge s-ok" }, t("allowed")) : h("span", { class: "badge s-idle" }, t("blocked"))),
+        h("p", { class: "tool-desc" }, desc),
+        h("div", { class: "tool-foot" },
+          h("span", { class: "tool-source" }, src(d)),
+          d.trust ? h("span", { class: "tool-trust" }, d.trust) : null));
+    })));
 }
 
 // ---------- settings: appearance, connection, models, notifications, about ----------
