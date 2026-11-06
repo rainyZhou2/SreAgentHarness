@@ -463,6 +463,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	}
 	decision.SchemaVersion = 1
 	decision.ContextSnapshotID = lease.ContextSnapshotID
+	if decision.Intent == "" {
+		decision.Intent = domain.IntentTask
+	}
 	if decision.RenderedRequestHash != "" {
 		// Model strategies bind the exact rendered request (§33.2).
 		contextHash = decision.RenderedRequestHash
@@ -473,7 +476,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return domain.StepSuccess{}, err
 	}
 	res := domain.StepSuccess{OutputRef: outRef, OutputHash: outHash, ArtifactKind: "decision", ContextHash: contextHash}
-	summary := map[string]any{"decision_kind": decision.Kind, "reason_summary": truncate(decision.ReasonSummary, 500),
+	summary := map[string]any{"decision_kind": decision.Kind, "intent": decision.Intent, "reason_summary": truncate(decision.ReasonSummary, 500),
 		"hypotheses": len(decision.Hypotheses)}
 	if decision.ModelRequestID != "" {
 		summary["model_request_id"], summary["model"], summary["manifest_ref"] = decision.ModelRequestID, decision.Model, decision.ManifestRef
@@ -484,7 +487,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 
 	if decision.Kind == domain.DecisionFinal {
 		resultRef, _, err := w.put(ctx, lease.TenantID, "result", map[string]any{
-			"answer": decision.Answer, "hypotheses": decision.Hypotheses, "decision_ref": outRef})
+			"answer": decision.Answer, "intent": decision.Intent, "hypotheses": decision.Hypotheses, "decision_ref": outRef})
 		if err != nil {
 			return domain.StepSuccess{}, err
 		}
@@ -556,6 +559,7 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		if s.Kind != domain.StepTool {
 			continue
 		}
+		in.HasToolSteps = true
 		var call domain.ToolCall
 		if err := w.get(ctx, lease.TenantID, s.InputRef, &call); err != nil {
 			return in, err

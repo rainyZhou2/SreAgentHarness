@@ -21,6 +21,7 @@ An SRE Cognitive Agent Harness implemented from the design RFC [`GoAgentHarness.
 | | Claude (official Go SDK, default `claude-opus-5-5`, adaptive thinking, prompt caching) and an OpenAI-compatible adapter | `gateway/anthropic`, `gateway/openai` |
 | | Request/attempt/usage ledger (ESTIMATED → REPORTED revisions), cost queries, token-stream segments persisted + SSE deltas | `pg/model.go`, `stream/` |
 | **Context** | Prompt manifest (per-section hashes, `rendered_request_hash`), checkpoints and fork, deterministic compaction | `cognitive/assembler.go`, `kernel/compact.go`, `pg/checkpoint.go` |
+| **Intent** | Each message is classified as a question, a task or a clarification before acting; questions are answered directly, tasks keep the investigation and approval flow | `cognitive/assembler.go`, `kernel/worker.go` |
 | **Long-term memory** | Redaction + poisoning checks on write; full-text + vector + dependency-graph retrieval, RRF fusion, conflict resolution, pinned per step | `internal/memory`, `pg/memory.go` |
 | | Cold-path consolidator: Run → Experience → candidate memories; operator feedback moves candidates to VALIDATING (an approver activates them) or rejects them | `memory/consolidate.go` |
 | **Evaluation & evolution** | Datasets recorded from real runs (frozen with a manifest hash), offline replay (write tools always blocked) | `internal/eval` |

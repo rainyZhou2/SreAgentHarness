@@ -226,11 +226,22 @@ const (
 	DecisionTool  DecisionKind = "tool"
 )
 
+// Intent is what the user asked for in this turn. It shapes the answer the
+// operator sees; it never relaxes the policy gate.
+type Intent string
+
+const (
+	IntentQuestion      Intent = "question"
+	IntentTask          Intent = "task"
+	IntentClarification Intent = "clarification"
+)
+
 // Decision is the auditable Decision Trace artifact of a reason step (§7.3).
 // It is an explicitly produced explanation, not the model's hidden reasoning.
 type Decision struct {
 	SchemaVersion     int          `json:"schema_version"`
 	Kind              DecisionKind `json:"kind"`
+	Intent            Intent       `json:"intent,omitempty"`
 	ReasonSummary     string       `json:"reason_summary"`
 	Hypotheses        []Hypothesis `json:"hypotheses,omitempty"`
 	Alternatives      []string     `json:"alternatives,omitempty"`
