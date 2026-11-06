@@ -102,8 +102,146 @@ function toast(msg, bad = false) {
 }
 const errText = (e) => (e && e.message) || String(e);
 
-// Minimal Markdown (paragraphs, lists, fenced code, `code`, **bold**) built as DOM.
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Markdown: CommonMark + tables, autolinks and line breaks. Raw HTML stays
+// disabled and link/image targets are restricted, so model output cannot
+// inject markup. Math goes through KaTeX, mermaid blocks become diagrams.
+const mdEngine = (() => {
+  if (!window.markdownit) return null;
+  const engine = window.markdownit({ html: false, linkify: true, breaks: true, typographer: false });
+  const safeHref = (href) => {
+    try {
+      const u = new URL(href, window.location.href);
+      return /^(https?|mailto):$/.test(u.protocol) ? u.href : "";
+    } catch { return ""; }
+  };
+  const linkOpen = engine.renderer.rules.link_open ||
+    ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+  engine.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    if (!safeHref(tokens[idx].attrGet("href"))) tokens[idx].attrSet("href", "#");
+    tokens[idx].attrSet("target", "_blank");
+    tokens[idx].attrSet("rel", "noopener noreferrer");
+    return linkOpen(tokens, idx, options, env, self);
+  };
+  const imageRule = engine.renderer.rules.image;
+  engine.renderer.rules.image = (tokens, idx, options, env, self) => {
+    if (!/^https?:\/\//i.test(tokens[idx].attrGet("src") || "")) return "";
+    tokens[idx].attrSet("loading", "lazy");
+    tokens[idx].attrSet("referrerpolicy", "no-referrer");
+    return imageRule(tokens, idx, options, env, self);
+  };
+  engine.renderer.rules.table_open = () => '<div class="table-wrap"><table>\n';
+  engine.renderer.rules.table_close = () => '</table></div>\n';
+  const fence = engine.renderer.rules.fence;
+  engine.renderer.rules.fence = (tokens, idx, options, env, self) => {
+    const lang = (tokens[idx].info || "").trim().split(/\s+/)[0].toLowerCase();
+    if (lang === "mermaid") return `<div class="mermaid">${escapeHtml(tokens[idx].content)}</div>`;
+    return fence(tokens, idx, options, env, self);
+  };
+
+  const math = (src, display) => {
+    if (!window.katex) return `<pre class="math-raw">${escapeHtml(src)}</pre>`;
+    try {
+      return window.katex.renderToString(src, { displayMode: display, throwOnError: false, trust: false, strict: "ignore" });
+    } catch {
+      return `<pre class="math-raw">${escapeHtml(src)}</pre>`;
+    }
+  };
+  engine.inline.ruler.after("escape", "math_inline", (state, silent) => {
+    const start = state.pos;
+    if (state.src[start] !== "$" || state.src[start + 1] === "$") return false;
+    if (start + 1 >= state.posMax || /\s/.test(state.src[start + 1])) return false;
+    for (let pos = start + 1; pos < state.posMax; pos++) {
+      if (state.src[pos] === "\\") { pos++; continue; }
+      if (state.src[pos] !== "$" || /\s/.test(state.src[pos - 1])) continue;
+      if (!silent) {
+        const token = state.push("math_inline", "math", 0);
+        token.content = state.src.slice(start + 1, pos);
+      }
+      state.pos = pos + 1;
+      return true;
+    }
+    return false;
+  });
+  engine.renderer.rules.math_inline = (tokens, idx) => math(tokens[idx].content, false);
+  engine.block.ruler.before("fence", "math_block", (state, startLine, endLine, silent) => {
+    const open = state.bMarks[startLine] + state.tShift[startLine];
+    if (state.src.slice(open, state.eMarks[startLine]).trim() !== "$$") return false;
+    if (silent) return true;
+    let line = startLine + 1;
+    let body = "";
+    for (; line < endLine; line++) {
+      const start = state.bMarks[line] + state.tShift[line];
+      const text = state.src.slice(start, state.eMarks[line]);
+      if (text.trim() === "$$") break;
+      body += text + "\n";
+    }
+    if (line >= endLine) return false;
+    state.line = line + 1;
+    const token = state.push("math_block", "math", 0);
+    token.block = true;
+    token.content = body.trim();
+    token.map = [startLine, line + 1];
+    return true;
+  });
+  engine.renderer.rules.math_block = (tokens, idx) => `<div class="math-block">${math(tokens[idx].content, true)}</div>`;
+  return engine;
+})();
+
+let mmdSeq = 0;
+let mmdTheme = "";
+const mdCache = new Map();
+const mmdCache = new Map();
+function cacheSet(map, key, value, max) {
+  if (map.size >= max) map.delete(map.keys().next().value);
+  map.set(key, value);
+}
+function renderMermaid(root) {
+  const nodes = [...root.querySelectorAll(".mermaid")];
+  if (!nodes.length || !window.mermaid) return;
+  const dark = document.documentElement.dataset.theme === "dark" ||
+    (!document.documentElement.dataset.theme && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+  const theme = dark ? "dark" : "default";
+  if (mmdTheme !== theme) {
+    try {
+      window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme,
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" });
+      mmdTheme = theme;
+    } catch { /* keep the source visible */ }
+  }
+  for (const el of nodes) {
+    const src = el.textContent;
+    const key = theme + "\n" + src;
+    const cached = mmdCache.get(key);
+    if (cached) { el.innerHTML = cached; el.dataset.src = src; continue; }
+    window.mermaid.render("mmd-" + (++mmdSeq), src).then(({ svg }) => {
+      cacheSet(mmdCache, key, svg, 40);
+      el.innerHTML = svg; // mermaid escapes labels with securityLevel "strict"
+      el.dataset.src = src;
+    }).catch(() => {
+      el.classList.add("mermaid-error");
+      el.append(h("div", { class: "mermaid-note" }, t("Diagram could not be rendered")));
+    });
+  }
+}
+
 function md(text) {
+  const src = String(text || "");
+  if (!mdEngine) return mdFallback(src);
+  const root = h("div", { class: "md" });
+  let html = mdCache.get(src);
+  if (html == null) {
+    html = mdEngine.render(src);
+    cacheSet(mdCache, src, html, 80);
+  }
+  root.innerHTML = html;
+  renderMermaid(root);
+  return root;
+}
+
+// mdFallback keeps answers readable if the vendored renderer is unavailable.
+function mdFallback(text) {
   const root = h("div", { class: "md" });
   const inline = (s) => s.split(/(`[^`]+`|\*\*[^*]+\*\*)/).filter(Boolean).map((p) =>
     p.startsWith("`") && p.endsWith("`") ? h("code", {}, p.slice(1, -1))
