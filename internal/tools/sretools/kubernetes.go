@@ -266,6 +266,11 @@ func (k *Kubernetes) status(ctx context.Context, _ string, args json.RawMessage)
 // idempotency key is written into the template, so a retried attempt finds
 // its own earlier restart and does not restart again.
 func (k *Kubernetes) restart(ctx context.Context, key string, args json.RawMessage) (json.RawMessage, error) {
+	// Without a key the "already applied" check below would match any
+	// deployment that has no restart annotation yet and skip the restart.
+	if key == "" {
+		return nil, fmt.Errorf("%w: k8s.rollout_restart requires an idempotency key", domain.ErrNotDispatched)
+	}
 	a, err := k.parse(args)
 	if err != nil {
 		return nil, err

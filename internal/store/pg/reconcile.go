@@ -2,6 +2,8 @@ package pg
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,7 +21,10 @@ func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error
 	if err != nil {
 		return 0, err
 	}
+	// Each run is recovered on its own: one that fails is reported and
+	// retried next pass without blocking the rest of the batch.
 	n := 0
+	var errs []error
 	for _, id := range ids {
 		err := s.inTx(ctx, func(tx pgx.Tx) error {
 			r, err := s.lockRun(ctx, tx, "", id)
@@ -39,10 +44,10 @@ func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error
 			return r.save(ctx)
 		})
 		if err != nil {
-			return n, err
+			errs = append(errs, fmt.Errorf("run %s: %w", id, err))
 		}
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // ExpireApprovals times out pending approvals so a run never waits forever:
@@ -69,6 +74,7 @@ func (s *Store) ExpireApprovals(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var errs []error
 	for _, it := range items {
 		err := s.inTx(ctx, func(tx pgx.Tx) error {
 			r, err := s.lockRun(ctx, tx, "", it.runID)
@@ -97,10 +103,10 @@ func (s *Store) ExpireApprovals(ctx context.Context, limit int) (int, error) {
 			return r.save(ctx)
 		})
 		if err != nil {
-			return n, err
+			errs = append(errs, fmt.Errorf("approval %s: %w", it.id, err))
 		}
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // RewakeStaleQueued re-enqueues wake-ups for runnable runs that have been idle

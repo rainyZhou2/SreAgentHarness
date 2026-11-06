@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -50,6 +51,9 @@ type ServerConfig struct {
 	// Breaker: open after FailureThreshold consecutive failures for Cooldown.
 	FailureThreshold int      `json:"failure_threshold,omitempty"`
 	Cooldown         Duration `json:"cooldown,omitempty"`
+	// Transport is the base HTTP transport (nil = http.DefaultTransport);
+	// tenant servers pass one that enforces their network policy.
+	Transport http.RoundTripper `json:"-"`
 }
 
 // Duration unmarshals from a Go duration string.
@@ -129,7 +133,7 @@ func defaultDialer(cfg ServerConfig) Dialer {
 		}
 	case cfg.URL != "":
 		return func() (mcp.Transport, error) {
-			return &mcp.StreamableClientTransport{Endpoint: cfg.URL, HTTPClient: headerClient(cfg.Headers)}, nil
+			return &mcp.StreamableClientTransport{Endpoint: cfg.URL, HTTPClient: headerClient(cfg.Transport, cfg.Headers)}, nil
 		}
 	}
 	return nil

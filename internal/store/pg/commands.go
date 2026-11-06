@@ -54,8 +54,24 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 			return err
 		}
 
+		// A rejected command must not change anything but its own record.
+		// The savepoint undoes partial writes, and it also recovers the
+		// transaction when the rejection came from a failed statement
+		// (unique violation), which otherwise aborts every later statement.
+		before := r.run
+		if _, err := tx.Exec(ctx, `SAVEPOINT apply_command`); err != nil {
+			return err
+		}
 		reason, err := s.applyCommand(ctx, r, &cmd, req)
 		if err != nil {
+			return err
+		}
+		if reason != "" {
+			if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT apply_command`); err != nil {
+				return err
+			}
+			r.run = before
+		} else if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT apply_command`); err != nil {
 			return err
 		}
 		now := r.now

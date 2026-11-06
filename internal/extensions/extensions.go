@@ -111,6 +111,9 @@ type Options struct {
 	// AllowStdio permits MCP servers started as local commands. Off by
 	// default: it lets an admin run programs on every harness host.
 	AllowStdio bool
+	// Network limits the destinations of HTTP tools, MCP servers and
+	// tenant models (see NetPolicy).
+	Network NetPolicy
 }
 
 // Validate checks a spec and returns it normalized.
@@ -141,7 +144,7 @@ func Validate(kind Kind, name string, spec json.RawMessage, o Options) (json.Raw
 		if err := strict(&s); err != nil {
 			return nil, err
 		}
-		if err := s.check(); err != nil {
+		if err := s.check(o); err != nil {
 			return nil, err
 		}
 		return json.Marshal(s)
@@ -150,7 +153,7 @@ func Validate(kind Kind, name string, spec json.RawMessage, o Options) (json.Raw
 		if err := strict(&s); err != nil {
 			return nil, err
 		}
-		if err := s.check(); err != nil {
+		if err := s.check(o); err != nil {
 			return nil, err
 		}
 		return json.Marshal(s)
@@ -184,7 +187,7 @@ func validRisk(r domain.RiskClass) bool {
 	return false
 }
 
-func checkURL(raw string) error {
+func checkURL(raw string, n NetPolicy) error {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("url must be an absolute http(s) URL")
@@ -192,7 +195,7 @@ func checkURL(raw string) error {
 	if u.User != nil {
 		return fmt.Errorf("url must not embed credentials; use headers")
 	}
-	return nil
+	return n.checkHost(u)
 }
 
 func checkDuration(v string) error {
@@ -211,7 +214,7 @@ func (s *MCPSpec) check(o Options) error {
 	case s.URL != "" && s.Command != "":
 		return errors.New("set either url (streamable HTTP) or command (stdio), not both")
 	case s.URL != "":
-		if err := checkURL(s.URL); err != nil {
+		if err := checkURL(s.URL, o.Network); err != nil {
 			return err
 		}
 	case s.Command != "":
@@ -235,12 +238,12 @@ func (s *MCPSpec) check(o Options) error {
 	return checkDuration(s.CallTimeout)
 }
 
-func (s *HTTPSpec) check() error {
+func (s *HTTPSpec) check(o Options) error {
 	s.Description = strings.TrimSpace(s.Description)
 	if s.Description == "" || len(s.Description) > maxDescription {
 		return fmt.Errorf("description is required (at most %d bytes)", maxDescription)
 	}
-	if err := checkURL(s.URL); err != nil {
+	if err := checkURL(s.URL, o.Network); err != nil {
 		return err
 	}
 	s.Method = strings.ToUpper(s.Method)
@@ -309,20 +312,33 @@ func MaskSecrets(kind Kind, spec json.RawMessage) json.RawMessage {
 	return out
 }
 
-// MergeSecrets fills blank header/env values in next from prev.
-func MergeSecrets(prev, next json.RawMessage) json.RawMessage {
+// destinationKeys are the spec fields that decide where stored secrets are
+// sent. Changing any of them requires re-entering the secrets.
+var destinationKeys = []string{"url", "base_url", "provider", "command", "args"}
+
+// ErrSecretsNeedReentry is returned by MergeSecrets when a blank secret
+// would be filled in for a spec whose destination changed.
+var ErrSecretsNeedReentry = errors.New("the destination (url, base_url, provider, command or args) changed: re-enter the secret values instead of leaving them blank")
+
+// MergeSecrets fills blank header/env/api_key values in next from prev. It
+// refuses when the destination changed, so an update that does not know a
+// stored secret can never send it somewhere new.
+func MergeSecrets(prev, next json.RawMessage) (json.RawMessage, error) {
 	var p, n map[string]any
 	if json.Unmarshal(prev, &p) != nil || json.Unmarshal(next, &n) != nil {
-		return next
+		return next, nil
 	}
-	if k, _ := n["api_key"].(string); k == "" && p["api_key"] != nil {
-		n["api_key"] = p["api_key"]
+	filled := false
+	if k, _ := n["api_key"].(string); k == "" {
+		if pk, _ := p["api_key"].(string); pk != "" {
+			n["api_key"], filled = pk, true
+		}
 	}
 	if nh, ok := n["headers"].(map[string]any); ok {
 		ph, _ := p["headers"].(map[string]any)
 		for k, v := range nh {
-			if v == "" && ph != nil && ph[k] != nil {
-				nh[k] = ph[k]
+			if pv, _ := ph[k].(string); v == "" && pv != "" {
+				nh[k], filled = pv, true
 			}
 		}
 	}
@@ -339,11 +355,31 @@ func MergeSecrets(prev, next json.RawMessage) json.RawMessage {
 		for i, e := range ne {
 			if s, ok := e.(string); ok {
 				if k, v, _ := strings.Cut(s, "="); v == "" && prevEnv[k] != "" {
-					ne[i] = k + "=" + prevEnv[k]
+					ne[i], filled = k+"="+prevEnv[k], true
 				}
 			}
 		}
 	}
+	if filled {
+		for _, k := range destinationKeys {
+			if !sameValue(p[k], n[k]) {
+				return nil, ErrSecretsNeedReentry
+			}
+		}
+	}
 	out, _ := json.Marshal(n)
-	return out
+	return out, nil
+}
+
+// sameValue compares two decoded JSON values; absent and "" are the same.
+func sameValue(a, b any) bool {
+	if a == nil {
+		a = ""
+	}
+	if b == nil {
+		b = ""
+	}
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	return string(ja) == string(jb)
 }

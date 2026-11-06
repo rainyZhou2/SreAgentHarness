@@ -230,11 +230,10 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 		}
 	}
 	quality := "UNVERIFIED"
-	var verifier *string
 	for _, f := range rec.Feedback {
 		if f.RootCauseCorrect != nil {
 			if *f.RootCauseCorrect {
-				quality, verifier = "VERIFIED", &f.ActorID
+				quality = "VERIFIED"
 			} else {
 				quality = "DISPUTED"
 			}
@@ -247,9 +246,11 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 	service := ServiceFromGoal(goal.Goal)
 	sourceRefs := []string{"run:" + run.ID}
 	if run.Status == domain.RunCompleted && l.Conclusion != "" && service != "" && quality != "DISPUTED" {
+		// Operator feedback is not approval: a verified run only yields a
+		// VALIDATING memory, which an approver activates (TransitionMemory).
 		status, trust := "CANDIDATE", "T3"
 		if quality == "VERIFIED" {
-			status, trust = "ACTIVE", "T2"
+			status = "VALIDATING"
 		}
 		content := fmt.Sprintf("Incident goal: %s\nConclusion: %s", goal.Goal, l.Conclusion)
 		if len(l.Actions) > 0 {
@@ -257,12 +258,12 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 		}
 		mems := []NewMemory{{TenantID: j.TenantID, Scope: "service", ScopeID: service, Type: "episodic", Status: status,
 			Subject: service + ":incident_resolution", Title: "Past incident on " + service + ": " + firstSentence(l.Conclusion),
-			Content: content, SourceRefs: sourceRefs, Trust: trust, VerifiedBy: verifier, CreatedBy: "consolidator"}}
+			Content: content, SourceRefs: sourceRefs, Trust: trust, CreatedBy: "consolidator"}}
 		if len(l.Actions) > 0 && quality == "VERIFIED" {
 			mems = append(mems, NewMemory{TenantID: j.TenantID, Scope: "service", ScopeID: service, Type: "procedural",
 				Status: status, Subject: service + ":remediation", Title: "Remediation that worked for " + service,
 				Content:    "After verifying: " + firstSentence(l.Conclusion) + "\nRemediation: " + strings.Join(l.Actions, "; "),
-				SourceRefs: sourceRefs, Trust: trust, VerifiedBy: verifier, CreatedBy: "consolidator"})
+				SourceRefs: sourceRefs, Trust: trust, CreatedBy: "consolidator"})
 		}
 		for _, nm := range mems {
 			prepared, err := c.Writer.Prepare(ctx, nm)

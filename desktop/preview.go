@@ -102,7 +102,37 @@ func servePreview(addr string, app *App) error {
 	})
 	mux.Handle("GET /", files)
 	log.Printf("browser preview on http://%s/", addr)
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, previewGuard(addr, mux))
+}
+
+// previewGuard keeps other web pages away from the preview server, which can
+// call every App method (approve, change extensions) with the user's
+// credentials. A Host other than the bound address means DNS rebinding; a
+// foreign Origin or a non-JSON POST means a cross-site request (a JSON
+// content type forces a CORS preflight, which this server never answers).
+func previewGuard(addr string, next http.Handler) http.Handler {
+	_, port, _ := net.SplitHostPort(addr)
+	allowed := map[string]bool{}
+	for _, h := range []string{"127.0.0.1", "localhost", "[::1]"} {
+		allowed[h+":"+port] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowed[r.Host] {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" && !allowed[strings.TrimPrefix(o, "http://")] {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodPost {
+			if ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(ct) != "application/json" {
+				http.Error(w, "content type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // callMethod invokes an exported App method with JSON-decoded arguments,

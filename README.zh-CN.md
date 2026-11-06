@@ -22,7 +22,7 @@
 | | 请求/尝试/用量账本（ESTIMATED → REPORTED 修订），成本查询，Token 流片段落盘 + SSE delta | `pg/model.go`、`stream/` |
 | **上下文** | Prompt Manifest（分区哈希、`rendered_request_hash`），Checkpoint 与 fork，确定性 Compaction | `cognitive/assembler.go`、`kernel/compact.go`、`pg/checkpoint.go` |
 | **长期记忆** | 写入脱敏 + 投毒检测；全文 + 向量 + 依赖图三路召回，RRF 融合，冲突裁决，按 Step 钉住 | `internal/memory`、`pg/memory.go` |
-| | 冷路径 Consolidator：Run → Experience → 候选记忆；人工反馈激活/否决 | `memory/consolidate.go` |
+| | 冷路径 Consolidator：Run → Experience → 候选记忆；操作员反馈只把候选记忆推进到 VALIDATING（由 approver 激活）或否决 | `memory/consolidate.go` |
 | **评估与演进** | 从真实 Run 录制数据集（冻结后带 manifest hash），离线回放（写工具一律拦截） | `internal/eval` |
 | | 指标（Wilson 下界、分层）+ 非劣性门禁；冻结字段不可演进；提议人不能自批 | `eval/eval.go`、`eval/service.go`、`profile/` |
 | | 金丝雀：按路由键稳定分流、护栏自动回滚、人工 promote / rollback | `eval/service.go` |
@@ -241,7 +241,8 @@ HARNESS_AUTH_MODE=token,oidc HARNESS_AUTH_TOKENS_FILE=/etc/harness/tokens.json H
 - 策略与 R2/R3 审批底线照常生效；
 - MCP 的描述和输出都标记为不可信（T4）；
 - 租户工具不会覆盖同名的全局工具；
-- 请求头和环境变量的值只写不读：API 返回空值，提交空值时保留已存储的值；
+- 请求头和环境变量的值只写不读：API 返回空值，提交空值时保留已存储的值；但如果目的地（`url`、`base_url`、`provider`、`command`、`args`）变了，必须重新填写密钥（`422 secrets_required`）；
+- 租户扩展不能连接回环、链路本地和云元数据地址（在连接时按解析后的地址检查）；`HARNESS_EXTENSIONS_ALLOW_NETWORKS` 可以添加例外，元数据地址始终禁止；
 - 所有修改仅限 admin，并记入审计日志。
 
 本地试用：
@@ -250,7 +251,7 @@ HARNESS_AUTH_MODE=token,oidc HARNESS_AUTH_TOKENS_FILE=/etc/harness/tokens.json H
 go run ./examples/mcp-demo
 ```
 
-它会在 `http://127.0.0.1:8090/mcp` 提供一个 MCP 服务器（runbook_search、oncall_lookup、page_oncall），以及一个 `POST /deploys` 端点。在 Customize 中添加后，在对话里输入例如：`use mcp.demo.runbook_search {"query":"pool"}`。
+启动 harness 时设置 `HARNESS_EXTENSIONS_ALLOW_NETWORKS=127.0.0.0/8`，租户扩展才能访问它。它会在 `http://127.0.0.1:8090/mcp` 提供一个 MCP 服务器（runbook_search、oncall_lookup、page_oncall），以及一个 `POST /deploys` 端点。在 Customize 中添加后，在对话里输入例如：`use mcp.demo.runbook_search {"query":"pool"}`。
 
 ### 多进程 / 容器
 
@@ -318,6 +319,7 @@ Kubernetes 清单见 `deploy/k8s/harness.yaml`（外部 Postgres/NATS，Secret `
 | `HARNESS_RECONCILE_INTERVAL` / `HARNESS_CONSOLIDATE_INTERVAL` / `HARNESS_ROLLOUT_MONITOR_INTERVAL` | `10s` / `10s` / `1m` | |
 | `HARNESS_RETENTION_INTERVAL` / `HARNESS_OUTBOX_RETENTION` / `HARNESS_AUDIT_RETENTION` | `5m` / `24h` / `0`（永久） | |
 | `HARNESS_MCP_ALLOW_STDIO` / `HARNESS_EXTENSIONS_SYNC_INTERVAL` | `false` / `5s` | 是否允许以本地命令启动的租户 MCP 服务器 / 租户扩展的重新加载周期 |
+| `HARNESS_EXTENSIONS_ALLOW_NETWORKS` | 空 | 逗号分隔的 CIDR 或地址，租户扩展可以访问这些默认禁止（回环、链路本地）的地址；本地试用可设为 `127.0.0.0/8` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 空 | 设置后启用 OTLP/HTTP tracing |
 
 ## API 速览
@@ -327,7 +329,7 @@ Kubernetes 清单见 `deploy/k8s/harness.yaml`（外部 Postgres/NATS，Secret `
 | POST | `/v1/runs` | 需 `Idempotency-Key`；`{"goal": "...", "profile_id"?, "profile_version"?}`；未指定版本时按灰度/渠道解析 |
 | GET | `/v1/runs?status=&limit=` | 当前租户最新的 Run（含 goal 文本；`limit` 1..200，默认 50） |
 | GET | `/v1/runs/{id}/steps?expand=io` | 步骤并内联输入/输出 Artifact（工具参数、观测结果、决策；每个最多 256 KiB） |
-| GET | `/v1/runs/{id}` · `/steps` · `/approvals` · `/events` · `/events/stream` | SSE 支持 `Last-Event-ID`，`include_deltas=true` 附带 Token 流 |
+| GET | `/v1/runs/{id}` · `/steps` · `/approvals` · `/events` · `/events/stream` | SSE 支持 `Last-Event-ID`，`include_deltas=true` 附带 Token 流；已结束 Run 的流以一条 `stream.end` 消息（无 id）收尾 |
 | POST | `/v1/runs/{id}/commands` | `202` 已应用 / `409` 版本冲突 / `422` 拒绝（附原因） / `403` 角色不足 |
 | GET | `/v1/runs/{id}/model-requests` · `/cost` · `/stream-segments` · `/checkpoints` | 模型账本与 Checkpoint |
 | POST | `/v1/runs/{id}/fork` | 从 Checkpoint 派生新 Run |

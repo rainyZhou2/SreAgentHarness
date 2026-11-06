@@ -213,8 +213,13 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	}
 	// tenant extensions: MCP servers, HTTP tools and skills managed through
 	// /v1/extensions are loaded per tenant and overlay the global registry.
+	allowNets, err := extensions.ParseNetworks(e.str("HARNESS_EXTENSIONS_ALLOW_NETWORKS", ""))
+	if err != nil {
+		return nil, fmt.Errorf("HARNESS_EXTENSIONS_ALLOW_NETWORKS: %w", err)
+	}
 	h.Extensions = &extensions.Runtime{Store: store, Log: log.With("component", "extensions"),
-		Options:  extensions.Options{AllowStdio: e.bool("HARNESS_MCP_ALLOW_STDIO", false)},
+		Options: extensions.Options{AllowStdio: e.bool("HARNESS_MCP_ALLOW_STDIO", false),
+			Network: extensions.NetPolicy{Allow: allowNets}},
 		Interval: e.dur("HARNESS_EXTENSIONS_SYNC_INTERVAL", 5*time.Second)}
 	h.Tools.SetTenantSource(h.Extensions)
 	// profiles

@@ -5,6 +5,8 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -80,6 +82,7 @@ type ReconcileStore interface {
 	RecoverExpiredLeases(ctx context.Context, limit int) (int, error)
 	ExpireApprovals(ctx context.Context, limit int) (int, error)
 	RewakeStaleQueued(ctx context.Context, idle time.Duration, limit int) (int, error)
+	ActivateStalledBranches(ctx context.Context, limit int) (int, error)
 }
 
 type Reconciler struct {
@@ -114,17 +117,27 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	}
 }
 
+// Tick runs every pass even when an earlier one fails, so one broken run
+// cannot stop the others from being recovered.
 func (r *Reconciler) Tick(ctx context.Context) error {
+	var errs []error
 	if n, err := r.Store.RecoverExpiredLeases(ctx, r.Batch); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("recover expired leases: %w", err))
 	} else if n > 0 {
 		r.Log.Info("recovered expired leases", "runs", n)
 	}
 	if n, err := r.Store.ExpireApprovals(ctx, r.Batch); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("expire approvals: %w", err))
 	} else if n > 0 {
 		r.Log.Info("expired approvals", "count", n)
 	}
-	_, err := r.Store.RewakeStaleQueued(ctx, r.StaleIdle, r.Batch)
-	return err
+	if n, err := r.Store.ActivateStalledBranches(ctx, r.Batch); err != nil {
+		errs = append(errs, fmt.Errorf("activate stalled branches: %w", err))
+	} else if n > 0 {
+		r.Log.Info("activated stalled branches", "count", n)
+	}
+	if _, err := r.Store.RewakeStaleQueued(ctx, r.StaleIdle, r.Batch); err != nil {
+		errs = append(errs, fmt.Errorf("rewake stale runs: %w", err))
+	}
+	return errors.Join(errs...)
 }

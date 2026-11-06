@@ -53,6 +53,35 @@ func (s *Store) CreateIncident(ctx context.Context, tenantID, serviceID, environ
 
 type CreateRunRequest = domain.CreateRunRequest
 
+// checkProfileRunnable rejects new runs on a profile version that is not
+// ACTIVE. A CANDIDATE version may only run as the target of its own CANARY
+// rollout; QUARANTINED, DRAFT and ARCHIVED versions never start new runs.
+func checkProfileRunnable(ctx context.Context, tx pgx.Tx, tenantID, profileID string, version int64, rolloutID *string) error {
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM agent_profiles WHERE tenant_id=$1 AND profile_id=$2 AND version=$3`,
+		tenantID, profileID, version).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &domain.RejectedError{Reason: "unknown_profile_version"}
+	}
+	if err != nil {
+		return err
+	}
+	if status == "ACTIVE" {
+		return nil
+	}
+	if status == "CANDIDATE" && rolloutID != nil {
+		var canary bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM evolution_rollouts WHERE tenant_id=$1 AND id=$2::uuid
+			AND profile_id=$3 AND to_version=$4 AND status='CANARY')`, tenantID, *rolloutID, profileID, version).Scan(&canary); err != nil {
+			return err
+		}
+		if canary {
+			return nil
+		}
+	}
+	return &domain.RejectedError{Reason: "profile_version_not_runnable"}
+}
+
 // CreateRun creates the run, its first step(s), run.created/step.planned
 // events and the wake-up outbox in one transaction (§21.1). It is idempotent
 // on (tenant_id, idempotency key): a retry returns the original run.
@@ -107,6 +136,9 @@ func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest
 		return &runTx{s: s, tx: tx, run: run}, false, err
 	}
 	if err != nil {
+		return nil, false, err
+	}
+	if err := checkProfileRunnable(ctx, tx, req.TenantID, req.ProfileID, req.ProfileVersion, req.RolloutID); err != nil {
 		return nil, false, err
 	}
 	r, err := s.lockRun(ctx, tx, req.TenantID, id)

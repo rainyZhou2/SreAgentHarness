@@ -23,6 +23,9 @@ type Config struct {
 	Effort string
 	// Timeout bounds one HTTP request (the step deadline still applies).
 	Timeout time.Duration
+	// HTTPClient overrides the SDK's client (tenant models pass one that
+	// enforces their network policy).
+	HTTPClient *http.Client
 }
 
 type Provider struct {
@@ -41,6 +44,9 @@ func New(cfg Config) *Provider {
 	}
 	if cfg.Timeout > 0 {
 		opts = append(opts, option.WithRequestTimeout(cfg.Timeout))
+	}
+	if cfg.HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
 	}
 	return &Provider{client: sdk.NewClient(opts...), cfg: cfg}
 }

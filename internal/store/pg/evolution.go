@@ -432,22 +432,55 @@ func (s *Store) ListCanaryRollouts(ctx context.Context) ([]struct{ TenantID, ID 
 	return out, rows.Err()
 }
 
-func (s *Store) EndRollout(ctx context.Context, tenantID, id, status, actor string, observations any) error {
-	var obs []byte
-	if observations != nil {
-		obs = jsonb(map[string]any{"by": actor, "details": observations})
-	} else {
-		obs = jsonb(map[string]any{"by": actor})
+func (s *Store) EndRollout(ctx context.Context, tenantID, id string, e eval.RolloutEnd) error {
+	obs := map[string]any{"by": e.Actor}
+	if e.Observations != nil {
+		obs["details"] = e.Observations
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE evolution_rollouts SET status=$3, observations=$4, ended_at=now()
-		WHERE tenant_id=$1 AND id=$2::uuid AND status IN ('CANARY','PENDING_APPROVAL','PROMOTED')`, tenantID, id, status, obs)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.ErrVersionConflict
-	}
-	return nil
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var status, profileID string
+		var from, to int64
+		err := tx.QueryRow(ctx, `SELECT status, profile_id, from_version, to_version FROM evolution_rollouts
+			WHERE tenant_id=$1 AND id=$2::uuid FOR UPDATE`, tenantID, id).Scan(&status, &profileID, &from, &to)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		allowed := false
+		for _, f := range e.From {
+			allowed = allowed || f == status
+		}
+		if !allowed {
+			return domain.ErrVersionConflict
+		}
+		if _, err := tx.Exec(ctx, `UPDATE evolution_rollouts SET status=$3, observations=$4, ended_at=now()
+			WHERE tenant_id=$1 AND id=$2::uuid`, tenantID, id, e.To, jsonb(obs)); err != nil {
+			return err
+		}
+		active := int64(0)
+		switch {
+		case e.Activate:
+			active = to
+		case e.RestoreIfPromoted && status == "PROMOTED":
+			active = from
+		}
+		if active > 0 {
+			if _, err := tx.Exec(ctx, `INSERT INTO profile_channels (tenant_id, profile_id, active_version) VALUES ($1,$2,$3)
+				ON CONFLICT (tenant_id, profile_id) DO UPDATE SET active_version=EXCLUDED.active_version, updated_at=now()`,
+				tenantID, profileID, active); err != nil {
+				return err
+			}
+		}
+		if e.ToVersionStatus != "" {
+			if _, err := tx.Exec(ctx, `UPDATE agent_profiles SET status=$4 WHERE tenant_id=$1 AND profile_id=$2 AND version=$3`,
+				tenantID, profileID, to, e.ToVersionStatus); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // RolloutStats aggregates finished runs since the canary started: the canary

@@ -5,11 +5,14 @@
 package profile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"go-sre-harness/internal/cognitive"
@@ -49,8 +52,24 @@ func Parse(raw json.RawMessage) (Spec, error) {
 	return s, err
 }
 
+// specFields lists every JSON field name of Spec, taken from its struct tags.
+var specFields = func() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(Spec{})
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		out[name] = true
+	}
+	return out
+}()
+
 // ApplyPatch applies a candidate's patch to a base spec after checking that
 // no frozen field is touched and evolvable values stay within bounds.
+//
+// encoding/json matches keys case-insensitively, so patch keys must be exact
+// field names: otherwise "MAX_STEPS" would slip past the frozen check and
+// still be decoded into MaxSteps. The frozen fields are also compared after
+// decoding as a second line of defense.
 func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 	var p map[string]json.RawMessage
 	if err := json.Unmarshal(patch, &p); err != nil {
@@ -62,8 +81,11 @@ func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 	}
 	var changed []string
 	for k := range p {
-		if frozen[k] {
+		if frozen[strings.ToLower(k)] {
 			return base, nil, fmt.Errorf("field %q is frozen and cannot be changed by an evolution candidate", k)
+		}
+		if !specFields[k] {
+			return base, nil, fmt.Errorf("unknown field %q", k)
 		}
 		changed = append(changed, k)
 	}
@@ -81,7 +103,7 @@ func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 	if err := dec.Decode(&out); err != nil {
 		return base, nil, fmt.Errorf("invalid patch: %w", err)
 	}
-	if !reflect.DeepEqual(out.Tools, base.Tools) || out.Strategy != base.Strategy {
+	if !frozenEqual(out, base) {
 		return base, nil, fmt.Errorf("frozen fields changed")
 	}
 	if out.ModelAlias != base.ModelAlias && len(base.AllowedAliases) > 0 && !contains(base.AllowedAliases, out.ModelAlias) {
@@ -97,6 +119,45 @@ func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 		return base, nil, fmt.Errorf("evolvable value out of bounds")
 	}
 	return out, changed, nil
+}
+
+// frozenEqual reports whether a and b agree on every frozen field. Empty and
+// nil collections are equal because omitempty drops them in a round trip.
+func frozenEqual(a, b Spec) bool {
+	if a.Strategy != b.Strategy || a.PolicyVersion != b.PolicyVersion || a.MaxSteps != b.MaxSteps {
+		return false
+	}
+	if !sliceEqual(a.Tools, b.Tools) || !sliceEqual(a.AllowedAliases, b.AllowedAliases) {
+		return false
+	}
+	if len(a.RiskOverrides) != len(b.RiskOverrides) {
+		return false
+	}
+	for k, v := range a.RiskOverrides {
+		if bv, ok := b.RiskOverrides[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return compactJSON(a.ApprovalRules) == compactJSON(b.ApprovalRules)
+}
+
+func sliceEqual(a, b []string) bool {
+	// nil (field absent) and [] (no tools allowed) mean different things for Tools.
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return slices.Equal(a, b)
+}
+
+func compactJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return string(raw)
+	}
+	return buf.String()
 }
 
 func contains(xs []string, x string) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -36,7 +37,7 @@ var ModelAliases = []string{"sre-reasoning", "sre-fast"}
 // AnthropicModels are the model IDs offered in the client.
 var AnthropicModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
 
-func (s *ModelSpec) check() error {
+func (s *ModelSpec) check(o Options) error {
 	s.Provider, s.Model = strings.TrimSpace(s.Provider), strings.TrimSpace(s.Model)
 	switch s.Provider {
 	case "anthropic":
@@ -62,7 +63,7 @@ func (s *ModelSpec) check() error {
 		return errors.New(`provider must be "anthropic" or "openai"`)
 	}
 	if s.BaseURL != "" {
-		if err := checkURL(s.BaseURL); err != nil {
+		if err := checkURL(s.BaseURL, o.Network); err != nil {
 			return fmt.Errorf("base_url: %w", err)
 		}
 	}
@@ -83,13 +84,15 @@ func (n namedProvider) ID() string { return n.id }
 func modelEndpointID(tenant, name string) string { return "tenant:" + tenant + ":" + name }
 
 // buildModel turns a spec into a provider and an endpoint entitled to tenant.
-func buildModel(tenant, name string, s ModelSpec) (gw.Provider, gw.Endpoint) {
+// client carries the tenant network policy.
+func buildModel(tenant, name string, s ModelSpec, client *http.Client) (gw.Provider, gw.Endpoint) {
 	id := modelEndpointID(tenant, name)
 	var ep gw.Endpoint
 	var p gw.Provider
 	switch s.Provider {
 	case "anthropic":
-		p = anthropic.New(anthropic.Config{APIKey: s.APIKey, BaseURL: s.BaseURL, Effort: s.Effort, Timeout: 10 * time.Minute})
+		p = anthropic.New(anthropic.Config{APIKey: s.APIKey, BaseURL: s.BaseURL, Effort: s.Effort, Timeout: 10 * time.Minute,
+			HTTPClient: client})
 		ep = gw.Endpoint{ModelID: s.Model, ModelVersion: s.Model, Capabilities: gw.Capabilities{Tools: true, Streaming: true},
 			ContextWindow: 200_000, MaxOutput: 64_000, Pricing: gw.Pricing{Version: "unknown"}, ChatTemplateVersion: "anthropic-messages-v1"}
 		for _, t := range gw.AnthropicEndpoints() {
@@ -98,7 +101,7 @@ func buildModel(tenant, name string, s ModelSpec) (gw.Provider, gw.Endpoint) {
 			}
 		}
 	default:
-		p = openai.New(openai.Config{BaseURL: s.BaseURL, APIKey: s.APIKey})
+		p = openai.New(openai.Config{BaseURL: s.BaseURL, APIKey: s.APIKey, HTTPClient: client})
 		ep = gw.OpenAICompatibleEndpoint(s.Model, s.ContextWindow, s.MaxOutput)
 	}
 	if s.ContextWindow > 0 {
@@ -153,8 +156,8 @@ type modelEntry struct {
 
 // TestModel sends a one-line request through a model spec (not stored)
 // and returns the reply, so an admin can check the key and model.
-func TestModel(ctx context.Context, tenant, name string, s ModelSpec) (string, string, error) {
-	p, ep := buildModel(tenant, name, s)
+func (r *Runtime) TestModel(ctx context.Context, tenant, name string, s ModelSpec) (string, string, error) {
+	p, ep := buildModel(tenant, name, s, r.Options.Network.Client(time.Minute))
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req := gw.Request{ModelAlias: "test", MaxOutputTokens: 32, NeedStreaming: true,

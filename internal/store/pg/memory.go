@@ -407,8 +407,12 @@ func (s *Store) ListExperiences(ctx context.Context, tenantID, runID string) ([]
 }
 
 // PutFeedback upserts an actor's feedback on a finished run and applies its
-// consequence to memories derived from the run: confirmed root causes
-// activate candidates, refuted ones reject them (§11.3).
+// consequence to memories derived from the run (§11.3). Feedback is an
+// operator action, so it can never activate a memory: a confirmed root cause
+// only moves candidates to VALIDATING, where an approver must activate them
+// through TransitionMemory. A refuted root cause takes memories out of
+// retrieval at once (candidates are REJECTED, active ones become STALE so an
+// approver can still restore them). Every change is audited.
 func (s *Store) PutFeedback(ctx context.Context, tenantID, runID string, f memory.Feedback) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO run_feedback (id, tenant_id, run_id, actor_id, root_cause_correct,
@@ -420,33 +424,29 @@ func (s *Store) PutFeedback(ctx context.Context, tenantID, runID string, f memor
 		}
 		if f.RootCauseCorrect != nil {
 			src := jsonb([]string{"run:" + runID})
+			var moves [][2]string // {from, to}
 			if *f.RootCauseCorrect {
-				rows, err := tx.Query(ctx, `UPDATE agent_memories SET status='ACTIVE', trust='T2', verified_by=$3, updated_at=now()
-					WHERE tenant_id=$1 AND source_refs @> $2 AND status IN ('CANDIDATE','VALIDATING')
-					RETURNING id, scope, scope_id, subject`, tenantID, src, f.ActorID)
+				moves = [][2]string{{"CANDIDATE", "VALIDATING"}}
+			} else {
+				moves = [][2]string{{"CANDIDATE", "REJECTED"}, {"VALIDATING", "REJECTED"}, {"ACTIVE", "STALE"}}
+			}
+			for _, m := range moves {
+				rows, err := tx.Query(ctx, `UPDATE agent_memories SET status=$4, updated_at=now()
+					WHERE tenant_id=$1 AND source_refs @> $2 AND status=$3 RETURNING id`, tenantID, src, m[0], m[1])
 				if err != nil {
 					return err
 				}
-				type act struct{ id, scope, scopeID, subject string }
-				var acts []act
-				for rows.Next() {
-					var a act
-					if err := rows.Scan(&a.id, &a.scope, &a.scopeID, &a.subject); err != nil {
-						rows.Close()
-						return err
-					}
-					acts = append(acts, a)
+				ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if err != nil {
+					return err
 				}
-				rows.Close()
-				for _, a := range acts {
-					if err := supersedeSubject(ctx, tx, tenantID, a.id, a.scope, a.scopeID, a.subject); err != nil {
+				for _, id := range ids {
+					if _, err := tx.Exec(ctx, `INSERT INTO security_audit_log (id, tenant_id, actor_type, actor_id, action,
+						resource_type, resource_id, outcome, details) VALUES ($1,$2,'user',$3,'memory.feedback','memory',$4,'applied',$5)`,
+						newID(), tenantID, f.ActorID, id, jsonb(map[string]string{"from": m[0], "to": m[1], "run_id": runID})); err != nil {
 						return err
 					}
 				}
-			} else if _, err := tx.Exec(ctx, `UPDATE agent_memories SET status='REJECTED', updated_at=now()
-				WHERE tenant_id=$1 AND source_refs @> $2 AND status IN ('CANDIDATE','VALIDATING','ACTIVE')`,
-				tenantID, src); err != nil {
-				return err
 			}
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO consolidation_queue (tenant_id, run_id) VALUES ($1,$2)
