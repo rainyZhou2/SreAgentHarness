@@ -34,6 +34,7 @@
 | | RBAC：viewer / operator / approver / admin，按路由和命令授权；可要求审批人≠发起人 | `api/authz.go` |
 | | `security_audit_log` 审计；Postgres RLS（API 请求按租户设置 `app.tenant_id`） | `pg/security.go` |
 | **可观测** | `/metrics`（Prometheus 文本格式，无高基数标签），OpenTelemetry tracing（OTLP/HTTP） | `internal/obs` |
+| **事件分发** | 提交事件 → 事件日志 → Relay（租约单活）→ JetStream → SSE 网关；断线与丢消息按游标回补，稳态不查询数据库 | `internal/eventlog`、`internal/relay`、`internal/eventbus`、`api/eventstream.go` |
 | **保留策略** | 清理已发布 outbox、过期 Token 片段（行 + 对象）、过期记忆标记 STALE、可选审计保留期 | `internal/retention` |
 
 依赖方向：`kernel` 只依赖 `domain`、`cognitive`、`tools` 等接口，不 import pg / NATS / 模型 SDK；Claude SDK 只出现在 `gateway/anthropic`。
@@ -49,7 +50,7 @@ HARNESS_CONFIG (YAML/JSON) ── plugins.<kind>: [specs] ────┤
 环境变量（未配置文件时的默认值）────────────────────────────┘
                                                           ▼
 internal/app 按阶段构建：telemetry → artifact_store → tools → profile_source → policy
-  → stream_bus → broker → route_policy → model_provider（组合路由策略 → Gateway）
+  → stream_bus → broker → event_bus → route_policy → model_provider（组合路由策略 → Gateway）
   → embedder → memory_retriever → context_assembler → strategy → compactor → grader
   → event_sink → job → authenticator → api
 ```
@@ -62,12 +63,13 @@ internal/app 按阶段构建：telemetry → artifact_store → tools → profil
 | `policy` | `policy.Gate` | `default` | |
 | `stream_bus` | `stream.Bus` | `local`、`nats` | |
 | `broker` | `MessageBroker` | `local`、`nats` | |
+| `event_bus` | `eventbus.Bus` | `local`、`nats` | |
 | `model_provider` | `ModelBackend`（适配器 + 端点 + alias） | `scripted`、`anthropic`、`openai` | ✓ |
 | `embedder` | `memory.Embedder` | `hashing` | |
 | `memory_retriever` | `kernel.MemoryRetriever` | `hybrid` | |
 | `strategy` | `StrategyBuilder`（按 profile 的 `strategy` 字段选择） | `llm`、`rule_based` | ✓ |
 | `grader` | `eval.Grader` | `substring` | |
-| `job` | `Runner`（scheduler 角色运行） | `consolidator`、`rollout_monitor`、`retention` | ✓ |
+| `job` | `Runner`（scheduler 角色运行） | `consolidator`、`rollout_monitor`、`event_relay`、`retention` | ✓ |
 | `authenticator` | `auth.Authenticator`（按顺序尝试） | `dev`、`token`、`oidc` | ✓ |
 | `api` | `api.Extension`（路由 + 声明的角色） | `memory`、`eval` | ✓ |
 | `profile_source` | `profile.Source`（启动时注册的 Agent Profile 版本） | `builtin`、`file` | ✓ |
@@ -278,7 +280,7 @@ HARNESS_WORKER_ID=w1 HARNESS_METRICS_ADDR=127.0.0.1:9091 go run ./cmd/harness wo
 go run ./cmd/harness api
 ```
 
-`scheduler` 角色运行 Outbox 发布和 Reconciler，以及已启用的 job（记忆 Consolidator、灰度护栏监控、保留策略清理）。
+`scheduler` 角色运行 Outbox 发布和 Reconciler，以及已启用的 job（记忆 Consolidator、灰度护栏监控、事件 Relay、保留策略清理）。Relay 持有带租约的游标，多副本时只有一个是活跃写者，故障后由其他副本接管。`api` 角色通过 NATS 事件流推送 SSE；没有共享总线时自动回退到按游标轮询，正确性不变。
 
 Docker Compose（Postgres + NATS + migrate + scheduler + 2 worker + api，Token 认证；先创建 `deploy/tokens.json`）：
 
@@ -322,6 +324,9 @@ Kubernetes 清单见 `deploy/k8s/harness.yaml`（外部 Postgres/NATS，Secret `
 | `HARNESS_MAX_STEPS_PER_RUN` / `HARNESS_APPROVAL_TTL` | `100` / `30m` | |
 | `HARNESS_RECONCILE_INTERVAL` / `HARNESS_CONSOLIDATE_INTERVAL` / `HARNESS_ROLLOUT_MONITOR_INTERVAL` | `10s` / `10s` / `1m` | |
 | `HARNESS_RETENTION_INTERVAL` / `HARNESS_OUTBOX_RETENTION` / `HARNESS_AUDIT_RETENTION` | `5m` / `24h` / `0`（永久） | |
+| `HARNESS_SSE_MODE` / `HARNESS_SSE_TICK` / `HARNESS_SSE_POLL` | `push` / `30s` / `500ms` | SSE 推送模式、推送健康时的兜底校验周期、轮询/降级时的基础周期（空闲指数退避到 5s） |
+| `HARNESS_EVENT_STREAM` / `HARNESS_EVENT_STREAM_MAX_AGE` / `HARNESS_EVENT_STREAM_MAX_BYTES` | `HARNESS_EVENTS` / `1h` / `2GiB` | JetStream 事件流名称、保留时长与容量上限 |
+| `HARNESS_RELAY_INTERVAL` / `HARNESS_RELAY_BATCH` / `HARNESS_RELAY_LEASE_TTL` | `250ms` / `1000` / `15s` | 事件 Relay 的追尾周期、批量与租约 |
 | `HARNESS_MCP_ALLOW_STDIO` / `HARNESS_EXTENSIONS_SYNC_INTERVAL` | `false` / `5s` | 是否允许以本地命令启动的租户 MCP 服务器 / 租户扩展的重新加载周期 |
 | `HARNESS_EXTENSIONS_ALLOW_NETWORKS` | 空 | 逗号分隔的 CIDR 或地址，租户扩展可以访问这些默认禁止（回环、链路本地）的地址；本地试用可设为 `127.0.0.0/8` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 空 | 设置后启用 OTLP/HTTP tracing |

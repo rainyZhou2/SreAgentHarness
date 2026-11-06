@@ -34,6 +34,7 @@ An SRE Cognitive Agent Harness implemented from the design RFC [`GoAgentHarness.
 | | RBAC: viewer / operator / approver / admin, authorized per route and per command; optional approver ≠ initiator | `api/authz.go` |
 | | `security_audit_log` auditing; Postgres RLS (API requests set `app.tenant_id` per tenant) | `pg/security.go` |
 | **Observability** | `/metrics` (Prometheus text format, no high-cardinality labels), OpenTelemetry tracing (OTLP/HTTP) | `internal/obs` |
+| **Event delivery** | committed event → event log → leased relay → JetStream → SSE gateway; reconnects and lost messages resume from the cursor, with no steady-state database reads | `internal/eventlog`, `internal/relay`, `internal/eventbus`, `api/eventstream.go` |
 | **Retention** | Deletes published outbox rows and expired token segments (rows + objects), marks expired memories STALE, optional audit retention | `internal/retention` |
 
 Dependency direction: `kernel` depends only on interfaces such as `domain`, `cognitive` and `tools`; it never imports pg, NATS or a model SDK. The Claude SDK appears only in `gateway/anthropic`.
@@ -49,7 +50,7 @@ HARNESS_CONFIG (YAML/JSON) ── plugins.<kind>: [specs] ───────�
 environment variables (defaults when there is no config file) ────┘
                                                                   ▼
 internal/app builds in phases: telemetry → artifact_store → tools → profile_source → policy
-  → stream_bus → broker → route_policy → model_provider (route policy composed → Gateway)
+  → stream_bus → broker → event_bus → route_policy → model_provider (route policy composed → Gateway)
   → embedder → memory_retriever → context_assembler → strategy → compactor → grader
   → event_sink → job → authenticator → api
 ```
@@ -62,12 +63,13 @@ internal/app builds in phases: telemetry → artifact_store → tools → profil
 | `policy` | `policy.Gate` | `default` | |
 | `stream_bus` | `stream.Bus` | `local`, `nats` | |
 | `broker` | `MessageBroker` | `local`, `nats` | |
+| `event_bus` | `eventbus.Bus` | `local`, `nats` | |
 | `model_provider` | `ModelBackend` (adapter + endpoints + aliases) | `scripted`, `anthropic`, `openai` | ✓ |
 | `embedder` | `memory.Embedder` | `hashing` | |
 | `memory_retriever` | `kernel.MemoryRetriever` | `hybrid` | |
 | `strategy` | `StrategyBuilder` (selected by the profile's `strategy` field) | `llm`, `rule_based` | ✓ |
 | `grader` | `eval.Grader` | `substring` | |
-| `job` | `Runner` (runs in the scheduler role) | `consolidator`, `rollout_monitor`, `retention` | ✓ |
+| `job` | `Runner` (runs in the scheduler role) | `consolidator`, `rollout_monitor`, `event_relay`, `retention` | ✓ |
 | `authenticator` | `auth.Authenticator` (tried in order) | `dev`, `token`, `oidc` | ✓ |
 | `api` | `api.Extension` (routes + declared roles) | `memory`, `eval` | ✓ |
 | `profile_source` | `profile.Source` (agent profile versions registered at startup) | `builtin`, `file` | ✓ |
@@ -278,7 +280,7 @@ HARNESS_WORKER_ID=w1 HARNESS_METRICS_ADDR=127.0.0.1:9091 go run ./cmd/harness wo
 go run ./cmd/harness api
 ```
 
-The `scheduler` role runs outbox publishing and the reconciler, plus the enabled jobs (memory consolidator, canary guardrail monitor, retention cleanup).
+The `scheduler` role runs outbox publishing and the reconciler, plus the enabled jobs (memory consolidator, canary guardrail monitor, event relay, retention cleanup). The relay owns a leased cursor, so exactly one replica publishes and a standby takes over after a failure. The `api` role pushes SSE through the NATS event stream and falls back to cursor polling when no shared bus is configured, without changing correctness.
 
 Docker Compose (Postgres + NATS + migrate + scheduler + 2 workers + api, token auth; create `deploy/tokens.json` first):
 
@@ -322,6 +324,9 @@ Kubernetes manifests are in `deploy/k8s/harness.yaml` (external Postgres/NATS, S
 | `HARNESS_MAX_STEPS_PER_RUN` / `HARNESS_APPROVAL_TTL` | `100` / `30m` | |
 | `HARNESS_RECONCILE_INTERVAL` / `HARNESS_CONSOLIDATE_INTERVAL` / `HARNESS_ROLLOUT_MONITOR_INTERVAL` | `10s` / `10s` / `1m` | |
 | `HARNESS_RETENTION_INTERVAL` / `HARNESS_OUTBOX_RETENTION` / `HARNESS_AUDIT_RETENTION` | `5m` / `24h` / `0` (forever) | |
+| `HARNESS_SSE_MODE` / `HARNESS_SSE_TICK` / `HARNESS_SSE_POLL` | `push` / `30s` / `500ms` | SSE delivery mode, durable-log check while push is healthy, base interval for poll/degraded mode (idle backoff to 5s) |
+| `HARNESS_EVENT_STREAM` / `HARNESS_EVENT_STREAM_MAX_AGE` / `HARNESS_EVENT_STREAM_MAX_BYTES` | `HARNESS_EVENTS` / `1h` / `2GiB` | JetStream event stream name, retention and size cap |
+| `HARNESS_RELAY_INTERVAL` / `HARNESS_RELAY_BATCH` / `HARNESS_RELAY_LEASE_TTL` | `250ms` / `1000` / `15s` | event relay tail period, batch size and cursor lease |
 | `HARNESS_MCP_ALLOW_STDIO` / `HARNESS_EXTENSIONS_SYNC_INTERVAL` | `false` / `5s` | allow tenant MCP servers started as local commands / reload period of tenant extensions |
 | `HARNESS_EXTENSIONS_ALLOW_NETWORKS` | empty | comma-separated CIDRs or addresses tenant extensions may reach despite the default block (loopback, link-local); e.g. `127.0.0.0/8` for local trials |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | enables OTLP/HTTP tracing when set |
