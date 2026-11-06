@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/eventlog"
 )
 
 // Sink receives events. Returning an error retries the event (with backoff,
@@ -100,30 +101,12 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &p)
 }
 
-// Cursor is a position in the global event log: (transaction id, global
-// sequence). Only events of transactions older than every running
-// transaction are read, so a cursor never skips a late commit.
-type Cursor struct {
-	TxID      int64 `json:"tx_id"`
-	GlobalSeq int64 `json:"global_seq"`
-}
-
-// Delivery is an event with its log position.
-type Delivery struct {
-	Cursor Cursor
-	Event  domain.Event
-}
-
-// Store is the cursor and log access the dispatcher needs (store/pg).
-type Store interface {
-	// ClaimEventSink creates the cursor if missing and takes or renews the
-	// lease; ok is false while another owner holds it.
-	ClaimEventSink(ctx context.Context, sinkID, owner string, ttl time.Duration, earliest bool) (c Cursor, ok bool, err error)
-	ReadEventLog(ctx context.Context, after Cursor, limit int) ([]Delivery, error)
-	// AdvanceEventSink moves the cursor and renews the lease; it fails with
-	// domain.ErrLeaseLost when the lease was taken over.
-	AdvanceEventSink(ctx context.Context, sinkID, owner string, c Cursor, delivered, skipped int, ttl time.Duration) error
-}
+// Cursor and Delivery locate an event in the global log.
+type (
+	Cursor   = eventlog.Cursor
+	Delivery = eventlog.Delivery
+	Store    = eventlog.Store
+)
 
 // Counters are optional delivery metrics.
 type Counters interface {

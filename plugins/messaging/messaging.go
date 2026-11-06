@@ -4,7 +4,9 @@ package messaging
 import (
 	"context"
 	"errors"
+	"time"
 
+	"go-sre-harness/internal/eventbus"
 	"go-sre-harness/internal/notify"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/stream"
@@ -16,6 +18,14 @@ type LocalConfig struct {
 
 type NATSConfig struct {
 	URL string `json:"url"`
+}
+
+type EventBusConfig struct {
+	URL        string          `json:"url"`
+	Stream     string          `json:"stream,omitempty"`
+	MaxAge     plugin.Duration `json:"max_age,omitempty"`
+	MaxBytes   int64           `json:"max_bytes,omitempty"`
+	Duplicates plugin.Duration `json:"duplicates,omitempty"`
 }
 
 type localBroker struct{ *notify.Local }
@@ -55,5 +65,23 @@ func init() {
 				return nil, errors.New("url is required")
 			}
 			return stream.ConnectNATS(cfg.URL, h.Log)
+		})
+	plugin.Register(plugin.EventBus, "local", "in-process event fan-out; only valid when publisher and subscribers share a process",
+		func(context.Context, *plugin.Host, plugin.Config) (eventbus.Bus, error) {
+			return eventbus.NewLocal(), nil
+		})
+	plugin.Register(plugin.EventBus, "nats", "NATS JetStream stream of committed run events with bounded replay",
+		func(ctx context.Context, h *plugin.Host, c plugin.Config) (eventbus.Bus, error) {
+			cfg := EventBusConfig{MaxAge: plugin.Duration(time.Hour), MaxBytes: 2 << 30}
+			if err := c.Decode(&cfg); err != nil {
+				return nil, err
+			}
+			if cfg.URL == "" {
+				return nil, errors.New("url is required")
+			}
+			return eventbus.ConnectNATS(ctx, eventbus.NATSConfig{
+				URL: cfg.URL, Stream: cfg.Stream, MaxAge: cfg.MaxAge.D(), MaxBytes: cfg.MaxBytes,
+				Duplicates: cfg.Duplicates.D(), Log: h.Log,
+			})
 		})
 }
