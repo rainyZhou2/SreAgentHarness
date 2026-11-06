@@ -292,6 +292,10 @@ func FromEnv(e Env) (File, error) {
 		models = append(models, plugin.NewSpec("anthropic", map[string]any{"api_key": key,
 			"base_url": e("HARNESS_ANTHROPIC_BASE_URL"), "effort": e("HARNESS_ANTHROPIC_EFFORT")}))
 	}
+	if key := e("GEMINI_API_KEY"); key != "" {
+		models = append(models, plugin.NewSpec("gemini", map[string]any{"api_key": key,
+			"base_url": e("HARNESS_GEMINI_BASE_URL"), "model": e("HARNESS_GEMINI_MODEL")}))
+	}
 	if url, model := e("HARNESS_OPENAI_BASE_URL"), e("HARNESS_OPENAI_MODEL"); url != "" && model != "" {
 		models = append(models, plugin.NewSpec("openai", map[string]any{"base_url": url, "model": model,
 			"api_key": e("HARNESS_OPENAI_API_KEY")}))

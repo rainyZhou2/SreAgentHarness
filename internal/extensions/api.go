@@ -39,6 +39,7 @@ func (a *API) RouteRoles() map[string]auth.Role {
 		"DELETE /v1/extensions/{kind}/{name}":          auth.Admin,
 		"POST /v1/extensions/mcp-servers/{name}/probe": auth.Admin,
 		"POST /v1/extensions/models/{name}/test":       auth.Admin,
+		"POST /v1/extensions/models/{name}/list":       auth.Admin,
 	}
 }
 
@@ -49,6 +50,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /v1/extensions/{kind}/{name}", a.del)
 	mux.HandleFunc("POST /v1/extensions/mcp-servers/{name}/probe", a.probe)
 	mux.HandleFunc("POST /v1/extensions/models/{name}/test", a.testModel)
+	mux.HandleFunc("POST /v1/extensions/models/{name}/list", a.listModels)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -263,14 +265,11 @@ func (a *API) probe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tools": list})
 }
 
-// testModel sends a tiny request through a model (the stored one, or the
-// spec in the body merged with the stored secrets) and returns the reply.
-func (a *API) testModel(w http.ResponseWriter, r *http.Request) {
-	p, ok := principal(w, r)
-	if !ok {
-		return
-	}
-	name := r.PathValue("name")
+// modelSpecFor reads a model spec from the body (merged with the stored
+// secrets) or, without a body, the stored one. It writes the error itself.
+//
+// Listing needs no model yet: noModel fills a placeholder before validation.
+func (a *API) modelSpecFor(w http.ResponseWriter, r *http.Request, p auth.Principal, name string, noModel bool) (ModelSpec, bool) {
 	var body struct {
 		Spec json.RawMessage `json:"spec"`
 	}
@@ -279,24 +278,68 @@ func (a *API) testModel(w http.ResponseWriter, r *http.Request) {
 	raw := body.Spec
 	switch {
 	case len(raw) == 0 && findErr != nil:
-		writeErr(w, http.StatusNotFound, "not_found", "no stored model with this name; send a spec to test")
-		return
+		writeErr(w, http.StatusNotFound, "not_found", "no stored model with this name; send a spec")
+		return ModelSpec{}, false
 	case len(raw) == 0:
 		raw = existing.Spec
 	case findErr == nil:
 		var err error
 		if raw, err = MergeSecrets(existing.Spec, raw); err != nil {
 			writeErr(w, http.StatusUnprocessableEntity, "secrets_required", err.Error())
-			return
+			return ModelSpec{}, false
+		}
+	}
+	if noModel {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			if v, _ := m["model"].(string); strings.TrimSpace(v) == "" {
+				m["model"] = "list"
+				raw, _ = json.Marshal(m)
+			}
 		}
 	}
 	norm, err := Validate(KindModel, name, raw, a.Runtime.Options)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "invalid_spec", err.Error())
-		return
+		return ModelSpec{}, false
 	}
 	var spec ModelSpec
 	_ = json.Unmarshal(norm, &spec)
+	return spec, true
+}
+
+// listModels returns the model IDs the provider offers for a spec's key.
+func (a *API) listModels(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	spec, ok := a.modelSpecFor(w, r, p, name, true)
+	if !ok {
+		return
+	}
+	a.audit(r.Context(), p, "extension.list_models", KindModel, name, map[string]any{"provider": spec.Provider})
+	ids, err := a.Runtime.ListModels(r.Context(), spec)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "list_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": ids})
+}
+
+// testModel sends a tiny request through a model (the stored one, or the
+// spec in the body merged with the stored secrets) and returns the reply.
+func (a *API) testModel(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	spec, ok := a.modelSpecFor(w, r, p, name, false)
+	if !ok {
+		return
+	}
 	a.audit(r.Context(), p, "extension.test", KindModel, name, map[string]any{"provider": spec.Provider, "model": spec.Model})
 	start := time.Now()
 	reply, model, err := a.Runtime.TestModel(r.Context(), p.Tenant, name, spec)

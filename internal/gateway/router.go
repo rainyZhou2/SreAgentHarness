@@ -262,6 +262,20 @@ func OpenAICompatibleEndpoint(model string, contextWindow, maxOutput int64) Endp
 		MaxOutput: maxOutput, Pricing: Pricing{Version: "self-hosted"}, Priority: 2, ChatTemplateVersion: "openai-chat-v1"}
 }
 
+// GeminiEndpoint is a Gemini model. Pricing is not tracked ("unknown"), so
+// its calls count as zero against tenant budgets.
+func GeminiEndpoint(model string, contextWindow, maxOutput int64) Endpoint {
+	if contextWindow <= 0 {
+		contextWindow = 1_048_576
+	}
+	if maxOutput <= 0 {
+		maxOutput = 65_536
+	}
+	return Endpoint{ID: "gemini", ProviderID: "gemini", ModelID: model, ModelVersion: model,
+		Capabilities: Capabilities{Tools: true, Streaming: true}, ContextWindow: contextWindow, MaxOutput: maxOutput,
+		Pricing: Pricing{Version: "unknown"}, Priority: 1, ChatTemplateVersion: "gemini-generate-content-v1"}
+}
+
 // PolicyPart is one provider's contribution to the route policy.
 type PolicyPart struct {
 	Endpoints []Endpoint
