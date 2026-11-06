@@ -321,7 +321,7 @@ func (a Assembler) observationBudget(in ReasoningInput) []int {
 // turn analyzes the request; later steps continue the investigation.
 func instruction(hasToolSteps bool) string {
 	if hasToolSteps {
-		return fmt.Sprintf("[instruction] Continue the investigation for the goal. Call exactly one tool, or call %s when the evidence is sufficient.", ConclusionTool)
+		return fmt.Sprintf("[instruction] Continue the investigation for the goal. Call exactly one tool, or call %s when the evidence is sufficient. If the user asked a question rather than requesting an action, answer it as soon as you have enough evidence.", ConclusionTool)
 	}
 	return fmt.Sprintf("[instruction] Analyze the user's message first. If it is a question, answer it with %s (intent=question) without calling tools unless live data is required. If it needs diagnosis or action, start the investigation with one tool (intent=task). If it is ambiguous and acting could be harmful, ask for clarification (intent=clarification).", ConclusionTool)
 }
