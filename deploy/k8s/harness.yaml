@@ -133,7 +133,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: harness-scheduler, namespace: sre-harness}
 spec:
-  replicas: 1
+  # The relay owns a leased cursor, so a standby takes over without
+  # duplicating events; outbox publishing and reconciliation are idempotent.
+  replicas: 2
   selector: {matchLabels: {app: harness-scheduler}}
   template:
     metadata: {labels: {app: harness-scheduler}}

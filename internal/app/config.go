@@ -254,6 +254,13 @@ func (e Env) int(k string, def int) int {
 	return def
 }
 
+func (e Env) int64(k string, def int64) int64 {
+	if n, err := strconv.ParseInt(e(k), 10, 64); err == nil {
+		return n
+	}
+	return def
+}
+
 func (e Env) bool(k string, def bool) bool {
 	if b, err := strconv.ParseBool(e(k)); err == nil {
 		return b
@@ -282,9 +289,14 @@ func FromEnv(e Env) (File, error) {
 	if url := e("HARNESS_NATS_URL"); url != "" {
 		p["broker"] = one("nats", map[string]any{"url": url})
 		p["stream_bus"] = one("nats", map[string]any{"url": url})
+		p["event_bus"] = one("nats", map[string]any{"url": url,
+			"stream":    e.str("HARNESS_EVENT_STREAM", "HARNESS_EVENTS"),
+			"max_age":   e.dur("HARNESS_EVENT_STREAM_MAX_AGE", time.Hour).String(),
+			"max_bytes": e.int64("HARNESS_EVENT_STREAM_MAX_BYTES", 2<<30)})
 	} else {
 		p["broker"] = one("local", nil)
 		p["stream_bus"] = one("local", nil)
+		p["event_bus"] = one("local", nil)
 	}
 
 	var models plugin.Specs
@@ -328,6 +340,11 @@ func FromEnv(e Env) (File, error) {
 	p["job"] = plugin.Specs{
 		plugin.NewSpec("consolidator", map[string]any{"interval": e.dur("HARNESS_CONSOLIDATE_INTERVAL", 10*time.Second).String()}),
 		plugin.NewSpec("rollout_monitor", map[string]any{"interval": e.dur("HARNESS_ROLLOUT_MONITOR_INTERVAL", time.Minute).String()}),
+		plugin.NewSpec("event_relay", map[string]any{
+			"interval":   e.dur("HARNESS_RELAY_INTERVAL", 250*time.Millisecond).String(),
+			"batch":      e.int("HARNESS_RELAY_BATCH", 1000),
+			"lease_ttl":  e.dur("HARNESS_RELAY_LEASE_TTL", 15*time.Second).String(),
+			"start_from": "latest"}),
 		plugin.NewSpec("retention", map[string]any{
 			"interval":         e.dur("HARNESS_RETENTION_INTERVAL", 5*time.Minute).String(),
 			"outbox_retention": e.dur("HARNESS_OUTBOX_RETENTION", 24*time.Hour).String(),

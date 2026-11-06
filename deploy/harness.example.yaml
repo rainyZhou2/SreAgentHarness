@@ -18,6 +18,9 @@ plugins:
   artifact_store: {name: fs, config: {root: /var/lib/harness/artifacts}}
   broker: {name: nats, config: {url: "${HARNESS_NATS_URL}"}}
   stream_bus: {name: nats, config: {url: "${HARNESS_NATS_URL}"}}
+  # Committed run events for SSE; Postgres stays authoritative and is used
+  # for every gap and reconnect.
+  event_bus: {name: nats, config: {url: "${HARNESS_NATS_URL}", stream: HARNESS_EVENTS, max_age: 1h, max_bytes: 2147483648}}
   policy: {name: default, config: {environment: production, approval_ttl: 30m}}
 
   model_provider:                        # route preference follows this order
@@ -47,6 +50,7 @@ plugins:
   job:
     - {name: consolidator, config: {interval: 10s}}
     - {name: rollout_monitor, config: {interval: 1m}}
+    - {name: event_relay, config: {interval: 250ms, batch: 1000, lease_ttl: 15s, start_from: latest}}
     - {name: retention, config: {interval: 5m, outbox_retention: 24h, audit_retention: 2160h}}
   authenticator:
     - {name: oidc, config: {issuer: "https://idp.example.com", audience: sre-harness}}

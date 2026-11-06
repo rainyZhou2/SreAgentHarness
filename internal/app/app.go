@@ -241,6 +241,11 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			return nil, err
 		}
 	}
+	if mode == "all" || mode == "api" || mode == "scheduler" {
+		if h.Events, err = optionalOne(ctx, plugin.EventBus, h, specs["event_bus"]); err != nil {
+			return nil, err
+		}
+	}
 	// routing score
 	scorer, err := optionalOne(ctx, plugin.RoutePolicy, h, specs["route_policy"])
 	if err != nil {
@@ -373,6 +378,24 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	}
 	// API
 	if mode == "all" || mode == "api" {
+		streamMode := e.str("HARNESS_SSE_MODE", api.StreamPush)
+		if h.Events == nil || (mode == "api" && !h.Events.Shared()) {
+			if streamMode == api.StreamPush {
+				log.Warn("event stream falls back to polling; configure a shared event_bus")
+			}
+			streamMode = api.StreamPoll
+		}
+		if mode == "all" && streamMode == api.StreamPush {
+			hasRelay := false
+			for _, s := range specs["job"].Enabled() {
+				if s.Name == "event_relay" {
+					hasRelay = true
+				}
+			}
+			if !hasRelay {
+				log.Warn("SSE push is enabled but the event_relay job is not configured; live events will not be published")
+			}
+		}
 		authns, err := plugin.BuildAll(ctx, plugin.Authenticator, h, specs["authenticator"])
 		if err != nil {
 			return nil, err
@@ -384,6 +407,8 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			DefaultVersion: h.Settings.DefaultProfileVersion, Log: log,
 			Deltas: h.Deltas, BranchPolicy: domain.BranchPolicy(e.str("HARNESS_BRANCH_POLICY", string(domain.BranchQueue))),
 			MaxPendingTurn: e.int("HARNESS_MAX_PENDING_TURNS", 8), Tools: h.Tools, Policy: h.Policy,
+			Events: h.Events, StreamMode: streamMode, StreamTick: e.dur("HARNESS_SSE_TICK", 30*time.Second),
+			PollInterval:   e.dur("HARNESS_SSE_POLL", 500*time.Millisecond),
 			ResolveProfile: h.Eval.ResolveProfile, Rules: rules.Rules, Auth: &auth.Chain{Authenticators: authns, Roles: store},
 			Audit: store, Admin: store, Metrics: metrics, Plugins: func() any { return a.PluginReport() }}
 		h.Server = srv

@@ -11,6 +11,7 @@ import (
 	_ "go-sre-harness/plugins/messaging"
 	_ "go-sre-harness/plugins/models"
 	_ "go-sre-harness/plugins/profiles"
+	_ "go-sre-harness/plugins/relay"
 	_ "go-sre-harness/plugins/sretools"
 	_ "go-sre-harness/plugins/storage"
 	_ "go-sre-harness/plugins/strategies"

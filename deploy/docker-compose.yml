@@ -56,7 +56,9 @@ services:
       HARNESS_HTTP_ADDR: 0.0.0.0:8080
     ports: ["8080:8080"]
     volumes: [artifacts:/data, ./tokens.json:/config/tokens.json:ro]
-    depends_on: {migrate: {condition: service_completed_successfully}}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      nats: {condition: service_started}
 
 volumes:
   pgdata: {}
