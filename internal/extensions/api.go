@@ -27,6 +27,14 @@ type API struct {
 	ResolveModel func(tenantID string) (endpointID, modelID string, err error)
 	// Audit records changes (optional).
 	Audit func(ctx context.Context, tenant, actor, action, resource string, details map[string]any)
+	// Toggles persists the tenant's per-tool switches (optional).
+	Toggles ToolToggles
+}
+
+// ToolToggles stores which tools a tenant switched off.
+type ToolToggles interface {
+	DisabledTools(ctx context.Context, tenantID string) (map[string]bool, error)
+	SetToolEnabled(ctx context.Context, tenantID, name string, enabled bool, actor string) error
 }
 
 var pathKinds = map[string]Kind{"mcp-servers": KindMCP, "http-tools": KindHTTP, "skills": KindSkill, "models": KindModel, "web-tools": KindWeb}
@@ -35,6 +43,7 @@ func (a *API) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
 		"GET /v1/extensions":                           auth.Viewer,
 		"GET /v1/tools":                                auth.Viewer,
+		"PUT /v1/tools/{name}":                         auth.Admin,
 		"PUT /v1/extensions/{kind}/{name}":             auth.Admin,
 		"DELETE /v1/extensions/{kind}/{name}":          auth.Admin,
 		"POST /v1/extensions/mcp-servers/{name}/probe": auth.Admin,
@@ -46,6 +55,7 @@ func (a *API) RouteRoles() map[string]auth.Role {
 func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/extensions", a.list)
 	mux.HandleFunc("GET /v1/tools", a.listTools)
+	mux.HandleFunc("PUT /v1/tools/{name}", a.setTool)
 	mux.HandleFunc("PUT /v1/extensions/{kind}/{name}", a.put)
 	mux.HandleFunc("DELETE /v1/extensions/{kind}/{name}", a.del)
 	mux.HandleFunc("POST /v1/extensions/mcp-servers/{name}/probe", a.probe)
@@ -355,6 +365,7 @@ func (a *API) testModel(w http.ResponseWriter, r *http.Request) {
 type ToolView struct {
 	tools.Descriptor
 	AllowedByProfile bool `json:"allowed_by_profile"`
+	Enabled          bool `json:"enabled"`
 }
 
 func (a *API) listTools(w http.ResponseWriter, r *http.Request) {
@@ -369,13 +380,60 @@ func (a *API) listTools(w http.ResponseWriter, r *http.Request) {
 			rules, ref = rr, rf
 		}
 	}
+	off := map[string]bool{}
+	if a.Toggles != nil {
+		if m, err := a.Toggles.DisabledTools(r.Context(), p.Tenant); err == nil {
+			off = m
+		}
+	}
 	out := make([]ToolView, 0, len(ds))
 	for _, d := range ds {
 		eff := rules.Effective(d)
-		out = append(out, ToolView{Descriptor: eff, AllowedByProfile: rules.AllowsTool(d.Name)})
+		allowed := rules.AllowsTool(d.Name)
+		out = append(out, ToolView{Descriptor: eff, AllowedByProfile: allowed, Enabled: allowed && !off[d.Name]})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	writeJSON(w, http.StatusOK, map[string]any{"tools": out, "profile": ref})
+}
+
+// setTool turns one tool on or off for the tenant. It can only restrict: a
+// tool the profile denies stays off.
+func (a *API) setTool(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if a.Toggles == nil {
+		writeErr(w, http.StatusNotImplemented, "unsupported", "tool switches are not configured")
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || body.Enabled == nil {
+		writeErr(w, http.StatusBadRequest, "invalid_body", `body must be {"enabled": true|false}`)
+		return
+	}
+	name := r.PathValue("name")
+	known := false
+	for _, d := range a.Registry.DescriptorsFor(p.Tenant) {
+		if d.Name == name {
+			known = true
+			break
+		}
+	}
+	if !known {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown tool")
+		return
+	}
+	if err := a.Toggles.SetToolEnabled(r.Context(), p.Tenant, name, *body.Enabled, p.Subject); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "cannot save the tool switch")
+		return
+	}
+	a.audit(r.Context(), p, "tool.toggle", Kind("tool"), name, map[string]any{"enabled": *body.Enabled})
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "enabled": *body.Enabled})
 }
 
 func (a *API) audit(ctx context.Context, p auth.Principal, action string, kind Kind, name string, details map[string]any) {

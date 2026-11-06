@@ -367,6 +367,14 @@ dialog h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; letter-spacing:
 .tool-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; color: var(--faint); font-size: 11.5px; }
 .tool-source { border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; }
 .tool-trust { font-variant-numeric: tabular-nums; }
+.switch { position: relative; display: inline-flex; width: 36px; height: 21px; margin-left: auto; flex-shrink: 0; cursor: pointer; }
+.switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.switch .track { position: absolute; inset: 0; border-radius: 999px; background: var(--sunken); border: 1px solid var(--line-strong); transition: background var(--fast), border-color var(--fast); }
+.switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 2px rgb(0 0 0 / .18); transition: transform var(--fast); }
+.switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .track::after { transform: translateX(15px); background: #fff; }
+.switch input:disabled + .track { opacity: .4; }
+.switch input:focus-visible + .track { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; }
 .hint-tag { display: inline-block; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; margin-top: 4px; margin-right: 4px; }
 .hint-tag.bad { color: var(--bad); }
 .risk-tag { font-size: 11px; font-weight: 600; border-radius: 5px; padding: 1px 6px; background: var(--sunken); color: var(--muted); font-variant-numeric: tabular-nums; }

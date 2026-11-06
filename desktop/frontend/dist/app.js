@@ -1438,16 +1438,33 @@ function renderToolsTab() {
       t(". Tools it does not allow are hidden from runs that use it. In a chat, “use <tool> {json}” asks the agent to call a tool.")),
     h("div", { class: "tool-grid" }, list.map((d) => {
       const desc = (d.description || "").replace(/^\[[^\]]*\]\s*/, "");
-      return h("article", { class: "tool-card" + (d.allowed_by_profile ? "" : " off"), title: desc },
+      const allowed = !!d.allowed_by_profile;
+      const on = allowed && d.enabled !== false;
+      return h("article", { class: "tool-card" + (on ? "" : " off"), title: desc },
         h("div", { class: "tool-head" },
           h("span", { class: "tool-name mono" }, d.name),
           h("span", { class: "risk-tag r" + (d.risk || "R0").slice(1) }, d.risk),
-          d.allowed_by_profile ? h("span", { class: "badge s-ok" }, t("allowed")) : h("span", { class: "badge s-idle" }, t("blocked"))),
+          !allowed ? h("span", { class: "badge s-idle" }, t("blocked"))
+            : on ? h("span", { class: "badge s-ok" }, t("allowed")) : h("span", { class: "badge s-idle" }, t("disabled")),
+          h("label", { class: "switch", title: allowed ? t("Hide this tool from runs of this tenant") : t("The profile does not allow this tool") },
+            h("input", { type: "checkbox", checked: on, disabled: !allowed, onchange: (e) => toggleTool(d.name, e.target.checked) }),
+            h("span", { class: "track" }))),
         h("p", { class: "tool-desc" }, desc),
         h("div", { class: "tool-foot" },
           h("span", { class: "tool-source" }, src(d)),
           d.trust ? h("span", { class: "tool-trust" }, d.trust) : null));
     })));
+}
+
+async function toggleTool(name, enabled) {
+  try {
+    await api().SetToolEnabled(name, enabled);
+    toast(t(enabled ? "Enabled {name}" : "Disabled {name}", { name }));
+    cz.tools = await api().Tools();
+  } catch (e) {
+    toast(errText(e), true);
+  }
+  renderCustomize();
 }
 
 // ---------- settings: appearance, connection, models, notifications, about ----------

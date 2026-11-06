@@ -431,6 +431,16 @@ func (a *App) Extensions() (map[string]any, error) { return a.get("/v1/extension
 // default profile allows each.
 func (a *App) Tools() (map[string]any, error) { return a.get("/v1/tools") }
 
+// SetToolEnabled turns one tool on or off for the tenant (admin).
+func (a *App) SetToolEnabled(name string, enabled bool) (map[string]any, error) {
+	c, err := a.c()
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	return out, c.Do(a.ctx, http.MethodPut, "/v1/tools/"+url.PathEscape(name), map[string]any{"enabled": enabled}, &out)
+}
+
 var extKinds = map[string]bool{"mcp-servers": true, "http-tools": true, "skills": true, "models": true}
 
 // PutExtension creates or replaces an extension (admin). kind is

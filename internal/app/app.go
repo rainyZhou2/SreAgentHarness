@@ -374,6 +374,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			Compactor:   compactor,
 			Rules:       rules,
 			Skills:      h.Extensions,
+			ToolToggles: store,
 			Strategies:  &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
 			Observer:    observers,
 		}, store, h.Artifacts, defaultStrategy, h.Tools, h.Policy, log)
