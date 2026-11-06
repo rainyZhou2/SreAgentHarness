@@ -21,6 +21,7 @@
 | | Claude（官方 Go SDK，默认 `claude-opus-5-5`，adaptive thinking、prompt cache）与 OpenAI 兼容适配器 | `gateway/anthropic`、`gateway/openai` |
 | | 请求/尝试/用量账本（ESTIMATED → REPORTED 修订），成本查询，Token 流片段落盘 + SSE delta | `pg/model.go`、`stream/` |
 | **上下文** | Prompt Manifest（分区哈希、`rendered_request_hash`），Checkpoint 与 fork，确定性 Compaction | `cognitive/assembler.go`、`kernel/compact.go`、`pg/checkpoint.go` |
+| **意图识别** | 每条消息先区分问答 / 诊断 / 澄清；问答直接作答，诊断沿用调查与审批流程 | `cognitive/assembler.go`、`kernel/worker.go` |
 | **长期记忆** | 写入脱敏 + 投毒检测；全文 + 向量 + 依赖图三路召回，RRF 融合，冲突裁决，按 Step 钉住 | `internal/memory`、`pg/memory.go` |
 | | 冷路径 Consolidator：Run → Experience → 候选记忆；操作员反馈只把候选记忆推进到 VALIDATING（由 approver 激活）或否决 | `memory/consolidate.go` |
 | **评估与演进** | 从真实 Run 录制数据集（冻结后带 manifest hash），离线回放（写工具一律拦截） | `internal/eval` |

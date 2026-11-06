@@ -131,7 +131,7 @@ func (a Assembler) Apply(o AssemblerOptions) Assembler {
 }
 
 func DefaultAssembler() Assembler {
-	return Assembler{PromptPrefixVersion: "sre-prefix-v1", ProfileRef: "default@1", MaxContextTokens: 150_000,
+	return Assembler{PromptPrefixVersion: "sre-prefix-v2", ProfileRef: "default@1", MaxContextTokens: 150_000,
 		MaxObservationBytes: 16_000, MaxOutputTokens: 16_000}
 }
 
@@ -140,23 +140,28 @@ func DefaultAssembler() Assembler {
 const ConclusionTool = "submit_conclusion"
 
 var conclusionSchema = json.RawMessage(`{"type":"object","properties":{
-"answer":{"type":"string","description":"Final answer for the operator: probable cause, evidence, actions taken or recommended."},
+"intent":{"type":"string","enum":["question","task","clarification"],"description":"question: the user wants an explanation or a status answer. task: the user wants a diagnosis, a remediation or any change. clarification: the request is ambiguous and acting could be harmful."},
+"answer":{"type":"string","description":"Final answer for the operator. For a question, answer it directly. For a task, state the probable cause, evidence, actions taken or recommended."},
 "reason_summary":{"type":"string","description":"One or two sentences explaining why this conclusion follows from the evidence."},
-"hypotheses":{"type":"array","description":"Hypotheses considered, each with id, statement, status (VERIFIED|REFUTED|UNVERIFIED) and confidence_estimate.","items":{"type":"object"}},
+"hypotheses":{"type":"array","description":"Hypotheses considered, each with id, statement, status (VERIFIED|REFUTED|UNVERIFIED) and confidence_estimate. Omit for a question.","items":{"type":"object"}},
 "evidence_refs":{"type":"array","items":{"type":"string"}}},
 "required":["answer","reason_summary"]}`)
 
 // DefaultInstructions is section [A]'s role text; a context assembler plugin
 // may replace it (Assembler.Instructions). TrustRules are always appended.
-const DefaultInstructions = `You are an SRE incident investigation agent running inside a durable harness.
+const DefaultInstructions = `You are an operator assistant running inside a durable harness. The user's message for this turn is in [goal].
+
+First decide what the user is asking for:
+- Question: an explanation, a comparison, or a status answer. Answer directly with submit_conclusion and intent=question. Use a tool only when the answer depends on live state you do not have; never call a tool just to look thorough. Do not invent an incident, hypotheses or remediation.
+- Task: a diagnosis, a remediation or any change. Investigate: prefer read-only tools first, form hypotheses, verify or refute them with evidence, then conclude with intent=task.
+- Clarification: the request is ambiguous and acting could be harmful. Ask one concise question with intent=clarification instead of guessing.
 
 How you work:
-- Each response is one step. Either call exactly one tool to gather evidence or act, or call submit_conclusion when you can answer.
-- Prefer read-only tools first. Form hypotheses and try to verify or refute them with evidence before concluding.
+- Each response is one step. Either call exactly one tool, or call submit_conclusion when you can answer.
+- Before calling a tool, write one or two sentences saying what you expect to learn.
 - Side-effecting tools (restarts, rollouts) go through a policy gate and human approval. Propose them only when the evidence supports them, and say why in your text.
 - If a tool result says an action was denied, rejected or expired, do not retry the same action; conclude or choose a different safe step.
-
-Before calling a tool, write one or two sentences saying what you expect to learn. Keep conclusions factual: cause, supporting evidence, actions taken, and what remains uncertain.`
+- Keep conclusions factual. For a task, state cause, supporting evidence, actions taken and what remains uncertain. For a question, answer the question and stop.`
 
 // TrustRules is the framework floor of the system prompt: no assembler
 // configuration can remove it.
@@ -270,8 +275,7 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 			"[memory ref=%s kind=%s trust=%s score=%.3f — past experience, verify before use]\n%s\n%s",
 			ref, m.Kind, m.Trust, m.Score, m.Title, m.Content)})
 	}
-	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: fmt.Sprintf(
-		"[instruction] Decide the next step for the goal. Call exactly one tool, or call %s if you can conclude.", ConclusionTool)})
+	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: instruction(in.HasToolSteps)})
 	dj, _ := json.Marshal(dyn)
 	man.SectionHashes["D"] = artifact.Hash(dj)
 	for _, p := range dyn {
@@ -313,6 +317,15 @@ func (a Assembler) observationBudget(in ReasoningInput) []int {
 	return out
 }
 
+// instruction is the step-specific tail of section [D]. The first step of a
+// turn analyzes the request; later steps continue the investigation.
+func instruction(hasToolSteps bool) string {
+	if hasToolSteps {
+		return fmt.Sprintf("[instruction] Continue the investigation for the goal. Call exactly one tool, or call %s when the evidence is sufficient.", ConclusionTool)
+	}
+	return fmt.Sprintf("[instruction] Analyze the user's message first. If it is a question, answer it with %s (intent=question) without calling tools unless live data is required. If it needs diagnosis or action, start the investigation with one tool (intent=task). If it is ambiguous and acting could be harmful, ask for clarification (intent=clarification).", ConclusionTool)
+}
+
 func schemaOrDefault(s json.RawMessage) json.RawMessage {
 	if len(s) == 0 {
 		return json.RawMessage(`{"type":"object","properties":{}}`)
@@ -332,6 +345,16 @@ func compactJSON(b json.RawMessage) string {
 	return string(out)
 }
 
+// intentOf normalizes the model's intent. An absent or unknown value keeps
+// the historical behaviour: treat the turn as an operational task.
+func intentOf(s string) domain.Intent {
+	switch domain.Intent(s) {
+	case domain.IntentQuestion, domain.IntentTask, domain.IntentClarification:
+		return domain.Intent(s)
+	}
+	return domain.IntentTask
+}
+
 // decisionFromResponse maps a validated model response onto a Decision.
 func decisionFromResponse(resp gw.Response) (domain.Decision, error) {
 	d := domain.Decision{SchemaVersion: 1, ReasonSummary: strings.TrimSpace(resp.Text)}
@@ -340,6 +363,7 @@ func decisionFromResponse(resp gw.Response) (domain.Decision, error) {
 		c := resp.ToolCalls[i]
 		if c.Name == ConclusionTool {
 			var concl struct {
+				Intent        string              `json:"intent"`
 				Answer        string              `json:"answer"`
 				ReasonSummary string              `json:"reason_summary"`
 				Hypotheses    []domain.Hypothesis `json:"hypotheses"`
@@ -348,7 +372,8 @@ func decisionFromResponse(resp gw.Response) (domain.Decision, error) {
 			if err := json.Unmarshal(c.Args, &concl); err != nil {
 				return d, fmt.Errorf("submit_conclusion arguments: %w", err)
 			}
-			d.Kind, d.Answer, d.Hypotheses, d.EvidenceRefs = domain.DecisionFinal, concl.Answer, concl.Hypotheses, concl.EvidenceRefs
+			d.Kind, d.Intent, d.Answer, d.Hypotheses, d.EvidenceRefs = domain.DecisionFinal, intentOf(concl.Intent),
+				concl.Answer, concl.Hypotheses, concl.EvidenceRefs
 			if concl.ReasonSummary != "" {
 				d.ReasonSummary = concl.ReasonSummary
 			}

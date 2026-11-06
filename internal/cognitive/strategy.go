@@ -22,6 +22,9 @@ type ReasoningInput struct {
 	Evidence          []domain.Evidence    // operator evidence pinned in the snapshot
 	Tools             []tools.Descriptor   // tool schemas visible to the model
 	Skills            []Skill              // tenant skills (operator-installed playbooks)
+	// HasToolSteps reports that this run already executed a tool, so the
+	// request is past the initial intent analysis.
+	HasToolSteps bool
 
 	// v1.1 context (§29, §33): all of it is pinned by the snapshot.
 	Call            CallScope
@@ -56,6 +59,11 @@ func Validate(d domain.Decision) error {
 		}
 	default:
 		return fmt.Errorf("unknown decision kind %q", d.Kind)
+	}
+	switch d.Intent {
+	case "", domain.IntentQuestion, domain.IntentTask, domain.IntentClarification:
+	default:
+		return fmt.Errorf("unknown intent %q", d.Intent)
 	}
 	return nil
 }
