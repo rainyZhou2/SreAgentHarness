@@ -19,6 +19,7 @@ import (
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/eventbus"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
@@ -74,6 +75,12 @@ type Server struct {
 	MaxPendingTurn int
 	// Deltas is the ephemeral token stream (optional).
 	Deltas stream.Bus
+	// Events distributes committed run events to replicas (optional). Without
+	// it, or in poll mode, SSE reads the durable log directly.
+	Events     eventbus.Bus
+	StreamMode string
+	// StreamTick is the durable-log check while live delivery is healthy.
+	StreamTick time.Duration
 	// Rules returns the enforced rules of a profile version; commands that
 	// plan tool steps (replace_pending_input) decide through them. Nil means
 	// unrestricted.
@@ -100,6 +107,7 @@ type Server struct {
 
 	extensions []Extension
 	extRoles   map[string]auth.Role
+	hub        *eventHub
 }
 
 // Extension is an API route plugin. Every non-GET route it registers must be
@@ -123,6 +131,12 @@ func (s *Server) Extend(ext Extension) { s.extensions = append(s.extensions, ext
 func (s *Server) Handler() http.Handler {
 	if s.PollInterval == 0 {
 		s.PollInterval = 500 * time.Millisecond
+	}
+	if s.StreamTick <= 0 {
+		s.StreamTick = 30 * time.Second
+	}
+	if s.pushEnabled() {
+		s.hub = newEventHub(s.Events, s.Log)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
@@ -423,95 +437,6 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
-}
-
-// streamEvents serves SSE from the durable event cursor (§17.3): reconnecting
-// with Last-Event-ID resumes without gaps; a client disconnect never affects
-// the run. The stream ends after the terminal event of a finished run, with
-// a final "stream.end" message (no id).
-func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
-	id, ok := ident(w, r)
-	if !ok {
-		return
-	}
-	runID := r.PathValue("run_id")
-	if _, err := s.Store.GetRun(r.Context(), id.tenant, runID); err != nil {
-		s.storeErr(w, err)
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "no_streaming", "streaming unsupported")
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	cursor := afterSeq(r)
-	ctx := r.Context()
-	lastWrite := time.Now()
-	var deltas <-chan stream.Delta
-	if s.Deltas != nil && r.URL.Query().Get("include_deltas") == "true" {
-		ch, cancel := s.Deltas.Subscribe(id.tenant, runID)
-		defer cancel()
-		deltas = ch
-	}
-	for {
-		events, err := s.Store.ListEvents(ctx, id.tenant, runID, cursor, 500)
-		if err != nil {
-			return
-		}
-		for _, e := range events {
-			data, _ := json.Marshal(e)
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, e.Type, data)
-			cursor = e.Seq
-		}
-		if len(events) > 0 {
-			flusher.Flush()
-			lastWrite = time.Now()
-			continue
-		}
-		run, err := s.Store.GetRun(ctx, id.tenant, runID)
-		if err != nil {
-			return
-		}
-		if run.Status.Terminal() && run.LastEventSeq <= cursor {
-			// Tell the client the stream is complete, so it does not
-			// mistake the close for a dropped connection and reconnect.
-			fmt.Fprintf(w, "event: stream.end\ndata: {\"status\":%q}\n\n", run.Status)
-			flusher.Flush()
-			return
-		}
-		if time.Since(lastWrite) > 15*time.Second {
-			fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
-			lastWrite = time.Now()
-		}
-		timer := time.NewTimer(s.PollInterval)
-	wait:
-		for {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case d, ok := <-deltas:
-				if !ok {
-					deltas = nil
-					continue
-				}
-				// Deltas carry no event id: they are not replayable and a
-				// reconnect resumes from the durable event cursor (§35.4).
-				data, _ := json.Marshal(d)
-				fmt.Fprintf(w, "event: model.delta\ndata: %s\n\n", data)
-				flusher.Flush()
-				lastWrite = time.Now()
-			case <-timer.C:
-				break wait
-			}
-		}
-	}
 }
 
 func (s *Server) postCommand(w http.ResponseWriter, r *http.Request) {

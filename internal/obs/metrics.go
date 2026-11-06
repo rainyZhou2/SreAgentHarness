@@ -257,6 +257,11 @@ type Metrics struct {
 	toolCalls     Counter
 	retention     Counter
 	sinkEvents    Counter
+	streamConns   Gauge
+	streamReads   Counter
+	streamEvents  Counter
+	relayEvents   Counter
+	relayLag      Gauge
 }
 
 func NewMetrics() *Metrics {
@@ -274,6 +279,11 @@ func NewMetrics() *Metrics {
 		toolCalls:     r.Counter("harness_tool_calls_total", "Tool invocations by tool source, risk and outcome.", "source", "risk", "outcome"),
 		retention:     r.Counter("harness_retention_deleted_total", "Rows/objects removed by retention.", "kind"),
 		sinkEvents:    r.Counter("harness_event_sink_total", "Event sink deliveries by sink and outcome (delivered, retried, skipped).", "sink", "outcome"),
+		streamConns:   r.Gauge("harness_sse_connections", "Open SSE connections."),
+		streamReads:   r.Counter("harness_sse_db_reads_total", "Durable log reads made on behalf of SSE clients.", "reason"),
+		streamEvents:  r.Counter("harness_sse_events_total", "Events written to SSE clients.", "source"),
+		relayEvents:   r.Counter("harness_event_relay_total", "Event relay outcomes.", "outcome"),
+		relayLag:      r.Gauge("harness_event_relay_lag_seconds", "Age of the newest event published by the relay."),
 	}
 }
 
@@ -321,3 +331,15 @@ func (m *Metrics) ObserveTool(source, risk, outcome string) {
 }
 
 func (m *Metrics) ObserveRetention(kind string, n int64) { m.retention.Add(float64(n), kind) }
+
+func (m *Metrics) StreamOpened() { m.streamConns.Add(1) }
+
+func (m *Metrics) StreamClosed() { m.streamConns.Add(-1) }
+
+func (m *Metrics) ObserveStreamRead(reason string) { m.streamReads.Inc(reason) }
+
+func (m *Metrics) ObserveStreamEvent(source string) { m.streamEvents.Inc(source) }
+
+func (m *Metrics) ObserveRelay(outcome string) { m.relayEvents.Inc(outcome) }
+
+func (m *Metrics) ObserveRelayLag(d time.Duration) { m.relayLag.Set(d.Seconds()) }
