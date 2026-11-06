@@ -335,40 +335,70 @@ dialog h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; letter-spacing:
 .editor-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .editor-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
 .editor .actions { align-items: center; border-top: 1px solid var(--line); padding-top: 14px; margin-top: 16px; }
-
-/* Customize: glass surfaces instead of framed panels. */
-.customize { max-width: 820px; padding: 20px 0 64px; }
-.customize h1 { font-size: 26px; letter-spacing: -0.03em; margin: 0 0 8px; }
-.customize .lead { margin: 0 0 22px; max-width: 620px; line-height: 1.65; }
-.customize .tabs { border-bottom: 0; gap: 4px; margin-bottom: 20px; }
-.customize .tab { border-bottom: 0; margin-bottom: 0; padding: 7px 12px; border-radius: 8px;
-  transition: background var(--fast), color var(--fast), box-shadow var(--fast); }
-.customize .tab:hover { background: var(--hover); }
-.customize .tab.on { background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float); }
-.customize .list-bar { margin-bottom: 14px; }
-.customize .empty-card { border: 0; border-radius: var(--r-shell); padding: 52px clamp(28px, 8vw, 72px);
-  background: var(--glass); -webkit-backdrop-filter: var(--blur-lg); backdrop-filter: var(--blur-lg);
-  box-shadow: inset 0 1px 0 var(--glass-edge); line-height: 1.7; }
-.customize .ext-card { border: 0; border-radius: var(--r-panel); padding: 16px 18px; margin-bottom: 10px;
-  background: var(--glass); -webkit-backdrop-filter: var(--blur-lg); backdrop-filter: var(--blur-lg);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float);
-  transition: background var(--fast), box-shadow var(--fast), transform var(--fast); }
-.customize .ext-card:hover { background: var(--glass-strong);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-overlay); transform: translateY(-1px); }
-.customize .editor { border: 0; border-radius: var(--r-shell); padding: 22px 24px;
-  background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-lg); backdrop-filter: var(--blur-lg);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float); }
-.customize .editor .actions { border-top-color: var(--glass-line); }
-.customize .tool-card { border: 0; background: var(--glass);
-  -webkit-backdrop-filter: var(--blur-lg); backdrop-filter: var(--blur-lg);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float);
-  transition: background var(--fast), box-shadow var(--fast), transform var(--fast); }
-.customize .tool-card:hover { border-color: transparent; background: var(--glass-strong);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-overlay); transform: translateY(-1px); }
 .spacer { flex: 1; }
 .link-btn { border: 0; background: none; color: var(--accent); padding: 2px 0; font-size: 13px; }
 .link-btn:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Customize: glass surfaces that match the sidebar and composer. Scoped so
+   the Plugins page and the dialogs keep their current look. */
+.customize { position: relative; padding-top: 12px; }
+.customize::before {
+  content: ""; position: absolute; inset: -30px -30px auto; height: 280px; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(55% 90% at 12% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+    radial-gradient(45% 80% at 95% 8%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 70%);
+  filter: blur(18px);
+}
+.customize > * { position: relative; z-index: 1; }
+.customize .cz-head { display: flex; align-items: flex-start; gap: 14px; margin: 0 0 22px; }
+.customize .cz-mark { width: 38px; height: 38px; flex-shrink: 0; display: grid; place-items: center; color: var(--muted);
+  border: 1px solid var(--glass-line); border-radius: 11px; background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 1px 2px rgb(0 0 0 / .04); }
+.customize .cz-title h1 { margin: 0 0 4px; font-size: 23px; }
+.customize .lead { margin: 0; max-width: 660px; line-height: 1.6; }
+.customize .tabs { display: inline-flex; gap: 2px; width: auto; padding: 3px; margin: 0 0 18px;
+  border: 1px solid var(--glass-line); border-radius: 11px; background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge); }
+.customize .tab { margin: 0; padding: 7px 12px; border-bottom: 0; border-radius: 8px; font-size: 13px; color: var(--muted);
+  transition: background var(--fast), color var(--fast), box-shadow var(--fast); }
+.customize .tab:hover { color: var(--text); background: var(--hover); }
+.customize .tab.on { color: var(--text); background: var(--glass-strong); font-weight: 550;
+  box-shadow: inset 0 0 0 1px var(--glass-line), 0 1px 2px rgb(0 0 0 / .06); }
+.customize .count { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.customize .list-bar { margin: 2px 0 14px; }
+.customize .ext-card, .customize .tool-card, .customize .empty-card, .customize .editor {
+  border: 1px solid var(--glass-line); border-radius: var(--r-shell); background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 12px 30px -26px rgb(0 0 0 / .30); }
+.customize .ext-card, .customize .tool-card {
+  transition: background var(--fast), border-color var(--fast), box-shadow var(--fast), transform var(--fast); }
+.customize .ext-card:hover, .customize .tool-card:hover {
+  border-color: var(--line-strong); background: var(--glass-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float); transform: translateY(-1px); }
+.customize .ext-card { padding: 15px 17px; margin-bottom: 9px; }
+.customize .ext-ico { width: 34px; height: 34px; flex-shrink: 0; display: grid; place-items: center; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 9px; background: var(--sunken); }
+.customize .tool-grid { gap: 12px; }
+.customize .tool-card { padding: 16px 18px; }
+.customize .empty-card { padding: 38px 28px; border-style: solid; }
+.customize .empty-mark { width: 42px; height: 42px; margin: 0 auto 12px; display: grid; place-items: center; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 12px; background: var(--sunken); }
+.customize .empty-title { margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.customize .editor { padding: 20px 24px; }
+.customize .editor .actions { border-top-color: var(--glass-line); }
+@media (prefers-reduced-transparency: reduce) {
+  .customize .cz-mark, .customize .tabs, .customize .ext-card, .customize .tool-card, .customize .empty-card, .customize .editor {
+    background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+}
+html.no-glass .customize .cz-mark, html.no-glass .customize .tabs, html.no-glass .customize .ext-card,
+html.no-glass .customize .tool-card, html.no-glass .customize .empty-card, html.no-glass .customize .editor {
+  background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+@media (prefers-reduced-motion: reduce) {
+  .customize .ext-card, .customize .tool-card { transition: none; }
+  .customize .ext-card:hover, .customize .tool-card:hover { transform: none; }
+}
 .icon-btn { border: 1px solid var(--line-strong); background: var(--surface); border-radius: var(--r-control); width: 32px; flex-shrink: 0; color: var(--muted); }
 .icon-btn:hover { color: var(--text); background: var(--hover); }
 .kv-edit { margin: -6px 0 14px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
@@ -525,7 +555,6 @@ html.native .side-head { padding-top: 44px; } /* room for the inset traffic ligh
   .sidebar { background: var(--side); }
   .new-chat, .btn:not(.primary):not(.approve):not(.danger-solid):not(.ghost), .head-btn, .chip, .icon-btn, .side-search input { background: var(--surface); }
   .composer, .slash, .menu, dialog { background: var(--surface); }
-  .customize .empty-card, .customize .ext-card, .customize .editor, .customize .tool-card, .customize .tab.on { background: var(--surface); }
 }
 @media (prefers-reduced-transparency: reduce) {
   html.native, html.native body, body, .main { background: var(--canvas); }
@@ -533,8 +562,6 @@ html.native .side-head { padding-top: 44px; } /* room for the inset traffic ligh
   .new-chat, .btn:not(.primary):not(.approve):not(.danger-solid):not(.ghost), .head-btn, .chip, .icon-btn, .side-search input,
   .composer, .slash, .menu, dialog, .toast { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .toast { background: var(--ink); }
-  .customize .empty-card, .customize .ext-card, .customize .editor, .customize .tool-card, .customize .tab.on {
-    background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 
 :root[data-theme="light"] { color-scheme: light; }
@@ -548,9 +575,6 @@ html.no-glass .chip, html.no-glass .icon-btn, html.no-glass .side-search input, 
 html.no-glass .slash-head, html.no-glass .menu, html.no-glass dialog {
   background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
 html.no-glass .side-link.on, html.no-glass .chats li.active { background: var(--active); box-shadow: none; }
-html.no-glass .customize .empty-card, html.no-glass .customize .ext-card, html.no-glass .customize .editor,
-html.no-glass .customize .tool-card, html.no-glass .customize .tab.on {
-  background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
 
 /* ---------- settings ---------- */
 .settings { max-width: 920px; margin: 0 auto; padding: 8px 0 48px; }
@@ -616,3 +640,11 @@ html.no-glass .customize .tool-card, html.no-glass .customize .tab.on {
 .ext-card .preset-mark { width: 34px; height: 34px; }
 .ext-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .grid-name-model { display: grid; grid-template-columns: 170px 1fr; gap: 0 12px; }
+
+/* Customize refinement: keep the glass, drop the frames. */
+.customize .cz-mark { border: 0; background: var(--glass-strong); }
+.customize .tabs { border: 0; }
+.customize .ext-card, .customize .tool-card, .customize .empty-card, .customize .editor { border: 0; }
+.customize .ext-card:hover, .customize .tool-card:hover { border: 0; }
+.customize .ext-ico { border: 0; background: color-mix(in srgb, var(--text) 5%, transparent); }
+.customize .empty-mark { border: 0; background: var(--accent-soft); color: var(--accent); }
