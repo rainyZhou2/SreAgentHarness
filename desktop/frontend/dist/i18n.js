@@ -257,8 +257,9 @@ const ZH = {
   "Web search · {name}": "联网搜索 · {name}",
   "Give the search backend a name first.": "请先给搜索服务命名。",
   "The generic provider needs an endpoint.": "generic 服务商需要填写 endpoint。",
-  "No search backend yet. web.fetch works without configuration; add a search provider to let the agent look up current facts.":
-    "还没有搜索服务。web.fetch 无需配置即可使用；添加搜索服务后，Agent 就能查询实时信息。",
+  "No search backend yet": "还没有搜索服务",
+  "web.fetch works without configuration; add a search provider to let the agent look up current facts.":
+    "web.fetch 无需配置即可使用；添加搜索服务后，Agent 就能查询实时信息。",
   "saved · leave blank to keep": "已保存 · 留空则保留",
   "value": "值",
   "Remove": "移除",
@@ -271,12 +272,15 @@ const ZH = {
   "Add MCP server": "添加 MCP 服务器",
   "Add HTTP tool": "添加 HTTP 工具",
   "New skill": "新建技能",
-  "No MCP servers yet. Add a streamable-HTTP server, pick which of its tools the agent may use and give each a risk class.":
-    "还没有 MCP 服务器。添加一个 Streamable HTTP 服务器，选择 Agent 可以使用的工具，并为每个工具指定风险等级。",
-  "No HTTP tools yet. An HTTP tool POSTs the call's JSON arguments to your endpoint and returns the response.":
-    "还没有 HTTP 工具。HTTP 工具会把调用的 JSON 参数 POST 到你的端点，并返回响应。",
-  "No skills yet. A skill is a playbook (instructions) added to the agent's system prompt in every run.":
-    "还没有技能。技能是一段操作手册（指令），会加入每个 Run 的系统提示词。",
+  "No MCP servers yet": "还没有 MCP 服务器",
+  "No HTTP tools yet": "还没有 HTTP 工具",
+  "No skills yet": "还没有技能",
+  "Add a streamable-HTTP server, pick which of its tools the agent may use and give each a risk class.":
+    "添加一个 Streamable HTTP 服务器，选择 Agent 可以使用的工具，并为每个工具指定风险等级。",
+  "An HTTP tool POSTs the call's JSON arguments to your endpoint and returns the response.":
+    "HTTP 工具会把调用的 JSON 参数 POST 到你的端点，并返回响应。",
+  "A skill is a playbook (instructions) added to the agent's system prompt in every run.":
+    "技能是一段操作手册（指令），会加入每个 Run 的系统提示词。",
   "{n} tool allowed": "允许 {n} 个工具",
   "{n} tools allowed": "允许 {n} 个工具",
   "{n} loaded": "已加载 {n} 个",
