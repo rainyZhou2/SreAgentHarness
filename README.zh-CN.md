@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-依据设计 RFC [`GoAgentHarness.zh-CN.md`](GoAgentHarness.zh-CN.md)（v1.1.3，[English](GoAgentHarness.md)）实现的 SRE Cognitive Agent Harness。覆盖 RFC 的 M1–M7 以及 v1.1 新增章节（对话/分支、模型网关、成本、Checkpoint、Compaction、Profile 灰度）。GPU 推理集群（vLLM/SGLang 路由、KV offload）未实现。
+依据设计 RFC `GoAgentHarness.zh-CN.md`（v1.1.3，英文版 `GoAgentHarness.md`；两份文档仅本地维护，不随仓库发布）实现的 SRE Cognitive Agent Harness。覆盖 RFC 的 M1–M7 以及 v1.1 新增章节（对话/分支、模型网关、成本、Checkpoint、Compaction、Profile 灰度）。GPU 推理集群（vLLM/SGLang 路由、KV offload）未实现。
 
 ## 能力一览
 
