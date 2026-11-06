@@ -28,6 +28,7 @@ import (
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eval"
+	"go-sre-harness/internal/eventbus"
 	"go-sre-harness/internal/eventsink"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/kernel"
@@ -78,6 +79,7 @@ var (
 	Policy          = plugin.Policy
 	StreamBus       = plugin.StreamBus
 	Broker          = plugin.Broker
+	EventBus        = plugin.EventBus
 	ModelProvider   = plugin.ModelProvider
 	Embedder        = plugin.Embedder
 	MemoryRetriever = plugin.MemoryRetriever
@@ -119,6 +121,7 @@ type (
 	ArtifactBlobStore   = artifact.Store
 	DeltaBus            = stream.Bus
 	Delta               = stream.Delta
+	EventBusContract    = eventbus.Bus
 	Publisher           = notify.Publisher
 	Subscriber          = notify.Subscriber
 	Handler             = notify.Handler

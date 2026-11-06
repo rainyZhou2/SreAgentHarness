@@ -8,6 +8,7 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/eval"
+	"go-sre-harness/internal/eventbus"
 	"go-sre-harness/internal/eventsink"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/kernel"
@@ -22,7 +23,7 @@ import (
 // Bootstrap order (each phase sees the Host fields of earlier phases):
 //
 //	telemetry → artifact_store → tools → profile_source → policy →
-//	stream_bus → broker → route_policy → model_provider (→ Host.Gateway) →
+//	stream_bus → broker → event_bus → route_policy → model_provider (→ Host.Gateway) →
 //	embedder → memory_retriever → context_assembler → strategy → compactor →
 //	grader → event_sink → job → authenticator → api
 var (
@@ -32,6 +33,7 @@ var (
 	Policy          = NewKind[policy.Gate]("policy", false, "tool risk policy; framework floor (R2 approval, R3 deny) always applies")
 	StreamBus       = NewKind[stream.Bus]("stream_bus", false, "ephemeral token/delta stream")
 	Broker          = NewKind[MessageBroker]("broker", false, "wake-up notification broker (outbox → workers)")
+	EventBus        = NewKind[eventbus.Bus]("event_bus", false, "committed run event distribution to API replicas; the durable log stays authoritative")
 	ModelProvider   = NewKind[ModelBackend]("model_provider", true, "LLM provider adapters with their endpoints and aliases")
 	Embedder        = NewKind[memory.Embedder]("embedder", false, "text embedder for memory retrieval")
 	MemoryRetriever = NewKind[kernel.MemoryRetriever]("memory_retriever", false, "retrieve_memory step implementation (optional)")

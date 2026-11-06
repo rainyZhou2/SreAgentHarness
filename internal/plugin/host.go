@@ -13,6 +13,7 @@ import (
 	"go-sre-harness/internal/api"
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/eval"
+	"go-sre-harness/internal/eventbus"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/obs"
@@ -35,6 +36,7 @@ type Host struct {
 	Artifacts artifact.Store
 	Tools     *tools.Registry
 	Deltas    stream.Bus
+	Events    eventbus.Bus
 	Policy    policy.Gate
 	Gateway   *gw.Gateway
 	Embedder  memory.Embedder
