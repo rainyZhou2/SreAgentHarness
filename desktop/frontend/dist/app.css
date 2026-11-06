@@ -353,6 +353,20 @@ dialog h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; letter-spacing:
 .tool-table tr.off .mono { color: var(--muted); }
 .tool-table input[type=checkbox] { width: auto; margin-top: 3px; accent-color: var(--accent); }
 .tool-table select { padding: 4px 6px; font-size: 12.5px; width: auto; max-width: 230px; }
+/* Tools tab: capability cards rather than a dense table. */
+.tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tool-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px;
+  border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); }
+.tool-card:hover { border-color: var(--line-strong); }
+.tool-card.off { opacity: .62; }
+.tool-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.tool-card.off .tool-name { color: var(--muted); }
+.tool-desc { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.tool-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; color: var(--faint); font-size: 11.5px; }
+.tool-source { border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; }
+.tool-trust { font-variant-numeric: tabular-nums; }
 .hint-tag { display: inline-block; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; margin-top: 4px; margin-right: 4px; }
 .hint-tag.bad { color: var(--bad); }
 .risk-tag { font-size: 11px; font-weight: 600; border-radius: 5px; padding: 1px 6px; background: var(--sunken); color: var(--muted); font-variant-numeric: tabular-nums; }
