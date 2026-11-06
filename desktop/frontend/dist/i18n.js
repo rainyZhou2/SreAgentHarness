@@ -374,6 +374,10 @@ const ZH = {
   "Source": "来源",
   "Profile": "Profile",
   "built-in": "内置",
+  "Hide this tool from runs of this tenant": "对本租户的 Run 隐藏此工具",
+  "The profile does not allow this tool": "Profile 不允许此工具",
+  "Enabled {name}": "已开启 {name}",
+  "Disabled {name}": "已关闭 {name}",
   "allowed": "允许",
   "blocked": "禁止",
 };

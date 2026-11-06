@@ -37,7 +37,7 @@ func init() {
 				return nil, errors.New("requires the API server and the extensions runtime")
 			}
 			srv := h.Server
-			return &extensions.API{Runtime: h.Extensions, Registry: h.Tools,
+			return &extensions.API{Runtime: h.Extensions, Registry: h.Tools, Toggles: h.Store,
 				DefaultRules: func(ctx context.Context, tenant string) (profile.Rules, string, error) {
 					ref := fmt.Sprintf("%s@%d", srv.DefaultProfile, srv.DefaultVersion)
 					if srv.Rules == nil {

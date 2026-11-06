@@ -89,6 +89,8 @@ type Config struct {
 	// Skills supplies the tenant's skills rendered into the system prompt
 	// (optional).
 	Skills SkillSource
+	// ToolToggles hides tools the tenant switched off (optional).
+	ToolToggles ToolToggles
 }
 
 // SkillSource returns a tenant's enabled skills.
@@ -122,6 +124,12 @@ type StrategyResolver interface {
 // committed with the step and pinned for the following reason steps.
 type MemoryRetriever interface {
 	Retrieve(ctx context.Context, lease domain.Lease, goal string) (domain.StepSuccess, error)
+}
+
+// ToolToggles reports the tools a tenant switched off. It is applied on top
+// of the profile allowlist and can only hide tools.
+type ToolToggles interface {
+	DisabledTools(ctx context.Context, tenantID string) (map[string]bool, error)
 }
 
 func (c *Config) defaults() {
@@ -543,8 +551,16 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 	if err != nil {
 		return cognitive.ReasoningInput{}, err
 	}
+	visible := rules.Visible(w.tools.DescriptorsFor(lease.TenantID))
+	if w.cfg.ToolToggles != nil {
+		off, err := w.cfg.ToolToggles.DisabledTools(ctx, lease.TenantID)
+		if err != nil {
+			return cognitive.ReasoningInput{}, err
+		}
+		visible = withoutDisabled(visible, off)
+	}
 	in := cognitive.ReasoningInput{StepSeq: lease.StepSeq, ContextSnapshotID: lease.ContextSnapshotID,
-		Tools: rules.Visible(w.tools.DescriptorsFor(lease.TenantID))}
+		Tools: visible}
 	var g goalDoc
 	if err := w.get(ctx, lease.TenantID, lease.GoalRef, &g); err != nil {
 		return in, err
@@ -665,6 +681,15 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		// Defense in depth: planning already denies this; nothing was sent.
 		return domain.StepSuccess{}, fmt.Errorf("tool %q is not allowed by profile %s: %w", call.Name, rules.Ref, domain.ErrNotDispatched)
 	}
+	if w.cfg.ToolToggles != nil {
+		off, err := w.cfg.ToolToggles.DisabledTools(ctx, lease.TenantID)
+		if err != nil {
+			return domain.StepSuccess{}, err
+		}
+		if off[call.Name] {
+			return domain.StepSuccess{}, fmt.Errorf("tool %q is disabled for this tenant: %w", call.Name, domain.ErrNotDispatched)
+		}
+	}
 	desc := rules.Effective(tool.Descriptor())
 	target := tools.Target(desc, call.Args)
 	// The approved intent must still describe exactly what we are about to run.
@@ -758,6 +783,20 @@ func (w *Worker) messageText(ctx context.Context, tenantID string, m domain.Mess
 		}
 	}
 	return string(data)
+}
+
+// withoutDisabled removes tools the tenant switched off.
+func withoutDisabled(ds []tools.Descriptor, off map[string]bool) []tools.Descriptor {
+	if len(off) == 0 {
+		return ds
+	}
+	out := ds[:0]
+	for _, d := range ds {
+		if !off[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func truncate(s string, n int) string {
