@@ -696,3 +696,53 @@ html.no-glass .plugins .plugin-card { background: var(--sunken); }
   .settings-nav { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
 }
 html.no-glass .settings-nav { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+
+/* Gallery: the same glass cards as Plugins, with a compact filter bar. */
+.gallery { padding-top: 12px; }
+.gallery h1 { margin: 0 0 6px; }
+.gallery .lead { margin: 0 0 18px; max-width: 660px; }
+.gallery-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 16px; }
+.gallery-search { width: 220px; }
+.gallery-cats { display: flex; gap: 4px; flex-wrap: wrap; }
+.gallery-cat { border: 0; background: none; color: var(--muted); padding: 5px 10px; border-radius: 999px; font-size: 12.5px; }
+.gallery-cat:hover { background: var(--hover); color: var(--text); }
+.gallery-cat.on { background: var(--active); color: var(--text); font-weight: 500; }
+.gallery-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; align-items: start; }
+.gallery-list > .muted { grid-column: 1 / -1; padding: 20px 0; }
+.gallery-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 16px 18px;
+  border-radius: var(--r-shell); background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 14px 34px -30px rgb(0 0 0 / .35);
+  transition: background var(--fast), box-shadow var(--fast); }
+.gallery-card:hover { background: var(--glass-strong); box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float); }
+.gallery-top { display: flex; align-items: center; gap: 10px; }
+.gallery-mark { width: 32px; height: 32px; flex-shrink: 0; display: grid; place-items: center;
+  border-radius: 9px; color: var(--accent); background: var(--accent-soft); }
+.gallery-titles { min-width: 0; }
+.gallery-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.gallery-cat-tag { margin-top: 1px; font-size: 11px; color: var(--faint); }
+.gallery-desc { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.gallery-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.gallery-tag { padding: 1px 7px; border-radius: 6px; font-size: 11px; color: var(--muted);
+  background: color-mix(in srgb, var(--text) 5%, transparent); }
+.gallery-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 4px; }
+.gallery-slug { font-family: var(--mono); font-size: 11.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+.gallery-foot > .btn { margin-left: auto; flex-shrink: 0; }
+.gallery-installed { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.gallery .empty-card { grid-column: 1 / -1; padding: 38px 28px; border-radius: var(--r-shell); background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 14px 34px -30px rgb(0 0 0 / .35); }
+.gallery .empty-mark { width: 42px; height: 42px; margin: 0 auto 12px; display: grid; place-items: center;
+  border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
+.gallery .empty-title { margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.model-hint { display: inline-flex; align-items: center; gap: 10px; margin-top: 16px; padding: 7px 14px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--text); font-size: 12.5px; text-align: left; }
+.model-hint .link-btn { color: var(--accent); white-space: nowrap; font-size: 12.5px; }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .gallery-card, .gallery .empty-card { background: var(--surface); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .gallery-card, .gallery .empty-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+}
+html.no-glass .gallery-card, html.no-glass .gallery .empty-card {
+  background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }

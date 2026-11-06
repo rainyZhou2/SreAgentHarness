@@ -28,6 +28,7 @@ const state = {
   sending: false,
   sessFilter: { status: "active", q: "" },
   approvals: [],
+  demoModel: null,      // true when the tenant runs on the bundled scripted model
 };
 
 // ---------- DOM helpers: server data only ever becomes text nodes ----------
@@ -63,6 +64,15 @@ function icon(name) {
   el.setAttribute("class", "ico-svg");
   el.setAttribute("aria-hidden", "true");
   el.innerHTML = ICONS[name]; // static markup above, never server data
+  return el;
+}
+// actionable makes a non-button surface reachable from the keyboard.
+function actionable(el, fn) {
+  el.setAttribute("role", "button");
+  el.setAttribute("tabindex", "0");
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(e); }
+  });
   return el;
 }
 const BADGE = { COMPLETED: "s-ok", VERIFIED: "s-ok", ACTIVE: "s-ok", UNVERIFIED: "s-warn", REFUTED: "s-bad", FAILED: "s-bad" };
@@ -149,6 +159,7 @@ async function submitConnection(ev) {
     state.runs.clear();
     newChat();
     await loadSessions();
+    loadModelHint();
   } catch (e) {
     $("#conn-error").textContent = errText(e);
     $("#conn-error").hidden = false;
@@ -450,7 +461,10 @@ function render(scrollToEnd) {
       h("img", { class: "hero-logo", src: "logo.png", alt: "" }),
       h("h1", {}, t("What can I help with?")),
       h("div", { class: "muted" }, t("Tell me what's on your mind. I'll work out what you need and help from there.")),
-      h("div", { class: "chips" }, SUGGESTIONS.map((s) => h("button", { class: "chip", onclick: () => send(t(s)) }, t(s))))));
+      h("div", { class: "chips" }, SUGGESTIONS.map((s) => h("button", { class: "chip", onclick: () => send(t(s)) }, t(s)))),
+      state.demoModel ? h("div", { class: "model-hint" },
+        h("span", {}, t("You're on the built-in scripted model. Add a real model for better answers.")),
+        h("button", { class: "link-btn", onclick: () => showSettings("models") }, t("Configure a model"))) : null));
   } else {
     thread.replaceChildren(...state.turns.map(renderTurn));
   }
@@ -888,6 +902,322 @@ async function showPlugins() {
   thread.replaceChildren(h("div", { class: "plugins" }, h("h1", {}, t("Plugins")), body));
 }
 
+// ---------- gallery: bundled skill catalog ----------
+const GALLERY_CATS = ["Diagnosis", "Changes", "Observability", "Incident response"];
+const GALLERY = [
+  {
+    name: "latency-triage", cat: "Diagnosis", tags: ["p99", "latency", "dependencies"],
+    en: {
+      title: "Latency triage",
+      desc: "Narrow a p99 regression to a service, a dependency or a resource before changing anything.",
+      instructions: `1. Fix the window, service and endpoint; say whether all replicas are affected.
+2. Compare p50 with p99 and request rate. A flat p50 with a rising p99 points to contention, GC or a slow dependency.
+3. Check downstream latency and errors before blaming this service.
+4. Correlate the start with deploys, config changes, traffic shifts and dependency incidents.
+5. State the leading hypothesis with evidence, then the smallest safe next check. No restart or scale-out without approval.`,
+    },
+    zh: {
+      title: "延迟排查",
+      desc: "在动手前把 p99 升高定位到服务、依赖或资源。",
+      instructions: `1. 先确定时间窗口、服务和接口，并确认是否所有副本都受影响。
+2. 对比 p50 与 p99 以及请求量。p50 平稳而 p99 升高，通常指向资源争抢、GC 或慢依赖。
+3. 先看下游依赖的延迟和错误，再判断是否是本服务的问题。
+4. 把开始时间与发布、配置变更、流量变化和依赖故障对齐。
+5. 给出有证据支持的主要假设，以及代价最小的下一步检查；未经批准不要重启或扩容。`,
+    },
+  },
+  {
+    name: "error-spike", cat: "Diagnosis", tags: ["5xx", "4xx", "errors"],
+    en: {
+      title: "Error spike triage",
+      desc: "Split an error spike by class, endpoint and replica, then find the single change behind it.",
+      instructions: `1. Split errors by status class, endpoint, replica and client. 4xx and 5xx have different owners.
+2. Check a single dependency, certificate, quota or auth change that could explain the spike.
+3. Sample the actual error response and log line; quote the concrete message.
+4. Correlate with deploys and feature flags in the same window.
+5. Propose one diagnostic step and one reversible mitigation with its blast radius.`,
+    },
+    zh: {
+      title: "错误突增排查",
+      desc: "按状态码、接口和副本拆分错误，再找出背后的那一次变更。",
+      instructions: `1. 按状态码类别、接口、副本和客户端拆分错误。4xx 和 5xx 的责任方不同。
+2. 检查是否有单一的依赖、证书、配额或认证变更可以解释这次突增。
+3. 抽取真实的错误响应和日志行，引用具体报错。
+4. 与同一时间窗口内的发布和功能开关对齐。
+5. 给出一个诊断步骤和一个可回滚的缓解措施，并说明影响范围。`,
+    },
+  },
+  {
+    name: "dependency-outage", cat: "Diagnosis", tags: ["timeout", "circuit breaker", "retries"],
+    en: {
+      title: "Dependency outage",
+      desc: "Tell a slow dependency from a failing one, and avoid retry storms that make it worse.",
+      instructions: `1. List failing dependencies and whether calls time out, fail fast or return 5xx.
+2. Inspect circuit breakers, retries and queue depth; retries can amplify an outage.
+3. Find the last healthy timestamp and any provider status page.
+4. Recommend load shedding or cached responses only if reversible and approved.
+5. Re-check the dependency health endpoint before declaring recovery.`,
+    },
+    zh: {
+      title: "依赖故障",
+      desc: "区分依赖变慢还是失败，并避免重试风暴把故障放大。",
+      instructions: `1. 列出失败的依赖，判断是超时、快速失败还是返回 5xx。
+2. 检查熔断、重试和队列深度；重试可能放大故障。
+3. 找到最后一个健康时间点，以及依赖方是否有状态公告。
+4. 只有在可回滚且经过批准时，才建议降级或返回缓存。
+5. 宣布恢复前，重新检查依赖的健康检查端点。`,
+    },
+  },
+  {
+    name: "resource-saturation", cat: "Diagnosis", tags: ["cpu", "memory", "disk"],
+    en: {
+      title: "Resource saturation",
+      desc: "Separate a leak from a traffic burst and check whether a restart would only postpone the problem.",
+      instructions: `1. Check CPU throttling, memory working set vs limit, disk, inodes and file descriptors.
+2. Tell a leak (steady growth) from a burst (traffic-shaped).
+3. Check whether a restart would only postpone the problem.
+4. Recommend the smallest change and the metric that proves it worked.`,
+    },
+    zh: {
+      title: "资源饱和",
+      desc: "区分内存泄漏和流量突增，并判断重启是否只是拖延问题。",
+      instructions: `1. 检查 CPU 限流、内存工作集与限制、磁盘、inode 和文件描述符。
+2. 区分泄漏（持续增长）和突发（跟随流量）。
+3. 判断重启是否只是把问题往后拖。
+4. 给出最小的改动，以及能证明它生效的指标。`,
+    },
+  },
+  {
+    name: "db-pool", cat: "Diagnosis", tags: ["database", "pool", "locks"],
+    en: {
+      title: "Database pool pressure",
+      desc: "Read pool exhaustion together with query latency, locks and transaction length.",
+      instructions: `1. Compare pool in-use, wait time and wait timeouts with query latency.
+2. Look for slow queries, lock waits and long transactions.
+3. Check pool size against concurrency and the database connection limit.
+4. Prefer query, timeout and transaction fixes over raising the pool blindly.
+5. Verify recovery with all four signals, not just the error count.`,
+    },
+    zh: {
+      title: "数据库连接池压力",
+      desc: "把连接池耗尽与查询延迟、锁等待和事务长度放在一起看。",
+      instructions: `1. 把连接池占用、等待时间和等待超时与查询延迟放在一起对比。
+2. 查找慢查询、锁等待和长事务。
+3. 检查连接池大小与并发量、数据库连接上限是否匹配。
+4. 优先修查询、超时和事务，而不是盲目调大连接池。
+5. 用四项信号验证恢复，而不是只看错误数。`,
+    },
+  },
+  {
+    name: "rollout-check", cat: "Changes", tags: ["deploy", "canary", "readiness"],
+    en: {
+      title: "Rollout check",
+      desc: "Verify a rollout with old-vs-new signals before declaring it healthy.",
+      instructions: `1. Identify the rollout, revision and target replicas.
+2. Compare old and new error rate, latency and saturation over at least one full window.
+3. Verify readiness, health checks and traffic distribution across replicas.
+4. If unhealthy, pause or roll back with explicit criteria rather than waiting.`,
+    },
+    zh: {
+      title: "发布检查",
+      desc: "在宣布发布成功前，用新旧版本对比信号做验证。",
+      instructions: `1. 确认发布对象、版本和目标副本数。
+2. 至少观察一个完整窗口，对比新旧版本的错误率、延迟和资源饱和度。
+3. 检查就绪状态、健康检查和副本间的流量分布。
+4. 如果异常，按明确标准暂停或回滚，而不是继续等待。`,
+    },
+  },
+  {
+    name: "safe-rollback", cat: "Changes", tags: ["rollback", "revision", "schema"],
+    en: {
+      title: "Safe rollback",
+      desc: "Check that a rollback is actually safe before running it, especially with schema changes.",
+      instructions: `1. Confirm the current revision, the previous healthy revision and the exact rollback command.
+2. Check for schema or stateful changes that a rollback cannot undo.
+3. Define success: error rate, latency and saturation return to baseline.
+4. Execute only after approval and record before/after evidence.`,
+    },
+    zh: {
+      title: "安全回滚",
+      desc: "执行前先确认回滚是否真的安全，尤其是涉及数据库结构变更时。",
+      instructions: `1. 确认当前版本、上一个健康版本和准确的回滚命令。
+2. 检查是否有回滚无法撤销的结构或状态变更。
+3. 定义成功标准：错误率、延迟和资源饱和度回到基线。
+4. 只有经过批准才执行，并记录回滚前后的证据。`,
+    },
+  },
+  {
+    name: "log-triage", cat: "Observability", tags: ["logs", "signatures", "window"],
+    en: {
+      title: "Log triage",
+      desc: "Group logs by error signature instead of scrolling, and start from the earliest abnormal line.",
+      instructions: `1. Start from the symptom and an exact time window; avoid scanning everything.
+2. Group lines by error signature, not raw text; count them against the baseline.
+3. Prefer the earliest abnormal line over the loudest one.
+4. Correlate with deploy and dependency events; quote the signature.`,
+    },
+    zh: {
+      title: "日志排查",
+      desc: "按错误签名归并日志，从最早出现的异常行开始。",
+      instructions: `1. 从现象和明确的时间窗口开始，不要全量扫日志。
+2. 按错误签名而不是原始文本归并，并与基线对比数量。
+3. 优先关注最早出现的异常行，而不是最吵的那条。
+4. 与发布和依赖事件对齐，并引用具体签名。`,
+    },
+  },
+  {
+    name: "metric-baseline", cat: "Observability", tags: ["baseline", "trend", "anomaly"],
+    en: {
+      title: "Metric baseline",
+      desc: "Compare against the same time-of-day baseline and separate a level shift from a short spike.",
+      instructions: `1. Compare the current window with the same time-of-day baseline from previous days.
+2. Separate a level shift from a spike, and check whether the change persists.
+3. Read rate, errors and duration together.
+4. Report metric, delta and confidence; avoid causal claims without evidence.`,
+    },
+    zh: {
+      title: "指标基线对比",
+      desc: "用同一时段的基线做对比，区分水平偏移和短时尖峰。",
+      instructions: `1. 用前几天的同一时段基线对比当前窗口。
+2. 区分水平偏移和尖峰，并判断变化是否持续。
+3. 把请求量、错误和耗时放在一起看。
+4. 报告指标、变化幅度和置信度；没有证据不要下因果结论。`,
+    },
+  },
+  {
+    name: "incident-update", cat: "Incident response", tags: ["status", "impact", "comms"],
+    en: {
+      title: "Incident update",
+      desc: "Write a short, factual status update that separates impact, knowns and unknowns.",
+      instructions: `1. Lead with impact: who is affected, since when, how severe.
+2. Separate what is known, what is being checked and what is still unknown.
+3. Give the next update time and the owner.
+4. Keep it short and factual; no speculation or blame.`,
+    },
+    zh: {
+      title: "故障通报",
+      desc: "写一段简短、事实优先的状态更新，区分影响、已知和未知。",
+      instructions: `1. 先说影响：谁受影响、从什么时候开始、严重程度如何。
+2. 区分已经确认的、正在排查的和仍然未知的内容。
+3. 给出下次更新时间和负责人。
+4. 保持简短和事实化，不猜测、不追责。`,
+    },
+  },
+  {
+    name: "postmortem", cat: "Incident response", tags: ["timeline", "actions", "review"],
+    en: {
+      title: "Postmortem draft",
+      desc: "Turn evidence into a timeline, contributing factors and a few owned follow-ups.",
+      instructions: `1. Build a timestamped timeline from evidence, not memory.
+2. Separate the trigger, contributing factors and detection gaps.
+3. Note what went well and what slowed recovery.
+4. Propose a few owned actions with dates; avoid vague "improve monitoring".`,
+    },
+    zh: {
+      title: "复盘草稿",
+      desc: "把证据整理成时间线、促成因素和少量有负责人的后续动作。",
+      instructions: `1. 基于证据而不是记忆，整理带时间戳的时间线。
+2. 区分触发因素、促成因素和发现环节的缺口。
+3. 记录哪些做法有效、哪些拖慢了恢复。
+4. 给出少量有负责人和日期的动作；不要写“加强监控”这类空话。`,
+    },
+  },
+];
+const gal = { data: null, q: "", cat: "All", error: null };
+const galText = (item) => (i18n.lang === "zh" ? item.zh : item.en);
+
+async function showGallery() {
+  state.view = "gallery";
+  markSide();
+  stopWatching();
+  renderSessions();
+  $("#chat-head").replaceChildren();
+  $("#chat-head").className = "chat-head";
+  $("#composer-wrap").hidden = true;
+  renderGallery(true);
+  try {
+    gal.data = await api().Extensions();
+    gal.error = null;
+  } catch (e) {
+    gal.error = errText(e);
+  }
+  renderGallery();
+}
+
+function renderGallery(loading) {
+  if (state.view !== "gallery") return;
+  const cats = [["All", t("All")], ...GALLERY_CATS.map((c) => [c, t(c)])];
+  $("#thread").replaceChildren(h("div", { class: "gallery" },
+    h("h1", {}, t("Gallery")),
+    h("p", { class: "muted lead" }, t("Ready-made playbooks for common SRE work. Add one and it becomes a skill in Customize.")),
+    h("div", { class: "gallery-bar" },
+      h("input", { class: "gallery-search", type: "search", placeholder: t("Search skills"), value: gal.q,
+        autocomplete: "off", spellcheck: "false", oninput: (e) => { gal.q = e.target.value; paintGallery(); } }),
+      h("div", { class: "gallery-cats" }, cats.map(([key, label]) =>
+        h("button", { class: "gallery-cat" + (gal.cat === key ? " on" : ""), "data-cat": key,
+          onclick: () => { gal.cat = key; paintGallery(); } }, label)))),
+    gal.error ? h("p", { class: "error small" }, gal.error) : null,
+    h("div", { class: "gallery-list", id: "gallery-list" })));
+  paintGallery(loading);
+}
+
+function paintGallery(loading) {
+  const box = $("#gallery-list");
+  if (!box) return;
+  document.querySelectorAll(".gallery-cat").forEach((b) => b.classList.toggle("on", b.dataset.cat === gal.cat));
+  const q = gal.q.trim().toLowerCase();
+  const items = GALLERY.filter((it) => (gal.cat === "All" || it.cat === gal.cat) &&
+    (!q || [galText(it).title, galText(it).desc, it.name, ...it.tags].join(" ").toLowerCase().includes(q)));
+  if (loading && !gal.data) return box.replaceChildren(h("div", { class: "muted" }, t("Loading…")));
+  if (!items.length) return box.replaceChildren(h("div", { class: "empty-card" },
+    h("div", { class: "empty-mark" }, icon("search")),
+    h("div", { class: "empty-title" }, t("No matching skills")),
+    h("p", { class: "muted small" }, t("Try another keyword or category."))));
+  const installed = new Set(((gal.data && gal.data.skills) || []).map((s) => s.name));
+  box.replaceChildren(...items.map((it) => galleryCard(it, installed.has(it.name))));
+}
+
+function galleryCard(it, installed) {
+  const c = galText(it);
+  return h("article", { class: "gallery-card" },
+    h("div", { class: "gallery-top" },
+      h("span", { class: "gallery-mark" }, icon("spark")),
+      h("div", { class: "gallery-titles" },
+        h("div", { class: "gallery-title" }, c.title),
+        h("div", { class: "gallery-cat-tag" }, t(it.cat)))),
+    h("p", { class: "gallery-desc" }, c.desc),
+    h("div", { class: "gallery-tags" }, it.tags.map((tag) => h("span", { class: "gallery-tag" }, tag))),
+    h("div", { class: "gallery-foot" },
+      h("span", { class: "gallery-slug" }, "/" + it.name),
+      installed
+        ? h("span", { class: "gallery-installed" },
+            h("span", { class: "badge s-ok" }, t("Installed")),
+            h("button", { class: "link-btn", onclick: () => openInstalledSkill(it.name) }, t("Open")))
+        : h("button", { class: "btn", onclick: (e) => installSkill(it, e.currentTarget) }, t("Add"))));
+}
+
+async function installSkill(it, btn) {
+  btn.disabled = true;
+  const c = galText(it);
+  try {
+    await api().PutExtension("skills", it.name, { description: c.desc, instructions: c.instructions, mode: "manual" }, true, 0);
+  } catch (e) {
+    btn.disabled = false;
+    const m = errText(e);
+    toast(m.includes("403") ? t("Adding skills needs the admin role.") : m, true);
+    return;
+  }
+  toast(t("Added {name}", { name: c.title }));
+  try { gal.data = await api().Extensions(); gal.error = null; } catch { /* keep the catalog usable */ }
+  paintGallery();
+}
+
+async function openInstalledSkill(name) {
+  await showCustomize("skills");
+  const x = ((cz.data && cz.data.skills) || []).find((s) => s.name === name);
+  if (x) editSkill(x);
+}
+
 // ---------- customize: MCP servers, HTTP tools, skills, tools ----------
 const RISKS = ["R0", "R1", "R2", "R3"];
 const RISK_DOC = { R0: "read-only", R1: "low-impact write", R2: "change · needs approval", R3: "dangerous · always denied" };
@@ -994,13 +1324,16 @@ function renderExtList(tab) {
       h("div", { class: "empty-mark" }, icon(TAB_ICONS[tab])),
       h("div", { class: "empty-title" }, t(EMPTY_TITLES[tab])),
       h("div", { class: "muted small" }, t(empty))) :
-      items.map((x) => h("div", { class: "ext-card", onclick: () => edit(x) },
-        h("div", { class: "ext-ico" }, icon(TAB_ICONS[tab])),
-        h("div", { class: "ext-main" },
-          h("div", { class: "ext-title" }, h("span", { class: "mono" }, x.name), statusBadge(x)),
-          h("div", { class: "muted small" }, extSummary(tab, x)),
-          x.status && x.status.error ? h("div", { class: "error small" }, x.status.error) : null),
-        h("div", { class: "ext-side muted small" }, "v" + x.version, " · ", x.updated_by || "", " · ", ago(x.updated_at)))));
+      items.map((x) => {
+        const open = () => edit(x);
+        return actionable(h("div", { class: "ext-card", onclick: open },
+          h("div", { class: "ext-ico" }, icon(TAB_ICONS[tab])),
+          h("div", { class: "ext-main" },
+            h("div", { class: "ext-title" }, h("span", { class: "mono" }, x.name), statusBadge(x)),
+            h("div", { class: "muted small" }, extSummary(tab, x)),
+            x.status && x.status.error ? h("div", { class: "error small" }, x.status.error) : null),
+          h("div", { class: "ext-side muted small" }, "v" + x.version, " · ", x.updated_by || "", " · ", ago(x.updated_at))), open);
+      }));
 }
 
 function extSummary(tab, x) {
@@ -1459,7 +1792,7 @@ function renderToolsTab() {
           !allowed ? h("span", { class: "badge s-idle" }, t("blocked"))
             : on ? h("span", { class: "badge s-ok" }, t("allowed")) : h("span", { class: "badge s-idle" }, t("disabled")),
           h("label", { class: "switch", title: allowed ? t("Hide this tool from runs of this tenant") : t("The profile does not allow this tool") },
-            h("input", { type: "checkbox", checked: on, disabled: !allowed, onchange: (e) => toggleTool(d.name, e.target.checked) }),
+            h("input", { type: "checkbox", checked: on, disabled: !allowed, "aria-label": t("Toggle {name}", { name: d.name }), onchange: (e) => toggleTool(d.name, e.target.checked) }),
             h("span", { class: "track" }))),
         h("p", { class: "tool-desc" }, desc),
         h("div", { class: "tool-foot" },
@@ -1532,8 +1865,9 @@ function segmented(value, options, onchange) {
   return h("div", { class: "segmented" }, options.map(([v, label]) =>
     h("button", { type: "button", class: v === value ? "on" : "", onclick: () => onchange(v) }, label)));
 }
-function toggle(checked, onchange) {
-  return h("label", { class: "switch" }, h("input", { type: "checkbox", checked, onchange: (e) => onchange(e.target.checked) }), h("span", {}));
+function toggle(checked, onchange, label) {
+  return h("label", { class: "switch", title: label || "" },
+    h("input", { type: "checkbox", checked, "aria-label": label || "", onchange: (e) => onchange(e.target.checked) }), h("span", {}));
 }
 
 async function savePrefs(patch) {
@@ -1560,7 +1894,7 @@ function renderAppearance() {
       row(t("Color scheme"), t("System follows the macOS appearance."),
         segmented(s.theme || "", [["", t("System")], ["light", t("Light")], ["dark", t("Dark")]], (v) => savePrefs({ theme: v }))),
       row(t("Glass effect"), t("Translucent sidebar, buttons and floating panels. Turn off for solid surfaces."),
-        toggle(!s.no_glass, (on) => savePrefs({ no_glass: !on })))));
+        toggle(!s.no_glass, (on) => savePrefs({ no_glass: !on }), t("Glass effect")))));
 }
 
 function renderConnection() {
@@ -1588,6 +1922,7 @@ async function signOut() {
     showWho(null);
     state.sessions = [];
     state.approvals = [];
+    state.demoModel = null;
     updateInboxBadge();
     renderSettings();
     renderSessions();
@@ -1602,7 +1937,7 @@ function renderNotifications() {
   return h("div", {},
     group(t("Approvals"),
       row(t("System notifications"), t("Show a macOS notification when a tool call needs your approval."),
-        toggle(!s.notify_off, (on) => savePrefs({ notify_off: !on }))),
+        toggle(!s.notify_off, (on) => savePrefs({ notify_off: !on }), t("System notifications"))),
       row(t("Refresh interval"), t("How often the approvals inbox checks the server."),
         h("select", { class: "set-select", onchange: (e) => savePrefs({ poll_seconds: +e.target.value }) },
           POLL_CHOICES.map((n) => h("option", { value: n, selected: n === poll }, t("{n} seconds", { n })))))));
@@ -1681,6 +2016,7 @@ async function setLanguage(lang, save) {
 function markSide() {
   $("#btn-inbox").classList.toggle("on", state.view === "inbox");
   $("#btn-customize").classList.toggle("on", state.view === "customize");
+  $("#btn-gallery").classList.toggle("on", state.view === "gallery");
   $("#btn-plugins").classList.toggle("on", state.view === "plugins");
   $("#btn-settings").classList.toggle("on", state.view === "settings");
 }
@@ -1691,6 +2027,7 @@ function bind() {
   $("#btn-new").onclick = newChat;
   $("#btn-plugins").onclick = showPlugins;
   $("#btn-customize").onclick = () => showCustomize();
+  $("#btn-gallery").onclick = showGallery;
   $("#btn-inbox").onclick = showInbox;
   $("#btn-settings").onclick = () => showSettings();
   $("#btn-archived").onclick = () => {
@@ -1785,6 +2122,17 @@ function bind() {
   setInterval(() => { const t = activeTurn(); if (t && !document.hidden) scheduleRun(t.run_id); }, 6000);
 }
 
+async function loadModelHint() {
+  try {
+    const data = await api().Extensions();
+    const cur = data.current_model || {};
+    state.demoModel = !cur.tenant_configured && cur.model === "rule-based-sre";
+  } catch {
+    state.demoModel = null;
+  }
+  if (state.view === "chat" && !state.turns.length) render();
+}
+
 async function boot() {
   // The native window is translucent (macOS vibrancy shows behind the sidebar);
   // browser preview has no desktop behind it and keeps an opaque root.
@@ -1801,6 +2149,7 @@ async function boot() {
     try {
       showWho(await api().Whoami());
       await loadSessions();
+      loadModelHint();
       return;
     } catch (e) {
       toast(errText(e), true);
