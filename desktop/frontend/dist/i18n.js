@@ -413,6 +413,7 @@ const ZH = {
     "当前使用内置脚本模型，配置真实模型后回答会更好。",
   "Configure a model": "配置模型",
   "Toggle {name}": "切换 {name}",
+  "Diagram could not be rendered": "流程图渲染失败",
 };
 
 const i18n = { lang: "en" };
