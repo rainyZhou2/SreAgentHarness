@@ -632,17 +632,19 @@ html.no-glass .customize .cz-mark, html.no-glass .customize .tabs, html.no-glass
 html.no-glass .customize .tool-card, html.no-glass .customize .empty-card {
   background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
 
-/* Plugins: the same card rhythm and glass as the tool inventory. */
+/* Plugins: one glass panel per category, with the plugin cards inside. */
 .plugins { padding-top: 12px; }
 .plugins h1 { margin: 0 0 22px; }
-.plugins .kind { margin: 0 0 26px; padding: 0; border: 0; background: none; }
-.plugins .kind h3 { margin: 0 0 3px; }
-.plugins .kind > .small { margin-bottom: 10px; }
-.plugins .plugin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
-.plugins .plugin-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px;
-  border-radius: var(--r-shell); background: var(--glass);
+.plugins .kind { margin: 0 0 14px; padding: 18px 20px 20px; border: 0; border-radius: var(--r-shell);
+  background: var(--glass);
   -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
   box-shadow: inset 0 1px 0 var(--glass-edge), 0 14px 34px -30px rgb(0 0 0 / .35); }
+.plugins .kind h3 { margin: 0 0 3px; }
+.plugins .kind > .small { margin-bottom: 14px; }
+.plugins .plugin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.plugins .plugin-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px;
+  border-radius: var(--r-panel); background: var(--surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .03), 0 10px 24px -22px rgb(0 0 0 / .30); }
 .plugins .plugin-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plugins .plugin-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
 .plugins .plugin-doc { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -650,9 +652,12 @@ html.no-glass .customize .tool-card, html.no-glass .customize .empty-card {
 .plugins .plugin-chip { padding: 2px 8px; border-radius: 6px; font-size: 12px; color: var(--muted);
   background: color-mix(in srgb, var(--text) 5%, transparent); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .plugins .plugin-card { background: var(--surface); }
+  .plugins .kind { background: var(--surface); }
+  .plugins .plugin-card { background: var(--sunken); }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .plugins .plugin-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+  .plugins .kind { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+  .plugins .plugin-card { background: var(--sunken); }
 }
-html.no-glass .plugins .plugin-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+html.no-glass .plugins .kind { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+html.no-glass .plugins .plugin-card { background: var(--sunken); }
