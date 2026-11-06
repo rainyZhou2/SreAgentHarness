@@ -22,7 +22,7 @@ An SRE Cognitive Agent Harness implemented from the design RFC [`GoAgentHarness.
 | | Request/attempt/usage ledger (ESTIMATED → REPORTED revisions), cost queries, token-stream segments persisted + SSE deltas | `pg/model.go`, `stream/` |
 | **Context** | Prompt manifest (per-section hashes, `rendered_request_hash`), checkpoints and fork, deterministic compaction | `cognitive/assembler.go`, `kernel/compact.go`, `pg/checkpoint.go` |
 | **Long-term memory** | Redaction + poisoning checks on write; full-text + vector + dependency-graph retrieval, RRF fusion, conflict resolution, pinned per step | `internal/memory`, `pg/memory.go` |
-| | Cold-path consolidator: Run → Experience → candidate memories; human feedback activates/rejects | `memory/consolidate.go` |
+| | Cold-path consolidator: Run → Experience → candidate memories; operator feedback moves candidates to VALIDATING (an approver activates them) or rejects them | `memory/consolidate.go` |
 | **Evaluation & evolution** | Datasets recorded from real runs (frozen with a manifest hash), offline replay (write tools always blocked) | `internal/eval` |
 | | Metrics (Wilson lower bound, stratified) + non-inferiority gate; frozen fields cannot evolve; proposers cannot approve their own change | `eval/eval.go`, `eval/service.go`, `profile/` |
 | | Canary: stable split by routing key, guardrail auto-rollback, manual promote / rollback | `eval/service.go` |
@@ -241,7 +241,8 @@ Runtime tools never bypass governance:
 - policy and the R2/R3 approval floor apply as for any tool;
 - MCP descriptions and outputs are marked untrusted (T4);
 - a tenant tool never shadows a global tool;
-- header and env values are write-only: the API returns them blank, and sending a blank value keeps the stored one;
+- header and env values are write-only: the API returns them blank, and sending a blank value keeps the stored one, unless the destination (`url`, `base_url`, `provider`, `command`, `args`) changed, in which case the secrets must be re-entered (`422 secrets_required`);
+- tenant extensions cannot connect to loopback, link-local or cloud metadata addresses (checked on the resolved address at connect time); `HARNESS_EXTENSIONS_ALLOW_NETWORKS` adds exceptions, metadata addresses stay blocked;
 - every change is admin-only and audited.
 
 To try it locally:
@@ -250,7 +251,7 @@ To try it locally:
 go run ./examples/mcp-demo
 ```
 
-This serves an MCP server at `http://127.0.0.1:8090/mcp` (runbook_search, oncall_lookup, page_oncall) and a `POST /deploys` endpoint. Add them under Customize, then ask in a chat, for example: `use mcp.demo.runbook_search {"query":"pool"}`.
+Start the harness with `HARNESS_EXTENSIONS_ALLOW_NETWORKS=127.0.0.0/8` so tenant extensions may reach it. This serves an MCP server at `http://127.0.0.1:8090/mcp` (runbook_search, oncall_lookup, page_oncall) and a `POST /deploys` endpoint. Add them under Customize, then ask in a chat, for example: `use mcp.demo.runbook_search {"query":"pool"}`.
 
 ### Multiple processes / containers
 
@@ -318,6 +319,7 @@ Kubernetes manifests are in `deploy/k8s/harness.yaml` (external Postgres/NATS, S
 | `HARNESS_RECONCILE_INTERVAL` / `HARNESS_CONSOLIDATE_INTERVAL` / `HARNESS_ROLLOUT_MONITOR_INTERVAL` | `10s` / `10s` / `1m` | |
 | `HARNESS_RETENTION_INTERVAL` / `HARNESS_OUTBOX_RETENTION` / `HARNESS_AUDIT_RETENTION` | `5m` / `24h` / `0` (forever) | |
 | `HARNESS_MCP_ALLOW_STDIO` / `HARNESS_EXTENSIONS_SYNC_INTERVAL` | `false` / `5s` | allow tenant MCP servers started as local commands / reload period of tenant extensions |
+| `HARNESS_EXTENSIONS_ALLOW_NETWORKS` | empty | comma-separated CIDRs or addresses tenant extensions may reach despite the default block (loopback, link-local); e.g. `127.0.0.0/8` for local trials |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | enables OTLP/HTTP tracing when set |
 
 ## API overview
@@ -327,7 +329,7 @@ Kubernetes manifests are in `deploy/k8s/harness.yaml` (external Postgres/NATS, S
 | POST | `/v1/runs` | requires `Idempotency-Key`; `{"goal": "...", "profile_id"?, "profile_version"?}`; without a version, resolved via canary/channel |
 | GET | `/v1/runs?status=&limit=` | newest runs of the caller's tenant, with goal text (`limit` 1..200, default 50) |
 | GET | `/v1/runs/{id}/steps?expand=io` | steps with their input and output artifacts inlined (tool args, observations, decisions; up to 256 KiB each) |
-| GET | `/v1/runs/{id}` · `/steps` · `/approvals` · `/events` · `/events/stream` | SSE supports `Last-Event-ID`; `include_deltas=true` adds the token stream |
+| GET | `/v1/runs/{id}` · `/steps` · `/approvals` · `/events` · `/events/stream` | SSE supports `Last-Event-ID`; `include_deltas=true` adds the token stream; a finished run's stream ends with a `stream.end` message (no id) |
 | POST | `/v1/runs/{id}/commands` | `202` applied / `409` version conflict / `422` rejected (with reason) / `403` insufficient role |
 | GET | `/v1/runs/{id}/model-requests` · `/cost` · `/stream-segments` · `/checkpoints` | model ledger and checkpoints |
 | POST | `/v1/runs/{id}/fork` | derive a new run from a checkpoint |

@@ -224,7 +224,14 @@ func (s *Store) checkApprovalGrant(ctx context.Context, r *runTx, step domain.St
 		return false, err
 	}
 	if !pending {
-		if err := r.requestApproval(ctx, step.ID, intent.ID, intent, 1); err != nil {
+		// Keep the approval count the intent was planned with (profile
+		// approval_rules may require more than one approver).
+		var required int
+		if err := r.tx.QueryRow(ctx, `SELECT COALESCE(MAX(required_approvals), 1) FROM approval_requests WHERE action_intent_id=$1`,
+			intent.ID).Scan(&required); err != nil {
+			return false, err
+		}
+		if err := r.requestApproval(ctx, step.ID, intent.ID, intent, required); err != nil {
 			return false, err
 		}
 	}

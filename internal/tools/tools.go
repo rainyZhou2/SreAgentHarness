@@ -230,7 +230,7 @@ func DemoTools() []Tool {
 			}
 			_ = json.Unmarshal(args, &in)
 			return json.Marshal(map[string]any{
-				"service": in.Service, "operation_id": "sim-" + key[:12], "result": "simulated restart completed",
+				"service": in.Service, "operation_id": "sim-" + key[:min(12, len(key))], "result": "simulated restart completed",
 			})
 		},
 	}

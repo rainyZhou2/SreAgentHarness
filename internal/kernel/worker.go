@@ -261,7 +261,10 @@ func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
 		w.attachCheckpoint(ctx, lease, &res)
 	}
 	if execErr != nil {
-		f := classify(execErr, st, hb.cancelRequested.Load(), errors.Is(execCtx.Err(), context.DeadlineExceeded))
+		deadline := errors.Is(execCtx.Err(), context.DeadlineExceeded)
+		// The worker's own context ended (process shutdown), not the step.
+		shutdown := ctx.Err() != nil && !deadline
+		f := classify(execErr, st, hb.cancelRequested.Load(), deadline, shutdown)
 		log.Info("step failed", "class", f.Class, "code", f.Code, "err", execErr)
 		outcome = failureOutcome(f.Class)
 		return w.store.CommitFailure(commitCtx, lease, f)
@@ -273,12 +276,17 @@ type execState struct {
 	dispatched bool // a side-effecting call may have reached the external system
 }
 
-func classify(err error, st *execState, cancelRequested, deadline bool) domain.StepFailure {
+func classify(err error, st *execState, cancelRequested, deadline, shutdown bool) domain.StepFailure {
 	msg := err.Error()
 	var re *domain.RetryableError
 	switch {
 	case errors.Is(err, domain.ErrUnknownEffect):
 		return domain.StepFailure{Class: domain.FailUnknownEffect, Code: "EFFECT_UNKNOWN", Message: msg}
+	case shutdown && st.dispatched:
+		return domain.StepFailure{Class: domain.FailUnknownEffect, Code: "SHUTDOWN_AFTER_DISPATCH", Message: msg}
+	case shutdown && !cancelRequested:
+		// Stopping a worker is not the step's fault: another worker retries it.
+		return domain.StepFailure{Class: domain.FailRetryable, Code: "WORKER_SHUTDOWN", Message: msg}
 	case errors.Is(err, domain.ErrNotDispatched) && !deadline && !cancelRequested:
 		return domain.StepFailure{Class: domain.FailPermanent, Code: "TOOL_REJECTED_BEFORE_DISPATCH", Message: msg}
 	case cancelRequested && st.dispatched:

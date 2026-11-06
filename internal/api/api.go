@@ -256,7 +256,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusUnprocessableEntity, "unknown_profile_or_incident", err.Error())
 			return
 		}
-		s.storeErr(w, err)
+		s.domainErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"run_id": run.ID, "status": run.DisplayStatus(), "created": created,
@@ -427,7 +427,8 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 
 // streamEvents serves SSE from the durable event cursor (§17.3): reconnecting
 // with Last-Event-ID resumes without gaps; a client disconnect never affects
-// the run. The stream ends after the terminal event of a finished run.
+// the run. The stream ends after the terminal event of a finished run, with
+// a final "stream.end" message (no id).
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	id, ok := ident(w, r)
 	if !ok {
@@ -473,7 +474,14 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		run, err := s.Store.GetRun(ctx, id.tenant, runID)
-		if err != nil || (run.Status.Terminal() && run.LastEventSeq <= cursor) {
+		if err != nil {
+			return
+		}
+		if run.Status.Terminal() && run.LastEventSeq <= cursor {
+			// Tell the client the stream is complete, so it does not
+			// mistake the close for a dropped connection and reconnect.
+			fmt.Fprintf(w, "event: stream.end\ndata: {\"status\":%q}\n\n", run.Status)
+			flusher.Flush()
 			return
 		}
 		if time.Since(lastWrite) > 15*time.Second {

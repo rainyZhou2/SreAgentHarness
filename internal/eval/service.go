@@ -113,11 +113,29 @@ type Store interface {
 	GetRollout(ctx context.Context, tenantID, id string) (Rollout, error)
 	ActiveRollout(ctx context.Context, tenantID, profileID string) (*Rollout, error)
 	ListCanaryRollouts(ctx context.Context) ([]struct{ TenantID, ID string }, error)
-	EndRollout(ctx context.Context, tenantID, id, status, actor string, observations any) error
+	// EndRollout ends a rollout atomically: it checks the current status,
+	// updates the rollout, the active channel version and the target
+	// version's status in one transaction.
+	EndRollout(ctx context.Context, tenantID, id string, e RolloutEnd) error
 	RolloutStats(ctx context.Context, tenantID, rolloutID string, control bool, profileID string, since time.Time) (RolloutStats, error)
 }
 
 var ErrInvalid = errors.New("invalid request")
+
+// RolloutEnd describes how a rollout ends.
+type RolloutEnd struct {
+	From         []string // statuses the rollout may be in; otherwise ErrVersionConflict
+	To           string   // PROMOTED | ROLLED_BACK
+	Actor        string
+	Observations any
+	// ToVersionStatus sets the target version's profile status ("" keeps it).
+	ToVersionStatus string
+	// Activate makes ToVersion the channel's active version.
+	Activate bool
+	// RestoreIfPromoted makes FromVersion active again when the rollout had
+	// already been promoted.
+	RestoreIfPromoted bool
+}
 
 type Service struct {
 	Store     Store
@@ -405,11 +423,8 @@ func (s *Service) Promote(ctx context.Context, tenantID, rolloutID, actor string
 	if r.Status != "CANARY" {
 		return r, fmt.Errorf("%w: rollout is %s", ErrInvalid, r.Status)
 	}
-	if err := s.Store.SetActiveVersion(ctx, tenantID, r.ProfileID, r.ToVersion); err != nil {
-		return r, err
-	}
-	_ = s.Store.SetProfileStatus(ctx, tenantID, r.ProfileID, r.ToVersion, "ACTIVE")
-	if err := s.Store.EndRollout(ctx, tenantID, r.ID, "PROMOTED", actor, nil); err != nil {
+	if err := s.Store.EndRollout(ctx, tenantID, r.ID, RolloutEnd{From: []string{"CANARY"}, To: "PROMOTED", Actor: actor,
+		ToVersionStatus: "ACTIVE", Activate: true}); err != nil {
 		return r, err
 	}
 	return s.Store.GetRollout(ctx, tenantID, r.ID)
@@ -423,13 +438,9 @@ func (s *Service) Rollback(ctx context.Context, tenantID, rolloutID, actor, reas
 	if r.Status != "CANARY" && r.Status != "PROMOTED" {
 		return r, fmt.Errorf("%w: rollout is %s", ErrInvalid, r.Status)
 	}
-	if r.Status == "PROMOTED" {
-		if err := s.Store.SetActiveVersion(ctx, tenantID, r.ProfileID, r.FromVersion); err != nil {
-			return r, err
-		}
-	}
-	_ = s.Store.SetProfileStatus(ctx, tenantID, r.ProfileID, r.ToVersion, "QUARANTINED")
-	if err := s.Store.EndRollout(ctx, tenantID, r.ID, "ROLLED_BACK", actor, map[string]string{"reason": reason}); err != nil {
+	if err := s.Store.EndRollout(ctx, tenantID, r.ID, RolloutEnd{From: []string{"CANARY", "PROMOTED"}, To: "ROLLED_BACK",
+		Actor: actor, Observations: map[string]string{"reason": reason}, ToVersionStatus: "QUARANTINED",
+		RestoreIfPromoted: true}); err != nil {
 		return r, err
 	}
 	return s.Store.GetRollout(ctx, tenantID, r.ID)
@@ -489,9 +500,15 @@ func (s *Service) MonitorTick(ctx context.Context) (int, error) {
 		if len(breach) == 0 {
 			continue
 		}
-		_ = s.Store.SetProfileStatus(ctx, item.TenantID, r.ProfileID, r.ToVersion, "QUARANTINED")
-		if err := s.Store.EndRollout(ctx, item.TenantID, r.ID, "ROLLED_BACK", "guardrail-monitor",
-			map[string]any{"breaches": breach, "canary": canary, "control": control}); err != nil {
+		// Only a rollout that is still a canary: one promoted meanwhile is
+		// a human decision this monitor must not undo.
+		err = s.Store.EndRollout(ctx, item.TenantID, r.ID, RolloutEnd{From: []string{"CANARY"}, To: "ROLLED_BACK",
+			Actor: "guardrail-monitor", Observations: map[string]any{"breaches": breach, "canary": canary, "control": control},
+			ToVersionStatus: "QUARANTINED"})
+		if errors.Is(err, domain.ErrVersionConflict) {
+			continue
+		}
+		if err != nil {
 			return rolled, err
 		}
 		if s.Log != nil {

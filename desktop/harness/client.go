@@ -164,8 +164,9 @@ type Delta struct {
 
 // StreamEvents follows GET /v1/runs/{id}/events/stream from afterSeq and
 // calls fn for every event (and onDelta, when set, for model deltas). It
-// reconnects (resuming from the last event id) until ctx is cancelled or
-// the server rejects the request.
+// reconnects (resuming from the last event id) until the server ends the
+// stream of a finished run, ctx is cancelled or the server rejects the
+// request.
 func (c *Client) StreamEvents(ctx context.Context, runID string, afterSeq int64, fn func(Event), onDelta ...func(Delta)) error {
 	var deltaFn func(Delta)
 	if len(onDelta) > 0 {
@@ -173,8 +174,8 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, afterSeq int64,
 	}
 	backoff := 500 * time.Millisecond
 	for {
-		got, err := c.streamOnce(ctx, runID, &afterSeq, fn, deltaFn)
-		if ctx.Err() != nil {
+		got, ended, err := c.streamOnce(ctx, runID, &afterSeq, fn, deltaFn)
+		if ctx.Err() != nil || ended {
 			return nil
 		}
 		var apiErr *APIError
@@ -193,30 +194,35 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, afterSeq int64,
 	}
 }
 
-func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn func(Event), onDelta func(Delta)) (bool, error) {
+// streamOnce reads one connection. ended reports the server's "stream.end"
+// message: the run is finished and every event was delivered.
+func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn func(Event), onDelta func(Delta)) (got, ended bool, err error) {
 	path := "/v1/runs/" + url.PathEscape(runID) + "/events/stream"
 	if onDelta != nil {
 		path += "?include_deltas=true"
 	}
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Last-Event-ID", strconv.FormatInt(*after, 10))
 	resp, err := c.Stream.Do(req)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		e := &APIError{Status: resp.StatusCode}
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		_ = json.Unmarshal(data, e)
-		return false, e
+		return false, false, e
 	}
-	got := false
 	err = ParseSSE(resp.Body, func(id, event, data string) {
+		if event == "stream.end" {
+			ended = true
+			return
+		}
 		if data == "" {
 			return
 		}
@@ -238,7 +244,7 @@ func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn 
 		got = true
 		fn(e)
 	})
-	return got, err
+	return got, ended, err
 }
 
 // ParseSSE reads a text/event-stream and calls fn per dispatched message.

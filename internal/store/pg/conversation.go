@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -339,6 +340,7 @@ func (s *Store) ActivateStalledBranches(ctx context.Context, limit int) (int, er
 	}
 	rows.Close()
 	n := 0
+	var errs []error
 	for _, x := range list {
 		err := s.inTx(ctx, func(tx pgx.Tx) error {
 			var active *string
@@ -349,14 +351,17 @@ func (s *Store) ActivateStalledBranches(ctx context.Context, limit int) (int, er
 			if active != nil {
 				return nil
 			}
+			if err := s.activateNext(ctx, tx, x.tenant, x.branch); err != nil {
+				return err
+			}
 			n++
-			return s.activateNext(ctx, tx, x.tenant, x.branch)
+			return nil
 		})
 		if err != nil {
-			return n, err
+			errs = append(errs, fmt.Errorf("branch %s: %w", x.branch, err))
 		}
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // ForkBranch creates a branch whose history is the parent's messages up to a

@@ -15,9 +15,12 @@ func (h headerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	return h.base.RoundTrip(r)
 }
 
-func headerClient(headers map[string]string) *http.Client {
-	if len(headers) == 0 {
-		return http.DefaultClient
+func headerClient(base http.RoundTripper, headers map[string]string) *http.Client {
+	if base == nil {
+		base = http.DefaultTransport
 	}
-	return &http.Client{Transport: headerRT{base: http.DefaultTransport, headers: headers}}
+	if len(headers) == 0 {
+		return &http.Client{Transport: base}
+	}
+	return &http.Client{Transport: headerRT{base: base, headers: headers}}
 }

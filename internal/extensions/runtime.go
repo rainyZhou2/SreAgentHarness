@@ -23,7 +23,9 @@ type Runtime struct {
 	Log      *slog.Logger
 	Interval time.Duration // sync period (default 5s)
 	// Dialer overrides the MCP transport (tests); nil uses the spec's url/command.
-	Dialer     func(name string, s MCPSpec) mcpexec.Dialer
+	Dialer func(name string, s MCPSpec) mcpexec.Dialer
+	// HTTPClient overrides the HTTP tools' client (tests); nil enforces
+	// Options.Network.
 	HTTPClient *http.Client
 	// Models receives the tenants' configured models (the model gateway);
 	// nil ignores model records.
@@ -234,7 +236,7 @@ func (r *Runtime) build(ctx context.Context, rec Record) *entry {
 			e.err = err.Error()
 			return e
 		}
-		p, ep := buildModel(rec.TenantID, rec.Name, s)
+		p, ep := buildModel(rec.TenantID, rec.Name, s, r.Options.Network.Client(10*time.Minute))
 		e.model = &modelEntry{prov: p, ep: ep}
 	case KindHTTP:
 		var s HTTPSpec
@@ -242,7 +244,11 @@ func (r *Runtime) build(ctx context.Context, rec Record) *entry {
 			e.err = err.Error()
 			return e
 		}
-		e.tools = []tools.Tool{newHTTPTool(rec.Name, s, r.HTTPClient)}
+		client := r.HTTPClient
+		if client == nil {
+			client = r.Options.Network.Client(0)
+		}
+		e.tools = []tools.Tool{newHTTPTool(rec.Name, s, client)}
 	case KindMCP:
 		var s MCPSpec
 		if err := json.Unmarshal(rec.Spec, &s); err != nil {
@@ -273,7 +279,7 @@ func (r *Runtime) server(name string, s MCPSpec) (*mcpexec.Server, error) {
 		return nil, err
 	}
 	cfg := mcpexec.ServerConfig{Name: name, URL: s.URL, Headers: s.Headers, Command: s.Command, Args: s.Args, Env: s.Env,
-		Allow: s.Allow, MaxOutputBytes: s.MaxOutputBytes}
+		Allow: s.Allow, MaxOutputBytes: s.MaxOutputBytes, Transport: r.Options.Network.Transport()}
 	if d, err := time.ParseDuration(s.CallTimeout); err == nil {
 		cfg.CallTimeout = mcpexec.Duration(d)
 	}

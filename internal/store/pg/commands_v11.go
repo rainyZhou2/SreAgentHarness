@@ -227,16 +227,20 @@ func (s *Store) migrateProfile(ctx context.Context, r *runTx, cmd *domain.Comman
 	if pending > 0 {
 		return "pending_approvals_must_be_resolved", nil
 	}
-	var exists bool
-	if err := r.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_profiles WHERE tenant_id=$1 AND profile_id=$2 AND version=$3)`,
-		r.run.TenantID, r.run.ProfileID, p.ProfileVersion).Scan(&exists); err != nil {
-		return "", err
-	}
-	if !exists {
+	var status string
+	err := r.tx.QueryRow(ctx, `SELECT status FROM agent_profiles WHERE tenant_id=$1 AND profile_id=$2 AND version=$3`,
+		r.run.TenantID, r.run.ProfileID, p.ProfileVersion).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "unknown_profile_version", nil
+	}
+	if err != nil {
+		return "", err
 	}
 	if p.ProfileVersion == r.run.ProfileVersion {
 		return "", nil
+	}
+	if status != "ACTIVE" {
+		return "profile_version_not_runnable", nil
 	}
 	from := r.run.ProfileVersion
 	r.run.ProfileVersion = p.ProfileVersion

@@ -123,7 +123,11 @@ type Gateway struct {
 
 	inflightMu sync.Mutex
 	inflight   map[string]int
-	now        func() time.Time
+	// reserved is budget (µUSD) admitted but not yet in the ledger, so
+	// concurrent admissions in this process cannot overspend together.
+	budgetMu sync.Mutex
+	reserved map[string]int64
+	now      func() time.Time
 }
 
 func New(policy RoutePolicy, ledger Ledger, arts Artifacts, adm Admission, log *slog.Logger, providers ...Provider) *Gateway {
@@ -307,11 +311,13 @@ func (g *Gateway) Generate(ctx context.Context, sc Scope, req Request, sink Sink
 		finish(RequestResult{Status: "FAILED", ErrorCode: string(ge.Code)})
 		return Response{}, err
 	}
-	if err := g.admit(ctx, sc, cands[0].Endpoint, estimate, req.MaxOutputTokens); err != nil {
+	unreserve, err := g.admit(ctx, sc, cands[0].Endpoint, estimate, req.MaxOutputTokens)
+	if err != nil {
 		ge, _ := AsError(err)
 		finish(RequestResult{Status: "FAILED", ErrorCode: string(ge.Code)})
 		return Response{}, err
 	}
+	defer unreserve()
 	release, err := g.acquire(sc.TenantID)
 	if err != nil {
 		finish(RequestResult{Status: "FAILED", ErrorCode: string(ErrRateLimited)})
@@ -324,7 +330,7 @@ func (g *Gateway) Generate(ctx context.Context, sc Scope, req Request, sink Sink
 		if i >= policy.MaxAttempts {
 			break
 		}
-		resp, err := g.attempt(ctx, sc, rec, i+1, cand, req, estimate, sink)
+		resp, err := g.attempt(ctx, sc, rec, i+1, cand, req, estimate, sink, unreserve)
 		if err == nil {
 			resp.ModelRequestID = rec.ID
 			finish(RequestResult{Status: "SUCCEEDED", ResponseRef: resp.respRef, Endpoint: cand.Endpoint.ID,
@@ -353,8 +359,10 @@ func (g *Gateway) Generate(ctx context.Context, sc Scope, req Request, sink Sink
 	return Response{}, lastErr
 }
 
+// attempt calls estimated once the attempt's ESTIMATED usage is in the
+// ledger, which from then on counts it against the budget.
 func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no int, cand Candidate, req Request,
-	estimate int64, sink Sink) (Response, error) {
+	estimate int64, sink Sink, estimated func()) (Response, error) {
 	ep := cand.Endpoint
 	prov, ok := g.provider(ep.ProviderID)
 	if !ok {
@@ -368,8 +376,10 @@ func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no i
 	}
 	est := Usage{InputTokens: estimate, OutputTokens: req.MaxOutputTokens}
 	estID := uuid.NewString()
-	_ = g.ledger.AppendUsage(ctx, sc.TenantID, UsageRecord{ID: estID, AttemptID: att.ID, State: UsageEstimated,
-		Revision: 1, Usage: &est, PricingVersion: ep.Pricing.Version, CostMicros: ep.Pricing.CostMicros(est)})
+	if err := g.ledger.AppendUsage(ctx, sc.TenantID, UsageRecord{ID: estID, AttemptID: att.ID, State: UsageEstimated,
+		Revision: 1, Usage: &est, PricingVersion: ep.Pricing.Version, CostMicros: ep.Pricing.CostMicros(est)}); err == nil {
+		estimated()
+	}
 
 	agg := NewAggregator(req.Tools)
 	names := ToolNameMap(req.Tools)
@@ -430,7 +440,10 @@ func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no i
 		case u != (Usage{}):
 			usage.State, usage.Usage, usage.CostMicros = UsageReported, &u, ep.Pricing.CostMicros(u)
 		default:
-			usage.State = UsageUnknown // billed but not reported: reconcile from provider invoices
+			// Billed but not reported: keep the estimate as the cost until
+			// it is reconciled from provider invoices, so the budget still
+			// counts it.
+			usage.State, usage.CostMicros = UsageUnknown, ep.Pricing.CostMicros(est)
 		}
 		_ = g.ledger.AppendUsage(context.WithoutCancel(ctx), sc.TenantID, usage)
 		_ = g.ledger.FinishModelAttempt(context.WithoutCancel(ctx), sc, AttemptResult{ID: att.ID, ModelRequestID: rec.ID,
@@ -461,26 +474,45 @@ func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no i
 	return resp, nil
 }
 
-func (g *Gateway) admit(ctx context.Context, sc Scope, ep Endpoint, estimate, maxOut int64) error {
+// admit checks the tenant's daily budget and reserves the request's worst
+// case cost. The returned func releases the reservation (idempotent).
+func (g *Gateway) admit(ctx context.Context, sc Scope, ep Endpoint, estimate, maxOut int64) (func(), error) {
 	budget := g.admission.DailyBudgetMicros
 	if b, ok := g.admission.TenantBudgetMicros[sc.TenantID]; ok {
 		budget = b
 	}
 	if budget <= 0 {
-		return nil
+		return func() {}, nil
 	}
 	now := g.now().UTC()
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	need := ep.Pricing.CostMicros(Usage{InputTokens: estimate, OutputTokens: maxOut})
+	// The lock spans the ledger read so admissions are checked one at a time.
+	g.budgetMu.Lock()
+	defer g.budgetMu.Unlock()
 	spent, err := g.ledger.SpentMicros(ctx, sc.TenantID, day)
 	if err != nil {
-		return errf(ErrProviderUnavailable, false, "budget lookup: %v", err)
+		return nil, errf(ErrProviderUnavailable, false, "budget lookup: %v", err)
 	}
-	need := ep.Pricing.CostMicros(Usage{InputTokens: estimate, OutputTokens: maxOut})
-	if spent+need > budget {
-		return errf(ErrBudgetExceeded, false, "tenant %s daily model budget exhausted (spent %d + need %d > %d µUSD)",
-			sc.TenantID, spent, need, budget)
+	if g.reserved == nil {
+		g.reserved = map[string]int64{}
 	}
-	return nil
+	if spent+g.reserved[sc.TenantID]+need > budget {
+		return nil, errf(ErrBudgetExceeded, false, "tenant %s daily model budget exhausted (spent %d + reserved %d + need %d > %d µUSD)",
+			sc.TenantID, spent, g.reserved[sc.TenantID], need, budget)
+	}
+	g.reserved[sc.TenantID] += need
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.budgetMu.Lock()
+			g.reserved[sc.TenantID] -= need
+			if g.reserved[sc.TenantID] <= 0 {
+				delete(g.reserved, sc.TenantID)
+			}
+			g.budgetMu.Unlock()
+		})
+	}, nil
 }
 
 func (g *Gateway) acquire(tenant string) (func(), error) {

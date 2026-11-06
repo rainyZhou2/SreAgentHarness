@@ -145,7 +145,10 @@ func (a *API) put(w http.ResponseWriter, r *http.Request) {
 	}
 	// Blank secret values keep the stored ones (the API never returns them).
 	if existing, err := a.find(r.Context(), p.Tenant, kind, name); err == nil {
-		body.Spec = MergeSecrets(existing.Spec, body.Spec)
+		if body.Spec, err = MergeSecrets(existing.Spec, body.Spec); err != nil {
+			writeErr(w, http.StatusUnprocessableEntity, "secrets_required", err.Error())
+			return
+		}
 	}
 	spec, err := Validate(kind, name, body.Spec, a.Runtime.Options)
 	if err != nil {
@@ -238,7 +241,11 @@ func (a *API) probe(w http.ResponseWriter, r *http.Request) {
 	case len(raw) == 0:
 		raw = existing.Spec
 	case findErr == nil:
-		raw = MergeSecrets(existing.Spec, raw)
+		var err error
+		if raw, err = MergeSecrets(existing.Spec, raw); err != nil {
+			writeErr(w, http.StatusUnprocessableEntity, "secrets_required", err.Error())
+			return
+		}
 	}
 	norm, err := Validate(KindMCP, name, raw, a.Runtime.Options)
 	if err != nil {
@@ -277,7 +284,11 @@ func (a *API) testModel(w http.ResponseWriter, r *http.Request) {
 	case len(raw) == 0:
 		raw = existing.Spec
 	case findErr == nil:
-		raw = MergeSecrets(existing.Spec, raw)
+		var err error
+		if raw, err = MergeSecrets(existing.Spec, raw); err != nil {
+			writeErr(w, http.StatusUnprocessableEntity, "secrets_required", err.Error())
+			return
+		}
 	}
 	norm, err := Validate(KindModel, name, raw, a.Runtime.Options)
 	if err != nil {
@@ -288,7 +299,7 @@ func (a *API) testModel(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(norm, &spec)
 	a.audit(r.Context(), p, "extension.test", KindModel, name, map[string]any{"provider": spec.Provider, "model": spec.Model})
 	start := time.Now()
-	reply, model, err := TestModel(r.Context(), p.Tenant, name, spec)
+	reply, model, err := a.Runtime.TestModel(r.Context(), p.Tenant, name, spec)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "model_failed", err.Error())
 		return
