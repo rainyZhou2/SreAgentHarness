@@ -124,10 +124,16 @@ async function openConnection() {
   $("#conn-error").hidden = true;
   syncMode();
   $("#dlg-conn").showModal();
+  f.server_url.focus();
+  f.server_url.select();
 }
 function syncMode() {
   const mode = $("#form-conn").mode.value;
   document.querySelectorAll("#form-conn [data-mode]").forEach((el) => (el.hidden = el.dataset.mode !== mode));
+  document.querySelectorAll("#form-conn .seg label").forEach((el) => {
+    const input = el.querySelector("input");
+    el.classList.toggle("on", !!(input && input.checked));
+  });
 }
 async function submitConnection(ev) {
   ev.preventDefault();
