@@ -139,9 +139,9 @@ const ZH = {
   "Ark endpoint ID (ep-…) or model name": "方舟推理接入点 ID（ep-…）或模型名",
   // chat
   "What can I help with?": "有什么可以帮你？",
-  "Ask a question, describe an incident, or request a change. The agent answers directly, investigates with tools when needed, and asks before risky actions.":
-    "提问、描述故障或发起变更都可以。Agent 会直接回答，需要时用工具排查，高风险操作前会先征求你的同意。",
-  "Ask a question, or describe an incident…": "提问，或描述故障…",
+  "Tell me what's on your mind. I'll work out what you need and help from there.":
+    "告诉我你的问题或想法，我会先理解你的意图，再帮你处理。",
+  "Type your question or idea…": "输入你的问题或想法…",
   "What's the difference between a Deployment and a StatefulSet?": "Deployment 和 StatefulSet 有什么区别？",
   "Why did checkout p99 latency rise this week?": "checkout 这周的 p99 延迟为什么升高了？",
   "Restart the checkout deployment and confirm recovery": "重启 checkout 并确认恢复",
