@@ -21,6 +21,21 @@ import (
 type Settings struct {
 	ServerURL string              `json:"server_url"`
 	Creds     harness.Credentials `json:"creds"`
+	// Language of the interface, notifications and exports: "en" or "zh"
+	// (empty: the UI follows the system language).
+	Language string `json:"language,omitempty"`
+	Preferences
+	// SignedOut keeps a dev-mode connection from reconnecting at startup.
+	SignedOut bool `json:"signed_out,omitempty"`
+}
+
+// Preferences are the app's own settings (Settings → Appearance and
+// Notifications). Zero values are the defaults.
+type Preferences struct {
+	Theme       string `json:"theme,omitempty"`        // "" (system) | light | dark
+	NoGlass     bool   `json:"no_glass,omitempty"`     // opaque surfaces instead of glass
+	NotifyOff   bool   `json:"notify_off,omitempty"`   // no system notifications for approvals
+	PollSeconds int    `json:"poll_seconds,omitempty"` // approvals inbox refresh; 0 = 8s
 }
 
 // App is bound to the UI: every exported method is callable from JavaScript
@@ -58,7 +73,7 @@ func (a *App) startup(ctx context.Context) {
 		_ = json.Unmarshal(b, &a.settings)
 	}
 	a.settings.Creds.Token = ""
-	if a.settings.Creds.Mode == "dev" {
+	if a.settings.Creds.Mode == "dev" && !a.settings.SignedOut {
 		a.client, _ = harness.New(a.settings.ServerURL, a.settings.Creds)
 	}
 	go a.watchApprovals()
@@ -99,26 +114,79 @@ func (a *App) Connect(s Settings) (map[string]any, error) {
 	}
 	var who map[string]any
 	if err := c.Get(a.ctx, "/v1/whoami", &who); err != nil {
+		a.logEvent("error", "sign in to %s failed: %v", s.ServerURL, err)
 		return nil, fmt.Errorf("cannot sign in: %w", err)
 	}
 	a.UnwatchRun()
 	a.mu.Lock()
+	// The connection dialog carries only the connection; keep the rest.
+	if s.Language == "" {
+		s.Language = a.settings.Language
+	}
+	s.Preferences, s.SignedOut = a.settings.Preferences, false
 	a.client, a.settings = c, s
 	a.mu.Unlock()
-	saved := s
-	saved.Creds.Token = ""
-	if b, err := json.MarshalIndent(saved, "", "  "); err == nil {
-		_ = os.MkdirAll(filepath.Dir(settingsPath()), 0o700)
-		_ = os.WriteFile(settingsPath(), b, 0o600)
-	}
+	a.saveSettings()
+	a.logEvent("info", "signed in to %s as %v (%s)", s.ServerURL, who["subject"], s.Creds.Mode)
+	a.RefreshApprovals()
 	return who, nil
+}
+
+// SetLanguage saves the interface language ("en" or "zh").
+func (a *App) SetLanguage(lang string) error {
+	if lang != "en" && lang != "zh" {
+		return fmt.Errorf("unsupported language %q", lang)
+	}
+	a.mu.Lock()
+	a.settings.Language = lang
+	a.mu.Unlock()
+	return a.saveSettings()
+}
+
+// saveSettings writes the settings without the token.
+func (a *App) saveSettings() error {
+	a.mu.Lock()
+	saved := a.settings
+	a.mu.Unlock()
+	saved.Creds.Token = ""
+	b, err := json.MarshalIndent(saved, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath()), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(settingsPath(), b, 0o600)
+}
+
+// zh reports whether the user chose Chinese.
+func (a *App) zh() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.settings.Language == "zh"
+}
+
+// tr picks the English or Chinese text.
+func (a *App) tr(en, zh string) string {
+	if a.zh() {
+		return zh
+	}
+	return en
+}
+
+// trLocked is tr for callers that hold a.mu.
+func (a *App) trLocked(en, zh string) string {
+	if a.settings.Language == "zh" {
+		return zh
+	}
+	return en
 }
 
 func (a *App) c() (*harness.Client, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.client == nil {
-		return nil, errors.New("not connected: open Connection and sign in")
+		return nil, errors.New(a.trLocked("not connected: open Connection and sign in", "未连接：请打开“连接”并登录"))
 	}
 	return a.client, nil
 }
@@ -308,7 +376,11 @@ func (a *App) Command(runID string, req CommandRequest) (map[string]any, error) 
 		body["reason"] = req.Reason
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/commands", body, &out)
+	if err := c.Do(a.ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/commands", body, &out); err != nil {
+		a.logEvent("warn", "command %s on run %s failed: %v", req.Type, runID, err)
+		return nil, err
+	}
+	return out, nil
 }
 
 // Plugins returns the server's plugin inventory (admin only).
@@ -334,6 +406,7 @@ func (a *App) WatchRun(runID string, afterSeq int64) error {
 			a.emit("run:delta", map[string]any{"run_id": runID, "delta": d})
 		})
 		if err != nil && ctx.Err() == nil {
+			a.logEvent("warn", "event stream of run %s stopped: %v", runID, err)
 			a.emit("run:stream-error", map[string]any{"run_id": runID, "error": err.Error()})
 		}
 	}()

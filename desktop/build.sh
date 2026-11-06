@@ -8,11 +8,21 @@ cd "$(dirname "$0")"
 out=build/bin
 mkdir -p "$out"
 tags="desktop,production"
+version="$(sed -n 's/^var Version = "\(.*\)"/\1/p' settings.go)"
 case "$(uname -s)" in
 Darwin)
   app="$out/SRE Harness.app"
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  # App icon: assets/appicon.png -> AppIcon.icns (all sizes macOS asks for).
+  iconset="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$iconset"
+  for s in 16 32 128 256 512; do
+    sips -z $s $s assets/appicon.png --out "$iconset/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s * 2)) $((s * 2)) assets/appicon.png --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+  rm -r "$(dirname "$iconset")"
   CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers -mmacosx-version-min=11.0" \
   CGO_CFLAGS="-mmacosx-version-min=11.0" \
     go build -tags "$tags" -ldflags "-w -s" -o "$app/Contents/MacOS/sre-harness-desktop" .
@@ -24,8 +34,9 @@ Darwin)
   <key>CFBundleDisplayName</key><string>SRE Harness</string>
   <key>CFBundleIdentifier</key><string>dev.sreharness.desktop</string>
   <key>CFBundleExecutable</key><string>sre-harness-desktop</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
