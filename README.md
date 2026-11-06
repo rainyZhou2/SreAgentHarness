@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-An SRE Cognitive Agent Harness implemented from the design RFC [`GoAgentHarness.md`](GoAgentHarness.md) (v1.1.3, [简体中文](GoAgentHarness.zh-CN.md)). It covers RFC milestones M1–M7 plus the v1.1 additions (conversations/branches, model gateway, cost, checkpoints, compaction, profile canary rollouts). The GPU serving cluster (vLLM/SGLang routing, KV offload) is not implemented.
+An SRE Cognitive Agent Harness implemented from the design RFC `GoAgentHarness.md` (v1.1.3, Chinese: `GoAgentHarness.zh-CN.md`; both are kept local and not published with the repository). It covers RFC milestones M1–M7 plus the v1.1 additions (conversations/branches, model gateway, cost, checkpoints, compaction, profile canary rollouts). The GPU serving cluster (vLLM/SGLang routing, KV offload) is not implemented.
 
 ## Features
 
