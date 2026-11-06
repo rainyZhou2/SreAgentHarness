@@ -54,6 +54,7 @@ const ICONS = {
   up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>',
   book: '<path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v15H7.5A2.5 2.5 0 0 0 5 20.5z"/><path d="M5 20.5A2.5 2.5 0 0 1 7.5 18H19v3H7.5"/>',
+  sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
 };
 const kbd = (k) => h("kbd", {}, k);
 function icon(name) {
@@ -889,6 +890,8 @@ async function showPlugins() {
 const RISKS = ["R0", "R1", "R2", "R3"];
 const RISK_DOC = { R0: "read-only", R1: "low-impact write", R2: "change · needs approval", R3: "dangerous · always denied" };
 const TABS = [["mcp", "MCP servers"], ["http", "HTTP tools"], ["web", "Web search"], ["skills", "Skills"], ["tools", "Tools"]];
+const TAB_ICONS = { mcp: "tool", http: "dot", web: "search", skills: "spark" };
+const EMPTY_TITLES = { mcp: "No MCP servers yet", http: "No HTTP tools yet", web: "No search backend yet", skills: "No skills yet" };
 const cz = { tab: "mcp", data: null, tools: null, edit: null };
 
 // Extension editors live in Customize and (models) in Settings; these redraw
@@ -958,9 +961,12 @@ function renderCustomize(loading) {
   else if (cz.tab === "tools") body = renderToolsTab();
   else body = renderExtList(cz.tab);
   $("#thread").replaceChildren(h("div", { class: "customize" },
-    h("h1", {}, t("Customize")),
-    h("p", { class: "muted lead" }, t("Connect MCP servers, add HTTP tools and write skills for every chat in this tenant. Models are under Settings. "),
-      t("Tools still run under the profile allowlist, policy and approvals. Changes need the admin role.")),
+    h("header", { class: "cz-head" },
+      h("div", { class: "cz-mark" }, icon("sliders")),
+      h("div", { class: "cz-title" },
+        h("h1", {}, t("Customize")),
+        h("p", { class: "muted lead" }, t("Connect MCP servers, add HTTP tools and write skills for every chat in this tenant. Models are under Settings. "),
+          t("Tools still run under the profile allowlist, policy and approvals. Changes need the admin role.")))),
     tabs, body));
 }
 
@@ -974,16 +980,20 @@ function renderExtList(tab) {
   const add = { mcp: [t("Add MCP server"), () => editMCP(null)], http: [t("Add HTTP tool"), () => editHTTP(null)],
     web: [t("Add search backend"), () => editWeb(null)], skills: [t("New skill"), () => editSkill(null)] }[tab];
   const empty = {
-    mcp: "No MCP servers yet. Add a streamable-HTTP server, pick which of its tools the agent may use and give each a risk class.",
-    http: "No HTTP tools yet. An HTTP tool POSTs the call's JSON arguments to your endpoint and returns the response.",
-    web: "No search backend yet. web.fetch works without configuration; add a search provider to let the agent look up current facts.",
-    skills: "No skills yet. A skill is a playbook (instructions) added to the agent's system prompt in every run.",
+    mcp: "Add a streamable-HTTP server, pick which of its tools the agent may use and give each a risk class.",
+    http: "An HTTP tool POSTs the call's JSON arguments to your endpoint and returns the response.",
+    web: "web.fetch works without configuration; add a search provider to let the agent look up current facts.",
+    skills: "A skill is a playbook (instructions) added to the agent's system prompt in every run.",
   }[tab];
   const edit = { mcp: editMCP, http: editHTTP, web: editWeb, skills: editSkill }[tab];
   return h("div", {},
     h("div", { class: "list-bar" }, h("button", { class: "btn primary", onclick: add[1] }, add[0])),
-    items.length === 0 ? h("div", { class: "empty-card muted" }, t(empty)) :
+    items.length === 0 ? h("div", { class: "empty-card" },
+      h("div", { class: "empty-mark" }, icon(TAB_ICONS[tab])),
+      h("div", { class: "empty-title" }, t(EMPTY_TITLES[tab])),
+      h("div", { class: "muted small" }, t(empty))) :
       items.map((x) => h("div", { class: "ext-card", onclick: () => edit(x) },
+        h("div", { class: "ext-ico" }, icon(TAB_ICONS[tab])),
         h("div", { class: "ext-main" },
           h("div", { class: "ext-title" }, h("span", { class: "mono" }, x.name), statusBadge(x)),
           h("div", { class: "muted small" }, extSummary(tab, x)),
