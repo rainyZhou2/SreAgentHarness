@@ -338,67 +338,6 @@ dialog h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; letter-spacing:
 .spacer { flex: 1; }
 .link-btn { border: 0; background: none; color: var(--accent); padding: 2px 0; font-size: 13px; }
 .link-btn:hover { text-decoration: underline; text-underline-offset: 3px; }
-
-/* Customize: glass surfaces that match the sidebar and composer. Scoped so
-   the Plugins page and the dialogs keep their current look. */
-.customize { position: relative; padding-top: 12px; }
-.customize::before {
-  content: ""; position: absolute; inset: -30px -30px auto; height: 280px; pointer-events: none; z-index: 0;
-  background:
-    radial-gradient(55% 90% at 12% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
-    radial-gradient(45% 80% at 95% 8%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 70%);
-  filter: blur(18px);
-}
-.customize > * { position: relative; z-index: 1; }
-.customize .cz-head { display: flex; align-items: flex-start; gap: 14px; margin: 0 0 22px; }
-.customize .cz-mark { width: 38px; height: 38px; flex-shrink: 0; display: grid; place-items: center; color: var(--muted);
-  border: 1px solid var(--glass-line); border-radius: 11px; background: var(--glass);
-  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
-  box-shadow: inset 0 1px 0 var(--glass-edge), 0 1px 2px rgb(0 0 0 / .04); }
-.customize .cz-title h1 { margin: 0 0 4px; font-size: 23px; }
-.customize .lead { margin: 0; max-width: 660px; line-height: 1.6; }
-.customize .tabs { display: inline-flex; gap: 2px; width: auto; padding: 3px; margin: 0 0 18px;
-  border: 1px solid var(--glass-line); border-radius: 11px; background: var(--glass);
-  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
-  box-shadow: inset 0 1px 0 var(--glass-edge); }
-.customize .tab { margin: 0; padding: 7px 12px; border-bottom: 0; border-radius: 8px; font-size: 13px; color: var(--muted);
-  transition: background var(--fast), color var(--fast), box-shadow var(--fast); }
-.customize .tab:hover { color: var(--text); background: var(--hover); }
-.customize .tab.on { color: var(--text); background: var(--glass-strong); font-weight: 550;
-  box-shadow: inset 0 0 0 1px var(--glass-line), 0 1px 2px rgb(0 0 0 / .06); }
-.customize .count { background: color-mix(in srgb, var(--text) 6%, transparent); }
-.customize .list-bar { margin: 2px 0 14px; }
-.customize .ext-card, .customize .tool-card, .customize .empty-card, .customize .editor {
-  border: 1px solid var(--glass-line); border-radius: var(--r-shell); background: var(--glass);
-  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
-  box-shadow: inset 0 1px 0 var(--glass-edge), 0 12px 30px -26px rgb(0 0 0 / .30); }
-.customize .ext-card, .customize .tool-card {
-  transition: background var(--fast), border-color var(--fast), box-shadow var(--fast), transform var(--fast); }
-.customize .ext-card:hover, .customize .tool-card:hover {
-  border-color: var(--line-strong); background: var(--glass-strong);
-  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float); transform: translateY(-1px); }
-.customize .ext-card { padding: 15px 17px; margin-bottom: 9px; }
-.customize .ext-ico { width: 34px; height: 34px; flex-shrink: 0; display: grid; place-items: center; color: var(--muted);
-  border: 1px solid var(--line); border-radius: 9px; background: var(--sunken); }
-.customize .tool-grid { gap: 12px; }
-.customize .tool-card { padding: 16px 18px; }
-.customize .empty-card { padding: 38px 28px; border-style: solid; }
-.customize .empty-mark { width: 42px; height: 42px; margin: 0 auto 12px; display: grid; place-items: center; color: var(--muted);
-  border: 1px solid var(--line); border-radius: 12px; background: var(--sunken); }
-.customize .empty-title { margin-bottom: 6px; font-size: 14px; font-weight: 600; }
-.customize .editor { padding: 20px 24px; }
-.customize .editor .actions { border-top-color: var(--glass-line); }
-@media (prefers-reduced-transparency: reduce) {
-  .customize .cz-mark, .customize .tabs, .customize .ext-card, .customize .tool-card, .customize .empty-card, .customize .editor {
-    background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
-}
-html.no-glass .customize .cz-mark, html.no-glass .customize .tabs, html.no-glass .customize .ext-card,
-html.no-glass .customize .tool-card, html.no-glass .customize .empty-card, html.no-glass .customize .editor {
-  background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
-@media (prefers-reduced-motion: reduce) {
-  .customize .ext-card, .customize .tool-card { transition: none; }
-  .customize .ext-card:hover, .customize .tool-card:hover { transform: none; }
-}
 .icon-btn { border: 1px solid var(--line-strong); background: var(--surface); border-radius: var(--r-control); width: 32px; flex-shrink: 0; color: var(--muted); }
 .icon-btn:hover { color: var(--text); background: var(--hover); }
 .kv-edit { margin: -6px 0 14px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
@@ -641,10 +580,54 @@ html.no-glass .side-link.on, html.no-glass .chats li.active { background: var(--
 .ext-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .grid-name-model { display: grid; grid-template-columns: 170px 1fr; gap: 0 12px; }
 
-/* Customize refinement: keep the glass, drop the frames. */
-.customize .cz-mark { border: 0; background: var(--glass-strong); }
-.customize .tabs { border: 0; }
-.customize .ext-card, .customize .tool-card, .customize .empty-card, .customize .editor { border: 0; }
-.customize .ext-card:hover, .customize .tool-card:hover { border: 0; }
-.customize .ext-ico { border: 0; background: color-mix(in srgb, var(--text) 5%, transparent); }
-.customize .empty-mark { border: 0; background: var(--accent-soft); color: var(--accent); }
+/* Customize: the same glass as the sidebar and composer, with no outlines.
+   Depth comes from the fill and a soft shadow; interaction stays a plain
+   background shift. Scoped so Plugins, Settings and the dialogs are untouched. */
+.customize { padding-top: 12px; }
+.customize .cz-head { display: flex; align-items: flex-start; gap: 14px; margin: 0 0 22px; }
+.customize .cz-mark { width: 38px; height: 38px; flex-shrink: 0; display: grid; place-items: center; color: var(--muted);
+  border-radius: 11px; background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 1px 2px rgb(0 0 0 / .04); }
+.customize .cz-mark .ico-svg, .customize .empty-mark .ico-svg { width: 18px; height: 18px; }
+.customize .cz-title h1 { margin: 0 0 4px; font-size: 23px; }
+.customize .lead { margin: 0; max-width: 660px; line-height: 1.6; }
+.customize .tabs { display: inline-flex; gap: 2px; width: auto; padding: 3px; margin: 0 0 18px;
+  border: 0; border-radius: 11px; background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge); }
+.customize .tab { margin: 0; padding: 7px 12px; border: 0; border-radius: 8px; font-size: 13px; color: var(--muted); }
+.customize .tab:hover { color: var(--text); background: var(--hover); }
+.customize .tab.on { color: var(--text); background: var(--active); font-weight: 550; }
+.customize .count { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.customize .list-bar { margin: 2px 0 14px; }
+.customize .ext-card, .customize .tool-card, .customize .empty-card {
+  border: 0; border-radius: var(--r-shell); background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm); backdrop-filter: var(--blur-sm);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 14px 34px -30px rgb(0 0 0 / .35); }
+.customize .ext-card, .customize .tool-card { transition: background var(--fast), box-shadow var(--fast); }
+.customize .ext-card:hover, .customize .tool-card:hover { background: var(--glass-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-float); }
+.customize .ext-card { padding: 15px 17px; margin-bottom: 9px; }
+.customize .tool-grid { gap: 12px; }
+.customize .tool-card { padding: 16px 18px; }
+.customize .ext-ico { width: 34px; height: 34px; flex-shrink: 0; display: grid; place-items: center;
+  border: 0; border-radius: 9px; color: var(--muted); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.customize .empty-card { padding: 38px 28px; }
+.customize .empty-mark { width: 42px; height: 42px; margin: 0 auto 12px; display: grid; place-items: center;
+  border: 0; border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
+.customize .empty-title { margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.customize .tool-source { border: 0; background: color-mix(in srgb, var(--text) 5%, transparent); }
+.customize .switch .track { border: 0; background: color-mix(in srgb, var(--text) 14%, transparent); }
+.customize .editor { padding: 20px 24px; border: 0; border-radius: var(--r-shell); background: var(--surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .03), 0 18px 40px -34px rgb(0 0 0 / .28); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .customize .cz-mark, .customize .tabs, .customize .ext-card, .customize .tool-card, .customize .empty-card { background: var(--surface); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .customize .cz-mark, .customize .tabs, .customize .ext-card, .customize .tool-card, .customize .empty-card {
+    background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+}
+html.no-glass .customize .cz-mark, html.no-glass .customize .tabs, html.no-glass .customize .ext-card,
+html.no-glass .customize .tool-card, html.no-glass .customize .empty-card {
+  background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
