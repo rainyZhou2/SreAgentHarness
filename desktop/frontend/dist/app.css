@@ -359,7 +359,7 @@ dialog h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; letter-spacing:
   border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); }
 .tool-card:hover { border-color: var(--line-strong); }
 .tool-card.off { opacity: .62; }
-.tool-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tool-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .tool-card.off .tool-name { color: var(--muted); }
 .tool-desc { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5;
