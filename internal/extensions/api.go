@@ -29,7 +29,7 @@ type API struct {
 	Audit func(ctx context.Context, tenant, actor, action, resource string, details map[string]any)
 }
 
-var pathKinds = map[string]Kind{"mcp-servers": KindMCP, "http-tools": KindHTTP, "skills": KindSkill, "models": KindModel}
+var pathKinds = map[string]Kind{"mcp-servers": KindMCP, "http-tools": KindHTTP, "skills": KindSkill, "models": KindModel, "web-tools": KindWeb}
 
 func (a *API) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
@@ -103,13 +103,14 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{}
-	lists := map[Kind][]View{KindMCP: {}, KindHTTP: {}, KindSkill: {}, KindModel: {}}
+	lists := map[Kind][]View{KindMCP: {}, KindHTTP: {}, KindSkill: {}, KindModel: {}, KindWeb: {}}
 	for _, rec := range recs {
 		if _, ok := lists[rec.Kind]; ok {
 			lists[rec.Kind] = append(lists[rec.Kind], a.view(rec))
 		}
 	}
-	out["mcp_servers"], out["http_tools"], out["skills"], out["models"] = lists[KindMCP], lists[KindHTTP], lists[KindSkill], lists[KindModel]
+	out["mcp_servers"], out["http_tools"], out["skills"], out["models"], out["web_tools"] =
+		lists[KindMCP], lists[KindHTTP], lists[KindSkill], lists[KindModel], lists[KindWeb]
 	if a.ResolveModel != nil {
 		ep, model, err := a.ResolveModel(p.Tenant)
 		cur := map[string]any{"endpoint": ep, "model": model, "tenant_configured": strings.HasPrefix(ep, "tenant:")}
@@ -134,7 +135,7 @@ func (a *API) put(w http.ResponseWriter, r *http.Request) {
 	}
 	kind, ok := pathKinds[r.PathValue("kind")]
 	if !ok {
-		writeErr(w, http.StatusNotFound, "not_found", "kind must be mcp-servers, http-tools, skills or models")
+		writeErr(w, http.StatusNotFound, "not_found", "kind must be mcp-servers, http-tools, skills, models or web-tools")
 		return
 	}
 	name := r.PathValue("name")
@@ -182,7 +183,7 @@ func (a *API) del(w http.ResponseWriter, r *http.Request) {
 	}
 	kind, ok := pathKinds[r.PathValue("kind")]
 	if !ok {
-		writeErr(w, http.StatusNotFound, "not_found", "kind must be mcp-servers, http-tools, skills or models")
+		writeErr(w, http.StatusNotFound, "not_found", "kind must be mcp-servers, http-tools, skills, models or web-tools")
 		return
 	}
 	name := r.PathValue("name")

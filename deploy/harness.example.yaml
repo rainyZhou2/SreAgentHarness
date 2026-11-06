@@ -32,6 +32,7 @@ plugins:
 
   tools:
     - {name: demo, enabled: false}
+    - {name: web, config: {max_bytes: 524288, timeout: 15s}}
     - name: prometheus
       config: {url: "http://prometheus:9090", max_series: 50}
     - name: kubernetes

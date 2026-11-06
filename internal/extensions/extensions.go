@@ -23,6 +23,7 @@ import (
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/tools/mcpexec"
+	"go-sre-harness/internal/tools/web"
 )
 
 // Kind of extension record.
@@ -32,6 +33,7 @@ const (
 	KindMCP   Kind = "mcp_server"
 	KindHTTP  Kind = "http_tool"
 	KindSkill Kind = "skill"
+	KindWeb   Kind = "web"
 )
 
 // Record is one stored extension.
@@ -98,6 +100,16 @@ type SkillSpec struct {
 	// Mode: "always" (default) applies to every run; "manual" only to
 	// chats that invoke the skill with /name.
 	Mode string `json:"mode,omitempty"`
+}
+
+// WebSpec configures the tenant's web.search backend. web.fetch is built in
+// and needs no configuration.
+type WebSpec struct {
+	Provider   string `json:"provider"` // brave | tavily | bing | generic
+	Endpoint   string `json:"endpoint,omitempty"`
+	APIKey     string `json:"api_key,omitempty"`
+	MaxResults int    `json:"max_results,omitempty"`
+	Timeout    string `json:"timeout,omitempty"`
 }
 
 // Limits on what can be stored.
@@ -175,6 +187,21 @@ func Validate(kind Kind, name string, spec json.RawMessage, o Options) (json.Raw
 			s.Mode = ""
 		}
 		return json.Marshal(s)
+	case KindWeb:
+		var s WebSpec
+		if err := strict(&s); err != nil {
+			return nil, err
+		}
+		if err := web.ValidateSearch(web.SearchConfig{Provider: s.Provider, Endpoint: s.Endpoint,
+			APIKey: s.APIKey, MaxResults: s.MaxResults}); err != nil {
+			return nil, err
+		}
+		if s.Endpoint != "" {
+			if err := checkURL(s.Endpoint, o.Network); err != nil {
+				return nil, err
+			}
+		}
+		return json.Marshal(s)
 	}
 	return nil, fmt.Errorf("unknown kind %q", kind)
 }
@@ -195,7 +222,7 @@ func checkURL(raw string, n NetPolicy) error {
 	if u.User != nil {
 		return fmt.Errorf("url must not embed credentials; use headers")
 	}
-	return n.checkHost(u)
+	return n.CheckHost(u)
 }
 
 func checkDuration(v string) error {
@@ -314,11 +341,11 @@ func MaskSecrets(kind Kind, spec json.RawMessage) json.RawMessage {
 
 // destinationKeys are the spec fields that decide where stored secrets are
 // sent. Changing any of them requires re-entering the secrets.
-var destinationKeys = []string{"url", "base_url", "provider", "command", "args"}
+var destinationKeys = []string{"url", "base_url", "provider", "endpoint", "command", "args"}
 
 // ErrSecretsNeedReentry is returned by MergeSecrets when a blank secret
 // would be filled in for a spec whose destination changed.
-var ErrSecretsNeedReentry = errors.New("the destination (url, base_url, provider, command or args) changed: re-enter the secret values instead of leaving them blank")
+var ErrSecretsNeedReentry = errors.New("the destination (url, base_url, provider, endpoint, command or args) changed: re-enter the secret values instead of leaving them blank")
 
 // MergeSecrets fills blank header/env/api_key values in next from prev. It
 // refuses when the destination changed, so an update that does not know a
