@@ -888,7 +888,7 @@ async function showPlugins() {
 // ---------- customize: MCP servers, HTTP tools, skills, tools ----------
 const RISKS = ["R0", "R1", "R2", "R3"];
 const RISK_DOC = { R0: "read-only", R1: "low-impact write", R2: "change · needs approval", R3: "dangerous · always denied" };
-const TABS = [["mcp", "MCP servers"], ["http", "HTTP tools"], ["skills", "Skills"], ["tools", "Tools"]];
+const TABS = [["mcp", "MCP servers"], ["http", "HTTP tools"], ["web", "Web search"], ["skills", "Skills"], ["tools", "Tools"]];
 const cz = { tab: "mcp", data: null, tools: null, edit: null };
 
 // Extension editors live in Customize and (models) in Settings; these redraw
@@ -966,21 +966,24 @@ function renderCustomize(loading) {
 
 function listFor(tab) {
   const d = cz.data || {};
-  return (tab === "mcp" ? d.mcp_servers : tab === "http" ? d.http_tools : tab === "model" ? d.models : d.skills) || [];
+  return (tab === "mcp" ? d.mcp_servers : tab === "http" ? d.http_tools : tab === "web" ? d.web_tools : tab === "model" ? d.models : d.skills) || [];
 }
 
 function renderExtList(tab) {
   const items = listFor(tab);
-  const add = { mcp: [t("Add MCP server"), () => editMCP(null)], http: [t("Add HTTP tool"), () => editHTTP(null)], skills: [t("New skill"), () => editSkill(null)] }[tab];
+  const add = { mcp: [t("Add MCP server"), () => editMCP(null)], http: [t("Add HTTP tool"), () => editHTTP(null)],
+    web: [t("Add search backend"), () => editWeb(null)], skills: [t("New skill"), () => editSkill(null)] }[tab];
   const empty = {
     mcp: "No MCP servers yet. Add a streamable-HTTP server, pick which of its tools the agent may use and give each a risk class.",
     http: "No HTTP tools yet. An HTTP tool POSTs the call's JSON arguments to your endpoint and returns the response.",
+    web: "No search backend yet. web.fetch works without configuration; add a search provider to let the agent look up current facts.",
     skills: "No skills yet. A skill is a playbook (instructions) added to the agent's system prompt in every run.",
   }[tab];
+  const edit = { mcp: editMCP, http: editHTTP, web: editWeb, skills: editSkill }[tab];
   return h("div", {},
     h("div", { class: "list-bar" }, h("button", { class: "btn primary", onclick: add[1] }, add[0])),
     items.length === 0 ? h("div", { class: "empty-card muted" }, t(empty)) :
-      items.map((x) => h("div", { class: "ext-card", onclick: () => (tab === "mcp" ? editMCP(x) : tab === "http" ? editHTTP(x) : editSkill(x)) },
+      items.map((x) => h("div", { class: "ext-card", onclick: () => edit(x) },
         h("div", { class: "ext-main" },
           h("div", { class: "ext-title" }, h("span", { class: "mono" }, x.name), statusBadge(x)),
           h("div", { class: "muted small" }, extSummary(tab, x)),
@@ -998,6 +1001,7 @@ function extSummary(tab, x) {
       (x.status && (x.status.missing || []).length) ? t("missing on server: {list}", { list: x.status.missing.join(", ") }) : ""].filter(Boolean).join(" · ");
   }
   if (tab === "http") return `${s.method || "POST"} ${s.url} · ${s.risk} · http.${x.name}`;
+  if (tab === "web") return `${s.provider || "?"}${s.endpoint ? " · " + s.endpoint : ""} · web.${x.name} · ${s.max_results || 5} ${t("results")}`;
   return (s.mode === "manual" ? `/${x.name} · ` : t("always on") + " · ") + (s.description || "");
 }
 
@@ -1187,6 +1191,46 @@ function editSkill(x) {
     },
   };
   renderCustomize();
+}
+// --- web search backend ---
+function editWeb(x) {
+  const s = (x && x.spec) || {};
+  const f = { name: x ? x.name : "search", provider: s.provider || "brave", endpoint: s.endpoint || "",
+    key: "", keySaved: !!x, maxResults: s.max_results || 5, enabled: x ? x.enabled : true };
+  cz.edit = {
+    render() {
+      const fields = h("div", {},
+        h("div", { class: "grid2" },
+          h("label", {}, t("Name"), h("input", { value: f.name, disabled: !!x, placeholder: "search", spellcheck: "false", oninput: (e) => (f.name = e.target.value) })),
+          h("label", {}, t("Provider"), h("select", { onchange: (e) => (f.provider = e.target.value) },
+            ["brave", "tavily", "bing", "generic"].map((p) => h("option", { value: p, selected: f.provider === p }, p))))),
+        h("label", {}, t("Endpoint (optional; required for generic)"),
+          h("input", { value: f.endpoint, placeholder: f.provider === "generic" ? "https://search.internal/api" : t("provider default"),
+            spellcheck: "false", oninput: (e) => (f.endpoint = e.target.value) })),
+        h("div", { class: "grid2" },
+          h("label", {}, t("API key"), h("input", { value: f.key, type: "password", autocomplete: "off",
+            placeholder: f.keySaved ? t("saved · leave blank to keep") : "", oninput: (e) => (f.key = e.target.value) })),
+          h("label", {}, t("Max results"), h("input", { value: f.maxResults, type: "number", min: "1", max: "10",
+            oninput: (e) => (f.maxResults = e.target.value) }))),
+        h("p", { class: "muted small" }, t("web.fetch works without configuration. A search backend adds web.{name} for current facts.", { name: f.name || "search" })),
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: f.enabled, onchange: (e) => (f.enabled = e.target.checked) }), " " + t("Enabled")));
+      return editorShell(x ? t("Web search · {name}", { name: x.name }) : t("Add search backend"), fields, [
+        x ? h("button", { class: "btn danger", onclick: () => deleteExt("web-tools", x.name) }, t("Delete")) : null,
+        h("span", { class: "spacer" }),
+        h("button", { class: "btn ghost", onclick: () => { cz.edit = null; renderCustomize(); } }, t("Cancel")),
+        h("button", { class: "btn primary", onclick: () => saveWeb(f, x) }, t("Save"))]);
+    },
+  };
+  renderCustomize();
+}
+function saveWeb(f, x) {
+  const name = f.name.trim();
+  if (!name) return toast(t("Give the search backend a name first."), true);
+  if (f.provider === "generic" && !f.endpoint.trim()) return toast(t("The generic provider needs an endpoint."), true);
+  const spec = { provider: f.provider, max_results: Number(f.maxResults) || 5 };
+  if (f.endpoint.trim()) spec.endpoint = f.endpoint.trim();
+  if (f.key.trim()) spec.api_key = f.key.trim();
+  saveExt("web-tools", name, spec, f.enabled, x && x.version);
 }
 const sizeText = (s) => t("{n} / 16,384 bytes", { n: new TextEncoder().encode(s || "").length.toLocaleString(locale()) });
 
