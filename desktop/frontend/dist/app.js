@@ -499,21 +499,35 @@ function renderRun(v) {
   const approvals = (v.approvals && v.approvals.approvals) || [];
   const tools = steps.filter((s) => s.kind === "tool").length;
 
+  const result = v.run.result;
+  let intent = (result && result.intent) || "";
+  if (!intent) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const o = steps[i].output;
+      if (steps[i].kind === "reason" && o && o.intent) { intent = o.intent; break; }
+    }
+  }
+  const conversational = intent === "question" || intent === "clarification";
+
   const choice = state.traceOpen.get(run.id);
   const open = choice !== undefined ? choice : !done || status === "FAILED";
   const label = done
     ? t("Worked for {d}", { d: dur(run.created_at, run.updated_at) }) + (tools ? " · " + tn(tools, "{n} tool call", "{n} tool calls") : "")
     : t(status === "WAITING_APPROVAL" ? "Waiting for your approval" : status === "PAUSED" ? "Paused" : "Working…");
-  const parts = [h("button", { class: "trace-toggle", onclick: () => { state.traceOpen.set(run.id, !open); render(); } },
-    h("span", { class: "caret" + (open ? " open" : "") }, "▶"),
-    h("span", { class: !done && status !== "WAITING_APPROVAL" && status !== "PAUSED" ? "shimmer" : "" }, label))];
-  if (open && steps.length) parts.push(h("div", { class: "trace" }, steps.map((s) => renderStep(run, s, approvals))));
+  const parts = [];
+  if (!conversational) {
+    parts.push(h("button", { class: "trace-toggle", onclick: () => { state.traceOpen.set(run.id, !open); render(); } },
+      h("span", { class: "caret" + (open ? " open" : "") }, "▶"),
+      h("span", { class: !done && status !== "WAITING_APPROVAL" && status !== "PAUSED" ? "shimmer" : "" }, label)));
+    if (open && steps.length) parts.push(h("div", { class: "trace" }, steps.map((s) => renderStep(run, s, approvals))));
+  } else if (!done) {
+    parts.push(h("div", { class: "trace-toggle" }, h("span", { class: "shimmer" }, label)));
+  }
 
-  const result = v.run.result;
   if (status === "COMPLETED" && result) {
     if (result.answer) parts.push(h("div", { class: "answer" }, md(result.answer)));
     const hyps = result.hypotheses || [];
-    if (hyps.length) parts.push(h("div", { class: "hyps" }, hyps.map((x) => h("div", { class: "hyp" },
+    if (!conversational && hyps.length) parts.push(h("div", { class: "hyps" }, hyps.map((x) => h("div", { class: "hyp" },
       badge(x.status), h("span", {}, x.statement), h("span", { class: "conf" }, Math.round((x.confidence_estimate || 0) * 100) + "%")))));
   } else if (status === "FAILED") {
     parts.push(h("div", { class: "status-line" }, run.failure_reason ? t("Failed: {reason}", { reason: run.failure_reason }) : t("Failed")));
