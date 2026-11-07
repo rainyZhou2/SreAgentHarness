@@ -14,8 +14,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"go-sre-harness/internal/cognitive"
+	"go-sre-harness/internal/memory"
 )
 
 // Spec is the operator-owned, versioned behavior of an agent. Fields marked
@@ -31,6 +33,9 @@ type Spec struct {
 	MemoryTopK          int    `json:"memory_top_k,omitempty"`
 	CompactEvery        int    `json:"compact_every,omitempty"`
 	CapabilityMap       bool   `json:"capability_map,omitempty"`
+	// Reasoning is learned guidance and pattern selection, evolvable by
+	// gated candidates (see ReasoningSpec).
+	Reasoning *ReasoningSpec `json:"reasoning,omitempty"`
 	// Flow is the optional orchestration DSL. It is frozen with the profile
 	// version and only valid together with strategy "flow".
 	Flow json.RawMessage `json:"flow,omitempty"`
@@ -117,6 +122,9 @@ func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 	case "", "low", "medium", "high", "xhigh", "max":
 	default:
 		return base, nil, fmt.Errorf("invalid effort %q", out.Effort)
+	}
+	if err := out.Reasoning.Validate(); err != nil {
+		return base, nil, err
 	}
 	if out.MemoryTopK < 0 || out.MemoryTopK > 20 || out.CompactEvery < 0 || out.CompactEvery > 50 ||
 		out.MaxOutputTokens < 0 || out.MaxOutputTokens > 128_000 {
@@ -219,4 +227,50 @@ func (r *Resolver) StrategyFor(ctx context.Context, tenantID, profileID string, 
 	r.cache[key] = s
 	r.mu.Unlock()
 	return s, nil
+}
+
+// ReasoningSpec is the evolvable reasoning layer of a profile. It is the
+// only surface the self-improvement loop proposes changes to.
+type ReasoningSpec struct {
+	// Playbook is guidance rendered before the trust rules.
+	Playbook string `json:"playbook,omitempty"`
+	// PatternsExcluded hides memories (reasoning patterns) from retrieval.
+	PatternsExcluded []string `json:"patterns_excluded,omitempty"`
+}
+
+// Limits of the reasoning layer.
+const (
+	MaxPlaybookRunes    = 2000
+	MaxExcludedPatterns = 500
+)
+
+// Validate bounds the reasoning layer and rejects instruction-like text
+// that tries to weaken approvals or trust rules.
+func (r *ReasoningSpec) Validate() error {
+	if r == nil {
+		return nil
+	}
+	if n := utf8.RuneCountInString(r.Playbook); n > MaxPlaybookRunes {
+		return fmt.Errorf("reasoning.playbook is %d characters (max %d)", n, MaxPlaybookRunes)
+	}
+	if hits := memory.PoisonMatches(r.Playbook, 1); len(hits) > 0 {
+		return fmt.Errorf("reasoning.playbook contains instruction-like text %q", hits[0])
+	}
+	if len(r.PatternsExcluded) > MaxExcludedPatterns {
+		return fmt.Errorf("reasoning.patterns_excluded has %d entries (max %d)", len(r.PatternsExcluded), MaxExcludedPatterns)
+	}
+	for _, id := range r.PatternsExcluded {
+		if id == "" || len(id) > 64 {
+			return fmt.Errorf("reasoning.patterns_excluded: invalid id %q", id)
+		}
+	}
+	return nil
+}
+
+// Playbook returns the profile's learned playbook ("" when unset).
+func (s Spec) Playbook() string {
+	if s.Reasoning == nil {
+		return ""
+	}
+	return s.Reasoning.Playbook
 }

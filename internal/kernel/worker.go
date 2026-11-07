@@ -446,7 +446,8 @@ func (w *Worker) execute(ctx context.Context, lease domain.Lease, st *execState)
 		if err != nil {
 			return domain.StepSuccess{}, err
 		}
-		return w.cfg.Memory.Retrieve(domain.WithMemoryTopK(ctx, rules.MemoryTopK), lease, g.Goal)
+		mctx := domain.WithMemoryExclude(domain.WithMemoryTopK(ctx, rules.MemoryTopK), rules.MemoryExclude)
+		return w.cfg.Memory.Retrieve(mctx, lease, g.Goal)
 	}
 	return domain.StepSuccess{}, fmt.Errorf("unknown step kind %q", lease.Kind)
 }

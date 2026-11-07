@@ -19,3 +19,24 @@ func MemoryTopK(ctx context.Context, def int) int {
 	}
 	return def
 }
+
+type memoryExcludeKey struct{}
+
+// WithMemoryExclude passes memory ids the run profile hides from retrieval
+// (reasoning.patterns_excluded).
+func WithMemoryExclude(ctx context.Context, ids []string) context.Context {
+	if len(ids) == 0 {
+		return ctx
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return context.WithValue(ctx, memoryExcludeKey{}, set)
+}
+
+// MemoryExcluded reports whether the run profile hides a memory.
+func MemoryExcluded(ctx context.Context, id string) bool {
+	set, _ := ctx.Value(memoryExcludeKey{}).(map[string]bool)
+	return set[id]
+}

@@ -87,10 +87,16 @@ plugins:
     - {name: rollout_monitor, config: {interval: 1m}}
     - {name: event_relay, config: {interval: 250ms, batch: 1000, lease_ttl: 15s, start_from: latest}}
     - {name: retention, config: {interval: 5m, outbox_retention: 24h, audit_retention: 2160h}}
+    # Proposes reasoning-layer profile candidates (playbook, excluded patterns)
+    # from measured reasoning quality. Never approves, canaries or promotes.
+    - name: reasoning_improver
+      enabled: false
+      config: {interval: 6h, tenants: [default], profile_id: sre-diagnosis, dataset_id: "", window: 168h,
+               min_runs: 20, min_uses: 5, retire_below: 0.3}
   authenticator:
     - {name: oidc, config: {issuer: "https://idp.example.com", audience: sre-harness}}
     - {name: token, config: {tokens_file: /etc/harness/tokens.json}}
-  api: [memory, eval, extensions]
+  api: [memory, eval, extensions, reasoning]
 
   # Agent profile versions (immutable per version; bump the version to change one).
   profile_source:

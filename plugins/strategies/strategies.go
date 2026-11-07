@@ -53,6 +53,7 @@ func init() {
 					PromptPrefixVersion: first(spec.PromptPrefixVersion, cfg.PromptPrefixVersion),
 					MaxOutputTokens:     firstInt(spec.MaxOutputTokens, cfg.MaxOutputTokens),
 					MaxContextTokens:    firstInt(spec.MaxContextTokens, cfg.MaxContextTokens),
+					Playbook:            spec.Playbook(),
 				})
 				if err != nil {
 					return nil, err

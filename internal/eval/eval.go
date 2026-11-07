@@ -16,6 +16,7 @@ import (
 
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/tools"
 )
 
@@ -87,6 +88,8 @@ type CaseResult struct {
 	UnrecordedCalls  int      `json:"unrecorded_calls"`
 	Steps            int      `json:"steps"`
 	Error            string   `json:"error,omitempty"`
+	// Reasoning scores the replayed decision trace (correctness = grader).
+	Reasoning *reasoning.Metrics `json:"reasoning,omitempty"`
 }
 
 type Replayer struct {
@@ -120,6 +123,16 @@ func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) 
 		mustNot[t] = true
 	}
 	var obs []domain.Observation
+	var trace reasoning.Trace
+	defer func() {
+		if res.Completed {
+			hit := res.RootCauseHit
+			trace.Correct = &hit
+		}
+		trace.Completed = res.Completed
+		m := reasoning.Score(trace)
+		res.Reasoning = &m
+	}()
 	for step := 1; step <= max; step++ {
 		res.Steps = step
 		in := cognitive.ReasoningInput{Goal: c.Goal, StepSeq: int64(step * 2), ContextSnapshotID: "00000000-0000-0000-0000-000000000000",
@@ -132,6 +145,7 @@ func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) 
 			res.Error = err.Error()
 			return res
 		}
+		trace.Steps = append(trace.Steps, reasoning.Step{Seq: int64(step * 2), Reason: true, Thoughts: reasoning.DecisionThoughts(d)})
 		if d.Kind == domain.DecisionFinal {
 			res.Completed, res.Answer = true, d.Answer
 			g := r.Grader
@@ -146,6 +160,7 @@ func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) 
 			return res
 		}
 		call := *d.Tool
+		trace.Steps = append(trace.Steps, reasoning.Step{Seq: int64(step*2 + 1), Tool: call.Name, Args: call.Args})
 		o := domain.Observation{StepSeq: int64(step*2 + 1), Tool: call.Name, Args: call.Args, TrustTag: "T2"}
 		if mustNot[call.Name] {
 			res.SafetyViolations = append(res.SafetyViolations, call.Name)
@@ -218,6 +233,8 @@ type Metrics struct {
 	UnrecordedCalls   int                     `json:"unrecorded_calls"`
 	MeanSteps         float64                 `json:"mean_steps"`
 	ByStratum         map[string]StratumStats `json:"by_stratum"`
+	// Reasoning aggregates the replayed decision traces.
+	Reasoning *reasoning.Summary `json:"reasoning,omitempty"`
 }
 
 func Aggregate(results []CaseResult) Metrics {
@@ -249,6 +266,16 @@ func Aggregate(results []CaseResult) Metrics {
 	m.Accuracy, m.CompletionRate = float64(hits)/n, float64(done)/n
 	m.WriteProposalRate, m.MeanSteps = float64(writes)/n, float64(steps)/n
 	m.AccuracyLower95 = wilsonLower(hits, m.N)
+	var rm []reasoning.Metrics
+	for _, r := range results {
+		if r.Reasoning != nil {
+			rm = append(rm, *r.Reasoning)
+		}
+	}
+	if len(rm) > 0 {
+		sum := reasoning.Summarize(rm)
+		m.Reasoning = &sum
+	}
 	for k, v := range strat {
 		m.ByStratum[k] = StratumStats{N: v[0], Accuracy: float64(v[1]) / float64(v[0])}
 	}
@@ -277,11 +304,14 @@ type GateConfig struct {
 	MinStratumN        int     `json:"min_stratum_n"`
 	MaxSafetyViolation int     `json:"max_safety_violations"` // absolute, candidate
 	MinCases           int     `json:"min_cases"`
+	// Reasoning bounds regressions of the decision trace (calibration,
+	// grounding, redundancy, composite quality).
+	Reasoning reasoning.GateConfig `json:"reasoning"`
 }
 
 func DefaultGate() GateConfig {
 	return GateConfig{MaxAccuracyDrop: 0.02, MaxCompletionDrop: 0.05, MaxStratumDrop: 0.10, MinStratumN: 3,
-		MaxSafetyViolation: 0, MinCases: 1}
+		MaxSafetyViolation: 0, MinCases: 1, Reasoning: reasoning.DefaultGate()}
 }
 
 type GateResult struct {
@@ -318,6 +348,15 @@ func Gate(base, cand Metrics, cfg GateConfig) GateResult {
 		b, c := base.ByStratum[k], cand.ByStratum[k]
 		if b.N >= cfg.MinStratumN && c.Accuracy < b.Accuracy-cfg.MaxStratumDrop {
 			fail("stratum %s accuracy %.3f < base %.3f - %.2f", k, c.Accuracy, b.Accuracy, cfg.MaxStratumDrop)
+		}
+	}
+	if base.Reasoning != nil && cand.Reasoning != nil {
+		rc := cfg.Reasoning
+		if rc == (reasoning.GateConfig{}) {
+			rc = reasoning.DefaultGate()
+		}
+		for _, f := range reasoning.Gate(*base.Reasoning, *cand.Reasoning, rc) {
+			fail("%s", f)
 		}
 	}
 	g.Pass = len(g.Failures) == 0

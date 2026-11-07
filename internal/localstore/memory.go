@@ -389,6 +389,9 @@ func (s *Store) PutFeedback(ctx context.Context, tenantID, runID string, f memor
 	}
 	s.feedback[runID] = list
 	s.put("feedback", runID+"/"+f.ActorID, tenantID, 0, f)
+	// Re-run consolidation so experience quality and reasoning scores pick
+	// up the verdict, as the server does.
+	s.requeueConsolidationLocked(tenantID, runID)
 	if f.RootCauseCorrect != nil {
 		moves := [][2]string{{"CANDIDATE", "VALIDATING"}}
 		if !*f.RootCauseCorrect {

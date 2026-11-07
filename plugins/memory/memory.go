@@ -10,6 +10,7 @@ import (
 	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/plugin"
+	"go-sre-harness/internal/reasoning"
 )
 
 type HashingConfig struct {
@@ -22,7 +23,18 @@ type RetrieverConfig struct {
 
 type JobConfig struct {
 	Interval plugin.Duration `json:"interval,omitempty"`
+	// Reasoning scores every finished run and distills reasoning patterns
+	// (default on).
+	Reasoning *ReasoningConfig `json:"reasoning,omitempty"`
 }
+
+type ReasoningConfig struct {
+	Enabled *bool `json:"enabled,omitempty"`
+	// Distill stores reasoning patterns as candidate memories (default on).
+	Distill *bool `json:"distill,omitempty"`
+}
+
+func on(b *bool) bool { return b == nil || *b }
 
 func init() {
 	plugin.Register(plugin.Embedder, "hashing", "dependency-free uni/bigram hashing embedder",
@@ -51,11 +63,17 @@ func init() {
 				return nil, err
 			}
 			reg := h.Tools
-			return &memory.Consolidator{Store: h.Store, Artifacts: h.Artifacts,
-				Writer: memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts},
+			writer := memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts}
+			cons := &memory.Consolidator{Store: h.Store, Artifacts: h.Artifacts, Writer: writer,
 				SideEffecting: func(name string) bool {
 					t, ok := reg.Lookup(name)
 					return !ok || t.Descriptor().Risk.HasSideEffects()
-				}, Interval: cfg.Interval.D(), Log: h.Log}, nil
+				}, Interval: cfg.Interval.D(), Log: h.Log}
+			if rc := cfg.Reasoning; rc == nil || on(rc.Enabled) {
+				rec := reasoning.NewRecorder(h.Store, h.Artifacts, writer, h.Log.With("hook", "reasoning"))
+				rec.Distill = rc == nil || on(rc.Distill)
+				cons.Hooks = append(cons.Hooks, rec)
+			}
+			return cons, nil
 		})
 }

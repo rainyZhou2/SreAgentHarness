@@ -36,6 +36,8 @@ import (
 	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/reasoning"
+	"go-sre-harness/internal/reasoning/improve"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/trigger"
@@ -136,6 +138,16 @@ func Run(ctx context.Context, cfg Config) error {
 		ProfileRef: "sre-diagnosis@7", MaxContextTokens: 120_000,
 		MaxObservationBytes: 16_000, MaxOutputTokens: 8_000}
 	strategy := &cognitive.LLM{Gateway: modelGW, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}
+	// Per-profile strategies carry the profile's evolvable reasoning layer
+	// (learned playbook) into the prompt; versions are immutable, so each is
+	// built once.
+	llmFor := func(g *gateway.Gateway) profile.Factory {
+		return func(spec profile.Spec) (cognitive.Strategy, error) {
+			return &cognitive.LLM{Gateway: g, Artifacts: arts, Alias: "sre-reasoning",
+				Assembler: assembler.Apply(cognitive.AssemblerOptions{Playbook: spec.Playbook()})}, nil
+		}
+	}
+	strategies := &profile.Resolver{Loader: store, Factory: llmFor(modelGW)}
 	embedder := memory.HashingEmbedder{Dims: 256}
 	graphSvc := &graph.Service{Store: store, Tools: reg, Extensions: extRT, Log: cfg.Log.With("component", "graph")}
 	retriever := &memory.Retriever{Store: store, Embedder: embedder, Artifacts: arts, TopK: 5}
@@ -144,11 +156,10 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	evalSvc := &eval.Service{Store: store, Artifacts: arts, Registry: reg, Log: cfg.Log.With("component", "eval"),
-		Factory: func(spec profile.Spec) (cognitive.Strategy, error) {
-			// Offline replay uses its own ledger: evaluation calls belong to no
-			// run and must not be charged to the tenant.
-			return &cognitive.LLM{Gateway: offlineGW, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}, nil
-		}}
+		// Offline replay uses its own ledger: evaluation calls belong to no
+		// run and must not be charged to the tenant. The candidate's
+		// reasoning layer is applied, so the gate measures the change.
+		Factory: llmFor(offlineGW)}
 	router, err := planner.NewRouter(orPatterns(local.PlannerReactPatterns, planner.ParsePatterns(os.Getenv("HARNESS_PLANNER_REACT_PATTERNS"), planner.DefaultReactPatterns)),
 		orPatterns(local.PlannerFlowPatterns, planner.ParsePatterns(os.Getenv("HARNESS_PLANNER_FLOW_PATTERNS"), planner.DefaultFlowPatterns)))
 	if err != nil {
@@ -182,7 +193,7 @@ func Run(ctx context.Context, cfg Config) error {
 		StepTimeout: 2 * time.Minute, Checkpoints: true, Rules: rules, Planner: plannerSvc,
 		Memory: retriever, CapabilityMap: graphSvc,
 		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics,
-		Context: gatherer, OutputOffloadBytes: offload},
+		Context: gatherer, OutputOffloadBytes: offload, Strategies: strategies},
 		store, arts, strategy, reg, pol, cfg.Log)
 	pool := kernel.NewPool(worker, cfg.MaxRuns)
 
@@ -208,6 +219,17 @@ func Run(ctx context.Context, cfg Config) error {
 		}})
 	server.Extend(&api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server})
 	server.Extend(&api.EvalAPI{Service: evalSvc, Store: store, Server: server})
+	// Reasoning quality, pattern library and on-demand improvement. The
+	// desktop runtime never improves on a schedule.
+	server.Extend(&api.ReasoningAPI{Store: store, Evolution: evalSvc, Server: server,
+		Defaults: improve.Config{ProfileID: "sre-diagnosis"}})
+	memWriter := memory.Writer{Embedder: embedder, Artifacts: arts}
+	consolidator := &memory.Consolidator{Store: store, Artifacts: arts, Writer: memWriter,
+		SideEffecting: func(name string) bool {
+			t, ok := reg.Lookup(name)
+			return !ok || t.Descriptor().Risk.HasSideEffects()
+		}, Interval: 5 * time.Second, Log: cfg.Log.With("component", "consolidator"),
+		Hooks: []memory.RunHook{reasoning.NewRecorder(store, arts, memWriter, cfg.Log.With("component", "reasoning"))}}
 	var triggers *trigger.Service
 	if len(local.Triggers) > 0 {
 		if triggers, err = trigger.New(local.Triggers, server, store, cfg.Log.With("component", "trigger")); err != nil {
@@ -236,6 +258,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 	go runLoop(ctx, store, pool, cfg.Log)
 	go reconcileLoop(ctx, store, graphSvc, cfg.Log)
+	go func() {
+		if err := consolidator.Run(ctx); err != nil && ctx.Err() == nil {
+			cfg.Log.Warn("consolidator", "err", err)
+		}
+	}()
 	if triggers != nil {
 		go func() {
 			if err := triggers.RunSchedules(ctx); err != nil && ctx.Err() == nil {

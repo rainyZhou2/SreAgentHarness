@@ -13,6 +13,7 @@ import (
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/reasoning/improve"
 	"go-sre-harness/internal/store/pg"
 )
 
@@ -30,6 +31,24 @@ func init() {
 				return nil, errors.New("requires the API server and the evaluation service")
 			}
 			return &api.EvalAPI{Service: h.Eval, Store: h.Store, Server: h.Server}, nil
+		})
+	plugin.Register(plugin.API, "reasoning", "/v1/reasoning (quality metrics, pattern library, on-demand improvement)",
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (api.Extension, error) {
+			if h.Server == nil {
+				return nil, errors.New("requires the API server")
+			}
+			var def improve.Config
+			if err := c.Decode(&def); err != nil {
+				return nil, err
+			}
+			if def.ProfileID == "" {
+				def.ProfileID = h.Server.DefaultProfile
+			}
+			a := &api.ReasoningAPI{Store: h.Store, Server: h.Server, Defaults: def}
+			if h.Eval != nil {
+				a.Evolution = h.Eval
+			}
+			return a, nil
 		})
 	plugin.Register(plugin.API, "extensions", "/v1/extensions (tenant MCP servers, HTTP tools, skills) and /v1/tools",
 		func(_ context.Context, h *plugin.Host, _ plugin.Config) (api.Extension, error) {

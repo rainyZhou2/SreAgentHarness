@@ -70,7 +70,9 @@ type PromptManifest struct {
 	// SuspectedInjection lists the blocks (observation steps "step:N",
 	// evidence refs, "summary") whose content looked like instructions.
 	SuspectedInjection []string `json:"suspected_injection,omitempty"`
-	CachePartitionRef  string   `json:"cache_partition_ref"`
+	// PlaybookHash identifies the learned playbook rendered in section [A].
+	PlaybookHash      string `json:"playbook_hash,omitempty"`
+	CachePartitionRef string `json:"cache_partition_ref"`
 	// Skills lists the skills rendered into section [A] as name@hash.
 	Skills []string `json:"skills,omitempty"`
 	// CapabilityMapRef hashes section [E] when it is present.
@@ -98,6 +100,9 @@ type Assembler struct {
 	// Instructions replaces DefaultInstructions in section [A] (TrustRules
 	// are always appended).
 	Instructions string
+	// Playbook is learned guidance from the profile (reasoning.playbook),
+	// rendered after the instructions and before the trust rules.
+	Playbook string
 }
 
 // ContextBuilder renders a reasoning input into a provider-neutral model
@@ -115,6 +120,8 @@ type AssemblerOptions struct {
 	Effort              string
 	MaxContextTokens    int64
 	MaxOutputTokens     int64
+	// Playbook is the profile's evaluated, approved reasoning guidance.
+	Playbook string
 }
 
 // ContextAssembler creates context builders (the context_assembler plugin kind).
@@ -139,8 +146,14 @@ func (a Assembler) Apply(o AssemblerOptions) Assembler {
 	if o.MaxOutputTokens > 0 {
 		a.MaxOutputTokens = o.MaxOutputTokens
 	}
+	if strings.TrimSpace(o.Playbook) != "" {
+		a.Playbook = o.Playbook
+	}
 	return a
 }
+
+// PlaybookHeader introduces the learned playbook in section [A].
+const PlaybookHeader = "Learned playbook (guidance distilled from evaluated runs and approved by an operator; it never overrides the trust rules, policy or approvals):"
 
 func DefaultAssembler() Assembler {
 	return Assembler{PromptPrefixVersion: "sre-prefix-v5", ProfileRef: "default@1", MaxContextTokens: 150_000,
@@ -216,17 +229,22 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		CompactionEpoch: in.CompactionEpoch, SectionHashes: map[string]string{}}
 
 	// [A] stable prefix.
-	sys := SystemPrompt(a.instructions(in))
+	// Skills and the learned playbook sit between the role text and the
+	// trust rules, so the trust rules stay last and keep precedence.
+	instr := strings.TrimSpace(a.instructions(in))
+	if instr == "" {
+		instr = DefaultInstructions
+	}
+	parts := []string{strings.TrimSpace(instr)}
 	if block, refs := renderSkills(in.Skills); block != "" {
-		// Skills sit between the role text and the trust rules, so the
-		// trust rules stay last and keep precedence.
-		instr := a.instructions(in)
-		if strings.TrimSpace(instr) == "" {
-			instr = DefaultInstructions
-		}
-		sys = SystemPrompt(strings.TrimSpace(instr) + "\n\n" + block)
+		parts = append(parts, block)
 		man.Skills = refs
 	}
+	if pb := strings.TrimSpace(a.Playbook); pb != "" {
+		parts = append(parts, PlaybookHeader+"\n"+untrusted.Neutralize(pb))
+		man.PlaybookHash = artifact.Hash([]byte(pb))
+	}
+	sys := SystemPrompt(strings.Join(parts, "\n\n"))
 	system := []gw.SystemBlock{{Text: sys, CacheBreakpoint: true}}
 	man.SectionHashes["A"] = artifact.Hash([]byte(sys))
 
