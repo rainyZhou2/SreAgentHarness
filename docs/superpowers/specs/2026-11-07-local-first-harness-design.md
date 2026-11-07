@@ -4,7 +4,7 @@
 **Date:** 2026-11-07  
 **Scope:** downloadable desktop client that runs the harness locally without Docker, PostgreSQL, NATS or a CLI.
 
-> **Update:** Phase 1 used an embedded PostgreSQL child process as a bridge. Phase 2 replaced it with `internal/localstore` (SQLite, pure Go) and `cmd/harness-local`; local mode no longer starts or bundles PostgreSQL. The embedded-PostgreSQL sections below describe the historical Phase 1 design; the runtime contract (same `/v1` client, local token, data directory, remote team mode) is unchanged.
+> **Update:** Phase 1 used an embedded PostgreSQL child process as a bridge. Phase 2 replaced it with `internal/localstore` (SQLite, pure Go) and `cmd/harness-local`; local mode no longer starts or bundles PostgreSQL. Execution events are append-only JSONL (`events/local/<run>.jsonl`), while SQLite stores state and byte-range event indexes; `RebuildEventIndex` can rebuild the index from JSONL. The embedded-PostgreSQL sections below describe the historical Phase 1 design; the runtime contract (same `/v1` client, local token, data directory, remote team mode) is unchanged.
 
 ## Problem
 
