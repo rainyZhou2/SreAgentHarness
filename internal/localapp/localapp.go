@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/extensions"
 	"go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/gateway/anthropic"
 	"go-sre-harness/internal/gateway/gemini"
@@ -72,7 +74,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	arts := &artifact.FS{Root: cfg.DataDir + "/artifacts"}
-	gateway, err := buildGateway(arts, cfg.Log)
+	modelGW, err := buildGateway(arts, store, cfg.Log)
 	if err != nil {
 		return err
 	}
@@ -81,11 +83,25 @@ func Run(ctx context.Context, cfg Config) error {
 	rules := &profile.RulesFor{Loader: store}
 	metrics := obs.NewMetrics()
 
+	networks := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	if raw := os.Getenv("HARNESS_EXTENSIONS_ALLOW_NETWORKS"); raw != "" {
+		extra, err := extensions.ParseNetworks(raw)
+		if err != nil {
+			return fmt.Errorf("HARNESS_EXTENSIONS_ALLOW_NETWORKS: %w", err)
+		}
+		networks = append(networks, extra...)
+	}
+	extRT := &extensions.Runtime{Store: store, Log: cfg.Log.With("component", "extensions"),
+		Options: extensions.Options{AllowStdio: strings.EqualFold(os.Getenv("HARNESS_MCP_ALLOW_STDIO"), "true"),
+			Network: extensions.NetPolicy{Allow: networks}},
+		Interval: 5 * time.Second, Models: modelGW}
+	reg.SetTenantSource(extRT)
+
 	assembler := cognitive.Assembler{PromptPrefixVersion: "sre-prefix-v6",
 		ProfileRef: "sre-diagnosis@7", MaxContextTokens: 120_000,
 		MaxObservationBytes: 16_000, MaxOutputTokens: 8_000}
-	strategy := &cognitive.LLM{Gateway: gateway, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}
-	plannerSvc := &planner.Service{Gateway: gateway, Artifacts: arts, Profiles: store,
+	strategy := &cognitive.LLM{Gateway: modelGW, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}
+	plannerSvc := &planner.Service{Gateway: modelGW, Artifacts: arts, Profiles: store,
 		Log: cfg.Log.With("component", "planner"), Observer: metrics,
 		Config: planner.Config{ModelAlias: "sre-reasoning", MaxRepairs: 2, MaxNodes: 20,
 			MaxOutputTokens: 8000, MaxChildren: 8, MaxTotalRuns: 24, MaxDepth: 3, MaxIterations: 8,
@@ -94,7 +110,8 @@ func Run(ctx context.Context, cfg Config) error {
 
 	worker := kernel.NewWorker(kernel.Config{ID: "local-worker", LeaseTTL: 30 * time.Second,
 		StepTimeout: 2 * time.Minute, Checkpoints: false, Rules: rules, Planner: plannerSvc,
-		PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics}, store, arts, strategy, reg, pol, cfg.Log)
+		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics},
+		store, arts, strategy, reg, pol, cfg.Log)
 	pool := kernel.NewPool(worker, cfg.MaxRuns)
 
 	tokens, err := auth.LoadStaticTokens(cfg.TokenFile)
@@ -106,6 +123,24 @@ func Run(ctx context.Context, cfg Config) error {
 		StreamMode: api.StreamPoll, Log: cfg.Log, Rules: rules.Rules, Tools: reg, Policy: pol, Metrics: metrics,
 		Auth:         &auth.Chain{Authenticators: []auth.Authenticator{tokens}},
 		BranchPolicy: domain.BranchQueue, MaxPendingTurn: 8}
+
+	server.Extend(&extensions.API{Runtime: extRT, Registry: reg, Toggles: store,
+		DefaultRules: func(ctx context.Context, tenantID string) (profile.Rules, string, error) {
+			r, err := rules.Rules(ctx, tenantID, "sre-diagnosis", 10)
+			return r, "sre-diagnosis@10", err
+		},
+		ResolveModel: func(tenantID string) (string, string, error) {
+			ep, err := modelGW.Resolve(gateway.Request{ModelAlias: "sre-reasoning"}, gateway.Scope{TenantID: tenantID})
+			return ep.ID, ep.ModelID, err
+		}})
+	if err := extRT.Sync(ctx); err != nil {
+		cfg.Log.Warn("initial extensions sync", "err", err)
+	}
+	go func() {
+		if err := extRT.Run(ctx); err != nil && ctx.Err() == nil {
+			cfg.Log.Warn("extensions loop", "err", err)
+		}
+	}()
 
 	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -169,7 +204,7 @@ func seedProfiles(ctx context.Context, store *localstore.Store) error {
 	return nil
 }
 
-func buildGateway(arts *artifact.FS, log *slog.Logger) (*gateway.Gateway, error) {
+func buildGateway(arts *artifact.FS, ledger gateway.Ledger, log *slog.Logger) (*gateway.Gateway, error) {
 	var providers []gateway.Provider
 	anthropicEnabled, openaiEnabled := false, false
 	openaiModel := ""
@@ -192,7 +227,7 @@ func buildGateway(arts *artifact.FS, log *slog.Logger) (*gateway.Gateway, error)
 	}
 	providers = append(providers, cognitive.ScriptedModel(cognitive.RuleBased{}))
 	pol := gateway.DefaultPolicy(anthropicEnabled, openaiEnabled, openaiModel)
-	return gateway.New(pol, gateway.NewMemLedger(), arts, gateway.Admission{}, log, providers...), nil
+	return gateway.New(pol, ledger, arts, gateway.Admission{}, log, providers...), nil
 }
 
 func FirstNonEmpty(v ...string) string {

@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/extensions"
 	"go-sre-harness/internal/store/pg"
 )
 
@@ -60,6 +61,10 @@ type Store struct {
 	cmdKey       map[string]string
 	thoughts     map[string][]domain.Thought
 	caps         map[string][]domain.CapabilityRef
+	extensions   map[string]extensions.Record
+	toolOff      map[string]map[string]bool
+	outputRevs   map[string][]pg.OutputRevision
+	modelReqs    map[string]modelReqRec
 }
 
 type attempt struct {
@@ -189,7 +194,9 @@ func Open(path string) (*Store, error) {
 		decisions: map[string][]decisionRec{}, grants: map[string]grantRec{}, kv: map[string]kvRec{},
 		effects: map[string]effectRec{}, outbox: map[string]domain.OutboxMessage{}, commands: map[string]domain.Command{},
 		cmdKey: map[string]string{}, thoughts: map[string][]domain.Thought{},
-		caps: map[string][]domain.CapabilityRef{},
+		caps: map[string][]domain.CapabilityRef{}, extensions: map[string]extensions.Record{},
+		toolOff: map[string]map[string]bool{}, outputRevs: map[string][]pg.OutputRevision{},
+		modelReqs: map[string]modelReqRec{},
 	}
 	if err := s.load(); err != nil {
 		db.Close()
@@ -345,6 +352,71 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 			return err
 		}
 		s.commands[v.ID] = v
+	case "thought":
+		var v struct {
+			StepID  string         `json:"step_id"`
+			Thought domain.Thought `json:"thought"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.thoughts[v.StepID] = append(s.thoughts[v.StepID], v.Thought)
+	case "capability":
+		var v struct {
+			StepID string               `json:"step_id"`
+			Ref    domain.CapabilityRef `json:"ref"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.caps[v.StepID] = append(s.caps[v.StepID], v.Ref)
+	case "outputrev":
+		var v struct {
+			StepID string            `json:"step_id"`
+			Rev    pg.OutputRevision `json:"revision"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.outputRevs[v.StepID] = append(s.outputRevs[v.StepID], v.Rev)
+	case "extension":
+		var wrapper struct {
+			TenantID string            `json:"tenant_id"`
+			Record   extensions.Record `json:"record"`
+		}
+		if err := json.Unmarshal(data, &wrapper); err != nil {
+			return err
+		}
+		v := wrapper.Record
+		v.TenantID = wrapper.TenantID
+		if v.Kind == "" {
+			_ = json.Unmarshal(data, &v)
+		}
+		if v.TenantID == "" {
+			if i := strings.IndexByte(id, '/'); i > 0 {
+				v.TenantID = id[:i]
+			}
+		}
+		s.extensions[extensionKey(v.TenantID, v.Kind, v.Name)] = v
+	case "tooltoggle":
+		var v struct {
+			TenantID string `json:"tenant_id"`
+			Name     string `json:"name"`
+			Enabled  bool   `json:"enabled"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		if s.toolOff[v.TenantID] == nil {
+			s.toolOff[v.TenantID] = map[string]bool{}
+		}
+		s.toolOff[v.TenantID][v.Name] = !v.Enabled
+	case "modelreq":
+		var v modelReqRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.modelReqs[v.ID] = v
 	}
 	return nil
 }

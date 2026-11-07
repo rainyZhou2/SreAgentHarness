@@ -272,6 +272,18 @@ func (s *Store) applyCommandLocked(c *domain.Command, req domain.CommandRequest)
 		return s.decideApprovalLocked(c, req)
 	case domain.CmdProvideInput:
 		return s.provideInputLocked(c, req)
+	case domain.CmdResolveUnknown:
+		return s.resolveUnknownLocked(c, req)
+	case domain.CmdRetry:
+		return s.retryStepLocked(c, req)
+	case domain.CmdOverrideResult:
+		return s.overrideResultLocked(c, req)
+	case domain.CmdReplacePendingInput:
+		return s.replaceInputLocked(c, req)
+	case domain.CmdInjectEvidence:
+		return s.injectEvidenceLocked(c, req)
+	case domain.CmdMigrateProfile:
+		return s.migrateProfileLocked(c, req)
 	default:
 		return "unsupported_command", nil
 	}
@@ -501,15 +513,6 @@ func (s *Store) MarkPublishFailed(ctx context.Context, id string, backoff time.D
 	return nil
 }
 
-func (s *Store) ListModelRequests(ctx context.Context, tenantID, runID string) ([]pg.ModelRequestView, error) {
-	return nil, nil
-}
-func (s *Store) RunCost(ctx context.Context, tenantID, runID string) (pg.CostSummary, error) {
-	return pg.CostSummary{ByModel: map[string]int64{}}, nil
-}
-func (s *Store) TenantCost(ctx context.Context, tenantID string, since time.Time) (pg.CostSummary, error) {
-	return pg.CostSummary{ByModel: map[string]int64{}}, nil
-}
 func (s *Store) ListStreamSegments(ctx context.Context, tenantID, runID string) ([]pg.SegmentView, error) {
 	return nil, nil
 }
