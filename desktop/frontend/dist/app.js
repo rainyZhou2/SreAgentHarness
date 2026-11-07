@@ -729,8 +729,10 @@ function renderStep(run, s, approvals) {
         h("div", { class: "streaming", id: "delta-" + s.id }, delta || ""));
     }
     const summary = out.reason_summary || s.status_reason || "";
-    return h("div", { class: "item" }, h("div", { class: "item-row" }, h("span", { class: "ico" }, icon("spark")),
-      h("span", { class: "thought" }, summary || t(out.kind === "final" ? "Concluded" : "Reasoned"))));
+    return h("div", { class: "item" },
+      h("div", { class: "item-row" }, h("span", { class: "ico" }, icon("spark")),
+        h("span", { class: "thought" }, summary || t(out.kind === "final" ? "Concluded" : "Reasoned"))),
+      renderThoughts(s));
   }
   if (s.kind === "tool") {
     const inp = s.input || {};
@@ -747,7 +749,8 @@ function renderStep(run, s, approvals) {
     } else st = h("span", { class: "state bad" }, t((s.status || "").toLowerCase()).replaceAll("_", " "));
     const card = h("div", { class: "tool" + (waiting ? " wait" : "") },
       h("div", { class: "tool-head", onclick: () => { isOpen ? state.open.delete(s.id) : state.open.add(s.id); render(); } },
-        h("span", { class: "ico" }, icon("tool")), h("span", { class: "name" }, name), h("span", { class: "args" }, argsText(inp.args)), st));
+        h("span", { class: "ico" }, icon("tool")), h("span", { class: "name" }, name), capChips(s.capabilities),
+        h("span", { class: "args" }, argsText(inp.args)), st));
     if (isOpen) {
       const body = s.output ? (out.content !== undefined ? out.content : out) : s.status_reason || t("no output yet");
       card.append(h("pre", {}, typeof body === "string" ? body : JSON.stringify(body, null, 2)));
@@ -767,10 +770,62 @@ function renderStep(run, s, approvals) {
           h("button", { class: "btn danger", onclick: () => askReason(t("Reject {name}", { name }), t("Reject"),
             (reason) => command(run.id, "reject_tool", { version: true, reason, payload })) }, t("Reject")))));
     }
-    return h("div", { class: "item" }, card);
+    return h("div", { class: "item" }, card, renderThoughts(s));
   }
   return h("div", { class: "item" }, h("div", { class: "item-row" }, h("span", { class: "ico" }, icon("dot")),
     h("span", { class: "what" }, s.kind), h("span", {}, (s.status || "").toLowerCase())));
+}
+
+// ---------- composer ----------
+const THOUGHT_LABELS = { plan: "Plan", decision: "Decision", action: "Action", observation: "Observation",
+  hypothesis: "Hypothesis", evidence: "Evidence", verification: "Verification", reflection: "Reflection", conclusion: "Conclusion" };
+
+function capLabel(ref) {
+  const base = String(ref).split("@")[0];
+  if (base.startsWith("tool:")) return base.slice(5);
+  if (base.startsWith("skill:")) return "/" + base.slice(base.lastIndexOf("/") + 1);
+  if (base.startsWith("memory:")) return "memory " + base.slice(7, 15);
+  if (base.startsWith("mcp-server:")) return base.split("/").pop();
+  return base;
+}
+
+function capChips(refs, max = 4) {
+  const seen = new Set();
+  const out = [];
+  for (const item of refs || []) {
+    const ref = item && item.ref ? item.ref : item;
+    if (!ref || seen.has(ref)) continue;
+    seen.add(ref);
+    out.push(h("button", { class: "cap-chip", title: ref,
+      onclick: (e) => { e.stopPropagation(); showGraph(ref); } }, capLabel(ref)));
+    if (out.length >= max) break;
+  }
+  return out.length ? h("span", { class: "cap-chips" }, out) : null;
+}
+
+function thoughtBadge(status) {
+  const cls = { VERIFIED: "s-ok", REFUTED: "s-bad", UNVERIFIED: "s-warn", OK: "s-ok", FAILED: "s-bad" }[status];
+  if (!cls) return null;
+  const label = status === "OK" ? t("ok") : status === "FAILED" ? t("failed") : t(status);
+  return h("span", { class: "badge " + cls }, label);
+}
+
+function renderThoughts(step) {
+  const list = (step.thoughts || []).filter((th) => th.kind !== "conclusion");
+  if (!list.length) return null;
+  return h("div", { class: "thoughts" }, list.map((th) => {
+    const refs = th.kind === "plan" || th.kind === "decision"
+      ? (th.refs || []).filter((r) => /^(memory|tool|skill|mcp-server|run):/.test(r.ref)) : [];
+    return h("div", { class: "thought-row kind-" + th.kind },
+      h("span", { class: "thought-kind" }, t(THOUGHT_LABELS[th.kind] || th.kind)),
+      h("div", { class: "thought-body" },
+        h("div", { class: "thought-text" }, th.summary),
+        (th.status && th.status !== "UNKNOWN") || th.confidence
+          ? h("div", { class: "thought-meta" }, thoughtBadge(th.status),
+              th.confidence ? h("span", { class: "muted small" }, Math.round(th.confidence * 100) + "%") : null)
+          : null,
+        refs.length ? h("div", { class: "thought-refs" }, capChips(refs.map((r) => r.ref))) : null));
+  }));
 }
 
 // ---------- composer ----------
@@ -1033,7 +1088,9 @@ async function showPlugins() {
         h("div", { class: "plugin-top" },
           h("span", { class: "plugin-name mono" }, p.name),
           active.has(p.kind + "/" + p.name) ? badge("ACTIVE") : h("span", { class: "badge s-idle" }, t("available"))),
-        p.doc ? h("p", { class: "plugin-doc" }, p.doc) : null))));
+        p.doc ? h("p", { class: "plugin-doc" }, p.doc) : null,
+        active.has(p.kind + "/" + p.name) ? h("button", { class: "link-btn",
+          onclick: () => showGraph("plugin:" + p.kind + "/" + p.name) }, t("View in graph")) : null))));
   });
   if ((data.tools || []).length) body.push(h("section", { class: "kind" }, h("h3", {}, t("registered tools")),
     h("div", { class: "plugin-tools" }, data.tools.map((x) => h("span", { class: "plugin-chip mono" }, x)))));
@@ -1356,6 +1413,261 @@ async function openInstalledSkill(name) {
   if (x) editSkill(x);
 }
 
+// ---------- graph: capability, memory and trace neighborhood ----------
+const GRAPH_FILTERS = [
+  ["All", []],
+  ["Capabilities", ["tool", "skill", "mcp_server", "plugin"]],
+  ["Memory", ["memory"]],
+  ["Services", ["service", "incident"]],
+  ["Runs", ["run", "step", "thought", "shard"]],
+];
+const gv = { q: "", kinds: [], focus: "", depth: 2, data: null, results: [], error: null, selected: "", relating: false };
+
+async function showGraph(ref) {
+  state.view = "graph";
+  markSide();
+  stopWatching();
+  renderSessions();
+  $("#chat-head").replaceChildren();
+  $("#chat-head").className = "chat-head";
+  $("#composer-wrap").hidden = true;
+  if (ref !== undefined) {
+    gv.focus = ref || "";
+    gv.selected = gv.focus;
+  }
+  renderGraph(true);
+  try { await api().Capabilities(30); } catch { /* viewers may not sync */ }
+  await loadGraph();
+  renderGraph();
+}
+
+function showGraphSearch(q) {
+  gv.q = q;
+  gv.kinds = [];
+  showGraph("");
+}
+
+async function loadGraph() {
+  gv.error = null;
+  try {
+    if (gv.focus) {
+      gv.data = await api().GraphNeighborhood(gv.focus, gv.depth);
+      if (!gv.selected) gv.selected = gv.focus;
+    } else {
+      const res = await api().GraphSearch(gv.q, gv.kinds, 60);
+      gv.results = res.nodes || [];
+    }
+  } catch (e) {
+    gv.error = errText(e);
+  }
+}
+
+function renderGraph(loading) {
+  if (state.view !== "graph") return;
+  const filters = GRAPH_FILTERS.map(([label, kinds]) => {
+    const on = kinds.length === gv.kinds.length && kinds.every((k) => gv.kinds.includes(k));
+    return h("button", { class: "graph-filter" + (on ? " on" : ""),
+      onclick: () => { gv.kinds = kinds; gv.focus = ""; showGraph(""); } }, t(label));
+  });
+  const search = h("form", { class: "graph-search", onsubmit: (e) => {
+    e.preventDefault();
+    gv.q = e.currentTarget.q.value.trim();
+    gv.focus = "";
+    showGraph("");
+  } },
+    h("input", { name: "q", type: "search", value: gv.q, placeholder: t("Search capabilities, memories, services or runs"),
+      autocomplete: "off", spellcheck: "false" }),
+    h("button", { class: "btn", type: "submit" }, t("Search")));
+  let body;
+  if (loading && !gv.data && !gv.results.length) body = h("div", { class: "muted" }, t("Loading…"));
+  else if (gv.error) body = h("div", { class: "error" }, gv.error);
+  else if (gv.focus) body = graphNeighborhood();
+  else body = graphResults();
+  $("#thread").replaceChildren(h("div", { class: "graph-page" },
+    h("h1", {}, t("Graph")),
+    h("p", { class: "muted lead" }, t("Trace how runs, capabilities and memories connect.")),
+    h("div", { class: "graph-bar" }, search, h("div", { class: "graph-filters" }, filters)),
+    body));
+}
+
+function graphResults() {
+  if (!gv.results.length) {
+    return h("div", { class: "empty-card" },
+      h("div", { class: "empty-mark" }, icon("search")),
+      h("div", { class: "empty-title" }, t("No matching nodes")),
+      h("p", { class: "muted small" }, t("Try another keyword or start from a capability.")));
+  }
+  return h("div", { class: "graph-results" }, gv.results.map((n) =>
+    h("button", { class: "graph-result", onclick: () => showGraph(n.ref) },
+      h("span", { class: "graph-kind" }, t(n.kind)),
+      h("span", { class: "graph-result-label" }, n.label || n.ref),
+      h("span", { class: "graph-ref mono" }, n.ref))));
+}
+
+function graphNeighborhood() {
+  const data = gv.data || { nodes: [], edges: [] };
+  const nodes = data.nodes || [];
+  const edges = data.edges || [];
+  if (!nodes.length) {
+    return h("div", { class: "empty-card" },
+      h("div", { class: "empty-mark" }, icon("dot")),
+      h("div", { class: "empty-title" }, t("No graph data yet")),
+      h("p", { class: "muted small" }, t("Run a chat or add a capability to populate the graph.")));
+  }
+  const selected = nodes.find((n) => n.ref === gv.selected) || nodes[0];
+  return h("div", { class: "graph-layout" },
+    h("div", { class: "graph-canvas" },
+      graphSVG(nodes, edges, gv.focus || nodes[0].ref),
+      data.truncated ? h("div", { class: "graph-truncated muted small" },
+        t("Truncated at {n} nodes", { n: nodes.length })) : null),
+    graphDetail(selected, nodes, edges));
+}
+
+function graphSVG(nodes, edges, focus) {
+  const W = 680, H = 520, cx = W / 2, cy = H / 2;
+  const shown = nodes.slice(0, 60);
+  const known = new Set(shown.map((n) => n.ref));
+  const adj = new Map(shown.map((n) => [n.ref, []]));
+  for (const e of edges) {
+    if (!known.has(e.src) || !known.has(e.dst)) continue;
+    adj.get(e.src).push(e.dst);
+    adj.get(e.dst).push(e.src);
+  }
+  const depth = new Map([[focus, 0]]);
+  const queue = [focus];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const next of adj.get(cur) || []) {
+      if (!depth.has(next) && depth.get(cur) < 3) {
+        depth.set(next, depth.get(cur) + 1);
+        queue.push(next);
+      }
+    }
+  }
+  for (const n of shown) if (!depth.has(n.ref)) depth.set(n.ref, 3);
+  const rings = new Map();
+  for (const n of shown) {
+    const d = depth.get(n.ref);
+    if (!rings.has(d)) rings.set(d, []);
+    rings.get(d).push(n);
+  }
+  const pos = new Map();
+  for (const [d, list] of rings) {
+    const r = d === 0 ? 0 : 90 + (d - 1) * 105;
+    list.forEach((n, i) => {
+      const a = -Math.PI / 2 + (2 * Math.PI * i) / Math.max(list.length, 1) + d * 0.35;
+      pos.set(n.ref, { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+    });
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("class", "graph-svg");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", t("Graph"));
+  for (const e of edges) {
+    const a = pos.get(e.src), b = pos.get(e.dst);
+    if (!a || !b) continue;
+    const line = document.createElementNS(NS, "line");
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+    line.setAttribute("class", "graph-edge");
+    const title = document.createElementNS(NS, "title");
+    title.textContent = e.relation;
+    line.append(title);
+    svg.append(line);
+  }
+  for (const n of shown) {
+    const p = pos.get(n.ref);
+    if (!p) continue;
+    const g = document.createElementNS(NS, "g");
+    g.setAttribute("class", "graph-node kind-" + n.kind + (n.ref === focus ? " focus" : ""));
+    g.setAttribute("transform", `translate(${p.x} ${p.y})`);
+    g.setAttribute("tabindex", "0");
+    g.setAttribute("role", "button");
+    g.setAttribute("aria-label", n.label || n.ref);
+    const title = document.createElementNS(NS, "title");
+    title.textContent = n.ref;
+    const circle = document.createElementNS(NS, "circle");
+    circle.setAttribute("r", n.ref === focus ? 11 : 7);
+    g.append(title, circle);
+    if (depth.get(n.ref) <= 1 || n.ref === focus) {
+      const label = document.createElementNS(NS, "text");
+      label.setAttribute("y", n.ref === focus ? 24 : 19);
+      label.setAttribute("text-anchor", "middle");
+      label.textContent = (n.label || n.ref).length > 22 ? (n.label || n.ref).slice(0, 20) + "…" : (n.label || n.ref);
+      g.append(label);
+    }
+    g.addEventListener("click", () => showGraph(n.ref));
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showGraph(n.ref); }
+    });
+    svg.append(g);
+  }
+  return svg;
+}
+
+function graphDetail(node, nodes, edges) {
+  if (!node) return h("div", { class: "graph-side" });
+  const related = edges.filter((e) => e.src === node.ref || e.dst === node.ref);
+  const by = new Map();
+  for (const e of related) {
+    const other = e.src === node.ref ? e.dst : e.src;
+    const key = e.relation + " · " + other;
+    if (!by.has(key) || e.source === "declared") {
+      by.set(key, { relation: e.relation, ref: other, source: e.source, node: nodes.find((n) => n.ref === other) });
+    }
+  }
+  const attrs = Object.entries(node.attrs || {}).filter(([, v]) => v != null && v !== "");
+  const admin = !!(state.who && (state.who.roles || []).includes("admin"));
+  return h("aside", { class: "graph-side" },
+    h("button", { class: "link-btn", onclick: () => showGraph("") }, t("‹ Back to search")),
+    h("div", { class: "graph-side-kind" }, t(node.kind)),
+    h("h2", {}, node.label || node.ref),
+    h("div", { class: "graph-ref mono" }, node.ref),
+    attrs.length ? h("div", { class: "graph-attrs" }, attrs.map(([k, v]) =>
+      h("div", { class: "graph-attr" }, h("span", { class: "muted" }, k), h("span", { class: "mono" }, typeof v === "object" ? JSON.stringify(v) : String(v))))) : null,
+    node.ref.startsWith("tool:") || node.ref.startsWith("skill:") || node.ref.startsWith("mcp-server:")
+      ? h("button", { class: "btn", onclick: () => openCapability(node.ref) }, t("Open in Customize")) : null,
+    h("div", { class: "graph-side-title" }, t("Related")),
+    by.size ? [...by.values()].map((r) => h("div", { class: "graph-neighbor-row" },
+      h("button", { class: "graph-neighbor", onclick: () => showGraph(r.ref) },
+        h("span", { class: "muted small" }, r.relation),
+        h("span", {}, r.node ? r.node.label : r.ref)),
+      r.source === "declared" ? h("button", { class: "icon-x", title: t("Remove relation"),
+        onclick: async (e) => {
+          e.stopPropagation();
+          try { await api().GraphUnrelate(node.ref, r.ref, r.relation); await loadGraph(); renderGraph(); }
+          catch (err) { toast(errText(err), true); }
+        } }, "×") : null)) : h("p", { class: "muted small" }, t("No relationships yet.")),
+    admin ? h("div", { class: "graph-relate" },
+      h("button", { class: "btn", onclick: () => { gv.relating = !gv.relating; renderGraph(); } }, t("Declare relation")),
+      gv.relating ? h("form", { class: "graph-relate-form", onsubmit: async (e) => {
+        e.preventDefault();
+        const f = e.currentTarget;
+        try {
+          await api().GraphRelate(node.ref, f.dst.value.trim(), f.relation.value, 1);
+          toast(t("Relation added"));
+          gv.relating = false;
+          await loadGraph();
+          renderGraph();
+        } catch (err) { toast(errText(err), true); }
+      } },
+        h("select", { name: "relation" }, ["related_to", "provides", "belongs_to", "depends_on", "alternative_to", "composes", "precedes"].map((r) =>
+          h("option", { value: r }, r))),
+        h("input", { name: "dst", placeholder: t("Target ref"), required: true, spellcheck: "false" }),
+        h("div", { class: "actions" },
+          h("button", { class: "btn ghost", type: "button", onclick: () => { gv.relating = false; renderGraph(); } }, t("Cancel")),
+          h("button", { class: "btn primary", type: "submit" }, t("Add relation")))) : null) : null);
+}
+
+function openCapability(ref) {
+  if (ref.startsWith("skill:")) showCustomize("skills");
+  else if (ref.startsWith("mcp-server:")) showCustomize("mcp");
+  else if (ref.startsWith("tool:")) showCustomize("tools");
+  else showPlugins();
+}
+
 // ---------- customize: MCP servers, HTTP tools, skills, tools ----------
 const RISKS = ["R0", "R1", "R2", "R3"];
 const RISK_DOC = { R0: "read-only", R1: "low-impact write", R2: "change · needs approval", R3: "dangerous · always denied" };
@@ -1445,6 +1757,14 @@ function listFor(tab) {
   return (tab === "mcp" ? d.mcp_servers : tab === "http" ? d.http_tools : tab === "web" ? d.web_tools : tab === "model" ? d.models : d.skills) || [];
 }
 
+function extGraphRef(tab, x) {
+  const tenant = state.who ? state.who.tenant : "";
+  if (tab === "mcp") return "mcp-server:" + tenant + "/" + x.name + "@" + x.version;
+  if (tab === "http") return "tool:http." + x.name + "@1";
+  if (tab === "web") return "tool:web." + x.name + "@1";
+  return "";
+}
+
 function renderExtList(tab) {
   const items = listFor(tab);
   const add = { mcp: [t("Add MCP server"), () => editMCP(null)], http: [t("Add HTTP tool"), () => editHTTP(null)],
@@ -1470,7 +1790,12 @@ function renderExtList(tab) {
             h("div", { class: "ext-title" }, h("span", { class: "mono" }, x.name), statusBadge(x)),
             h("div", { class: "muted small" }, extSummary(tab, x)),
             x.status && x.status.error ? h("div", { class: "error small" }, x.status.error) : null),
-          h("div", { class: "ext-side muted small" }, "v" + x.version, " · ", x.updated_by || "", " · ", ago(x.updated_at))), open);
+          h("div", { class: "ext-side muted small" }, "v" + x.version, " · ", x.updated_by || "", " · ", ago(x.updated_at),
+            h("button", { class: "link-btn", onclick: (e) => {
+              e.stopPropagation();
+              const ref = extGraphRef(tab, x);
+              if (ref) showGraph(ref); else showGraphSearch(x.name);
+            } }, t("View in graph")))), open);
       }));
 }
 
@@ -1952,7 +2277,7 @@ async function toggleTool(name, enabled) {
 
 // ---------- settings: appearance, connection, models, notifications, about ----------
 const SETTINGS_TABS = [["appearance", "Appearance"], ["connection", "Connection & account"], ["models", "Models"],
-  ["notifications", "Notifications"], ["about", "About"]];
+  ["notifications", "Notifications"], ["knowledge", "Knowledge"], ["about", "About"]];
 const st = { tab: "appearance", settings: null, about: null, aboutLoading: false };
 const POLL_CHOICES = [5, 8, 15, 30, 60];
 
@@ -1985,6 +2310,7 @@ function renderSettings(loading) {
     h("button", { class: "settings-tab" + (st.tab === id ? " on" : ""), onclick: () => showSettings(id) }, t(label))));
   const body = {
     appearance: renderAppearance, connection: renderConnection, notifications: renderNotifications, about: renderAbout,
+    knowledge: renderKnowledge,
     models: () => loading && !cz.data ? h("div", { class: "muted" }, t("Loading…")) : cz.error ? h("div", { class: "error" }, cz.error)
       : cz.edit ? cz.edit.render() : renderModelTab(),
   }[st.tab]();
@@ -2081,8 +2407,21 @@ function renderNotifications() {
           POLL_CHOICES.map((n) => h("option", { value: n, selected: n === poll }, t("{n} seconds", { n })))))));
 }
 
-async function loadAbout() {
-  st.aboutLoading = true;
+function renderKnowledge() {
+  return h("div", {},
+    group(t("Capability graph"),
+      row(t("Projection"), t("Capabilities, skills, MCP servers and plugins are synced from the registries."),
+        h("button", { class: "btn", onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          try { await api().Capabilities(30); toast(t("Refreshed")); }
+          catch (err) { toast(errText(err), true); }
+          e.currentTarget.disabled = false;
+        } }, t("Rebuild"))),
+      row(t("Decision trace"), t("New runs record plan, action, observation, verification and reflection. Hidden model reasoning is never stored."), null),
+      row(t("Memory shards"), t("Memories are partitioned by service, incident, run and capability."), null)));
+}
+
+async function loadAbout() {  st.aboutLoading = true;
   renderSettings();
   try { st.about = await api().About(); } catch (e) { st.about = { error: errText(e) }; }
   st.log = await api().RecentLog(30).catch(() => []);
@@ -2155,6 +2494,7 @@ function markSide() {
   $("#btn-inbox").classList.toggle("on", state.view === "inbox");
   $("#btn-customize").classList.toggle("on", state.view === "customize");
   $("#btn-gallery").classList.toggle("on", state.view === "gallery");
+  $("#btn-graph").classList.toggle("on", state.view === "graph");
   $("#btn-plugins").classList.toggle("on", state.view === "plugins");
   $("#btn-settings").classList.toggle("on", state.view === "settings");
 }
@@ -2166,6 +2506,7 @@ function bind() {
   $("#btn-plugins").onclick = showPlugins;
   $("#btn-customize").onclick = () => showCustomize();
   $("#btn-gallery").onclick = showGallery;
+  $("#btn-graph").onclick = () => showGraph();
   $("#btn-inbox").onclick = showInbox;
   $("#btn-settings").onclick = () => showSettings();
   $("#btn-archived").onclick = () => {

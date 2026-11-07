@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -430,6 +431,63 @@ func (a *App) Extensions() (map[string]any, error) { return a.get("/v1/extension
 // Tools lists the tools runs of this tenant can see, with whether the
 // default profile allows each.
 func (a *App) Tools() (map[string]any, error) { return a.get("/v1/tools") }
+
+// GraphSearch finds capability, memory, service, run and step nodes.
+func (a *App) GraphSearch(q string, kinds []string, limit int) (map[string]any, error) {
+	v := url.Values{}
+	if q != "" {
+		v.Set("q", q)
+	}
+	if len(kinds) > 0 {
+		v.Set("kinds", strings.Join(kinds, ","))
+	}
+	if limit > 0 {
+		v.Set("limit", fmt.Sprint(limit))
+	}
+	return a.get("/v1/graph/search?" + v.Encode())
+}
+
+// GraphNeighborhood returns the nodes and edges within depth of ref.
+func (a *App) GraphNeighborhood(ref string, depth int) (map[string]any, error) {
+	v := url.Values{"ref": {ref}}
+	if depth > 0 {
+		v.Set("depth", fmt.Sprint(depth))
+	}
+	return a.get("/v1/graph/neighborhood?" + v.Encode())
+}
+
+// Capabilities lists the tenant's projected capabilities with recent usage.
+func (a *App) Capabilities(days int) (map[string]any, error) {
+	v := url.Values{}
+	if days > 0 {
+		v.Set("days", fmt.Sprint(days))
+	}
+	return a.get("/v1/capabilities?" + v.Encode())
+}
+
+// GraphRelate declares a relation between two graph nodes (admin).
+func (a *App) GraphRelate(src, dst, relation string, weight float64) (map[string]any, error) {
+	c, err := a.c()
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	body := map[string]any{"src_ref": src, "dst_ref": dst, "relation": relation}
+	if weight > 0 {
+		body["weight"] = weight
+	}
+	return out, c.Do(a.ctx, http.MethodPost, "/v1/graph/relations", body, &out)
+}
+
+// GraphUnrelate removes a declared relation (admin).
+func (a *App) GraphUnrelate(src, dst, relation string) error {
+	c, err := a.c()
+	if err != nil {
+		return err
+	}
+	v := url.Values{"src": {src}, "dst": {dst}, "relation": {relation}}
+	return c.Do(a.ctx, http.MethodDelete, "/v1/graph/relations?"+v.Encode(), nil, nil)
+}
 
 // SetToolEnabled turns one tool on or off for the tenant (admin).
 func (a *App) SetToolEnabled(name string, enabled bool) (map[string]any, error) {
