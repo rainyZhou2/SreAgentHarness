@@ -29,7 +29,9 @@ func (e *EvalAPI) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
 		"POST /v1/eval/datasets":                                auth.Operator,
 		"POST /v1/eval/datasets/{dataset_id}/cases":             auth.Operator,
+		"POST /v1/eval/datasets/{dataset_id}/plan-cases":        auth.Operator,
 		"POST /v1/eval/datasets/{dataset_id}/freeze":            auth.Operator,
+		"POST /v1/eval/plan-runs":                               auth.Operator,
 		"POST /v1/eval/runs":                                    auth.Operator,
 		"POST /v1/evolution/candidates":                         auth.Operator,
 		"POST /v1/evolution/candidates/{candidate_id}/evaluate": auth.Operator,
@@ -45,7 +47,9 @@ func (e *EvalAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/eval/datasets", e.listDatasets)
 	mux.HandleFunc("GET /v1/eval/datasets/{dataset_id}", e.getDataset)
 	mux.HandleFunc("POST /v1/eval/datasets/{dataset_id}/cases", e.addCase)
+	mux.HandleFunc("POST /v1/eval/datasets/{dataset_id}/plan-cases", e.addPlanCase)
 	mux.HandleFunc("POST /v1/eval/datasets/{dataset_id}/freeze", e.freeze)
+	mux.HandleFunc("POST /v1/eval/plan-runs", e.replayPlans)
 	mux.HandleFunc("POST /v1/eval/runs", e.evaluate)
 	mux.HandleFunc("GET /v1/eval/runs/{eval_id}", e.getEvalRun)
 	mux.HandleFunc("GET /v1/profiles/{profile_id}/versions", e.listVersions)
@@ -171,6 +175,65 @@ func (e *EvalAPI) addCase(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusCreated
 	}
 	writeJSON(w, code, c)
+}
+
+func (e *EvalAPI) addPlanCase(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		RunID string `json:"run_id"`
+		Split string `json:"split"`
+	}
+	if !decodeBody(w, r, &b) {
+		return
+	}
+	if b.RunID == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "run_id is required")
+		return
+	}
+	c, created, err := e.Service.RecordPlanFromRun(r.Context(), id.tenant, r.PathValue("dataset_id"), b.RunID, b.Split)
+	if err != nil {
+		e.fail(w, err)
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+	}
+	writeJSON(w, code, c)
+}
+
+func (e *EvalAPI) replayPlans(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		DatasetID string `json:"dataset_id"`
+		Split     string `json:"split"`
+	}
+	if !decodeBody(w, r, &b) {
+		return
+	}
+	if b.DatasetID == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "dataset_id is required")
+		return
+	}
+	if b.Split == "" {
+		b.Split = "holdout"
+	}
+	if b.Split != "holdout" && b.Split != "train" {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "split must be train or holdout")
+		return
+	}
+	report, err := e.Service.ReplayPlans(r.Context(), id.tenant, b.DatasetID, b.Split)
+	if err != nil {
+		e.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (e *EvalAPI) freeze(w http.ResponseWriter, r *http.Request) {

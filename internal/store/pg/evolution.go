@@ -100,6 +100,18 @@ func (s *Store) ListProfileVersions(ctx context.Context, tenantID, profileID str
 	return out, rows.Err()
 }
 
+// EvalRunCost adapts the run cost projection for plan datasets without making
+// the eval package depend on this store.
+func (s *Store) EvalRunCost(ctx context.Context, tenantID, runID string) (eval.CostSummary, error) {
+	c, err := s.RunCost(ctx, tenantID, runID)
+	if err != nil {
+		return eval.CostSummary{}, err
+	}
+	return eval.CostSummary{ModelRequests: int(c.Requests), InputTokens: c.InputTokens,
+		OutputTokens: c.OutputTokens, CachedInputTokens: c.CachedInputTokens,
+		CostMicros: c.CostMicros, CostUSD: c.CostUSD}, nil
+}
+
 // ---------- datasets ----------
 
 const datasetCols = `id, name, version, status, manifest_hash, created_by, created_at, frozen_at`

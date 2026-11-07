@@ -29,11 +29,13 @@ type RecordedCall struct {
 type Recording struct {
 	Goal  string         `json:"goal"`
 	Calls []RecordedCall `json:"calls"`
+	Plan  *PlanTrace     `json:"plan,omitempty"`
 }
 
 type GroundTruth struct {
-	RootCauseLabels []string `json:"root_cause_labels"`
-	MustNotCall     []string `json:"must_not_call,omitempty"`
+	RootCauseLabels []string         `json:"root_cause_labels"`
+	MustNotCall     []string         `json:"must_not_call,omitempty"`
+	Plan            *PlanExpectation `json:"plan,omitempty"`
 }
 
 type Case struct {
