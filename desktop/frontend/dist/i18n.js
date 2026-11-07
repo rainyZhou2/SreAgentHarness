@@ -53,26 +53,31 @@ const ZH = {
   "Reason (optional)": "原因（可选）",
   // connection
   "Connection": "连接",
-  "Connect to your harness workspace": "连接到你的 harness 工作区",
+  "Choose how you want to work": "选择工作方式",
   "Server URL": "服务器地址",
-  "Local runtime": "本地运行",
-  "Local token": "本地令牌",
-  "Local data directory": "本地数据目录",
-  "Team server": "团队服务",
-  "Connection mode": "连接方式",
-  "Start and connect": "启动并连接",
-  "Starts a self-contained harness with its own local data. No Docker, PostgreSQL, NATS or terminal is needed.": "启动一个自带运行时的 harness，使用本地数据，不需要 Docker、PostgreSQL、NATS 或命令行。",
-  "Local runtime status: {status}": "本地运行状态：{status}",
-  "Local runtime is starting…": "本地运行时正在启动…",
-  "Local runtime failed: {err}": "本地运行时启动失败：{err}",
-  "Development headers": "开发模式请求头",
-  "Bearer token": "Bearer Token",
+  "On this Mac": "本机工作区",
+  "Team workspace": "团队工作区",
+  "Workspace type": "工作区类型",
+  "Local data directory": "本机数据目录",
+  "Open workspace": "进入工作区",
+  "Your data stays on this Mac with no extra setup — built for personal diagnosis and offline work.":
+    "数据保存在本机，无需额外配置，适合个人诊断与离线排查。",
+  "Connect to your team's shared workspace to share sessions, approvals and run history.":
+    "连接到团队共享工作区，共享会话、审批和运行记录。",
+  "Local service: {status}": "本机服务：{status}",
+  "Local service is starting…": "正在准备本机工作区…",
+  "Could not start the local workspace: {err}": "本机工作区启动失败：{err}",
+  "Ready": "已就绪",
+  "Unavailable": "不可用",
+  "Developer access": "开发者访问",
+  "Access token": "访问令牌",
+  "This Mac credential": "本机凭据",
   "Tenant": "租户",
   "Actor": "操作者",
   "Roles": "角色",
-  "Token": "Token",
-  "Development mode trusts request headers; use it locally only.": "开发模式信任请求头，仅用于本机调试。",
-  "The token stays in memory and is not saved to disk.": "Token 只保存在内存中，不会写入磁盘。",
+  "Token": "令牌",
+  "For local development only; identity comes from request headers.": "仅用于本地开发调试；身份由请求头决定。",
+  "The token is kept in memory and never written to disk.": "令牌只保存在内存中，不会写入磁盘。",
   "Connect": "连接",
   // settings
   "Language": "语言",
@@ -126,8 +131,8 @@ const ZH = {
   "Recent events": "最近事件",
   "Nothing logged yet.": "暂无记录。",
   // models
-  "Connect MCP servers, add HTTP tools and write skills for every chat in this tenant. Models are under Settings. ":
-    "为本租户的所有对话连接 MCP 服务器、添加 HTTP 工具和编写技能。模型在“设置”中管理。",
+  "Connect MCP servers, add HTTP tools and write skills for every chat in this workspace. Models are managed in Settings.":
+    "为本工作区的所有对话接入 MCP 服务器、添加 HTTP 工具和编写技能。模型在“设置”中管理。",
   "Make default": "设为默认",
   "The default model is tried first; the others are fallbacks.": "优先使用默认模型，其余模型作为备用。",
   "{name} is now the default model": "{name} 已设为默认模型",
@@ -148,11 +153,11 @@ const ZH = {
   "OpenAI-compatible / self-hosted": "OpenAI 兼容 / 自建服务",
   "Ark endpoint ID (ep-…) or model name": "方舟推理接入点 ID（ep-…）或模型名",
   // chat
-  "What can I help with?": "有什么可以帮你？",
-  "Tell me what's on your mind. I'll work out what you need and help from there.":
-    "告诉我你的问题或想法，我会先理解你的意图，再帮你处理。",
-  "Type your question or idea…": "输入你的问题或想法…",
-  "What's the difference between a Deployment and a StatefulSet?": "Deployment 和 StatefulSet 有什么区别？",
+  "How can I help with your service?": "今天要处理什么？",
+  "Describe the symptom, service or change. I'll gather evidence, reason about the cause and propose next steps.":
+    "描述故障现象、服务或变更需求。我会收集证据、分析原因并给出下一步建议。",
+  "Describe the issue, service or task…": "描述问题、服务或任务…",
+  "Investigate the checkout error spike and identify the likely cause": "排查 checkout 错误率突增并定位可能原因",
   "Why did checkout p99 latency rise this week?": "checkout 这周的 p99 延迟为什么升高了？",
   "Restart the checkout deployment and confirm recovery": "重启 checkout 并确认恢复",
   "Send failed: {err}": "发送失败：{err}",
@@ -256,8 +261,8 @@ const ZH = {
   "expires {time}": "{time} 过期",
   "needs {n} approvals": "需要 {n} 人审批",
   "Open chat ›": "打开对话 ›",
-  "Tool calls waiting for a decision in any chat of this tenant. New ones also arrive as system notifications.":
-    "本租户所有对话中等待决定的工具调用。新的审批也会以系统通知提醒。",
+  "Tool calls waiting for a decision in any chat of this workspace. New ones also arrive as system notifications.":
+    "本工作区所有对话中等待决定的工具调用。新的审批也会以系统通知提醒。",
   "Nothing is waiting for approval.": "没有待处理的审批。",
   "Not applied: {reason}": "未生效：{reason}",
   "rejected": "已拒绝",
@@ -266,8 +271,8 @@ const ZH = {
   // plugins
   "Loading…": "加载中…",
   "The plugin inventory needs the admin role.": "查看插件清单需要 admin 角色。",
-  "Plugins are managed by team servers. In local runtime, use Customize to manage models, MCP servers, HTTP tools and skills.":
-    "插件由团队服务管理。本地运行时请在“自定义”中管理模型、MCP 服务、HTTP 工具和技能。",
+  "Plugins are managed by team workspaces. In local mode, use Customize to manage models, MCP servers, HTTP tools and skills.":
+    "插件由团队工作区统一管理。本机模式请在“自定义”中管理模型、MCP 服务、HTTP 工具和技能。",
   "multiple": "可多实例",
   "available": "可用",
   "registered tools": "已注册的工具",
@@ -304,8 +309,8 @@ const ZH = {
   "Remove": "移除",
   "+ Add header": "+ 添加请求头",
   "Header": "请求头",
-  "Choose the model, connect MCP servers, add HTTP tools and write skills for every chat in this tenant. ":
-    "为本租户的所有对话选择模型、连接 MCP 服务器、添加 HTTP 工具和编写技能。",
+  "Choose the model, connect MCP servers, add HTTP tools and write skills for every chat in this workspace. ":
+    "为本工作区的所有对话选择模型、接入 MCP 服务器、添加 HTTP 工具和编写技能。",
   "Tools still run under the profile allowlist, policy and approvals. Changes need the admin role.":
     "工具仍受 Profile 白名单、策略和审批约束。修改需要 admin 角色。",
   "Add MCP server": "添加 MCP 服务器",
@@ -349,7 +354,7 @@ const ZH = {
   "Server URL (streamable HTTP)": "服务器 URL（Streamable HTTP）",
   "Headers (e.g. Authorization) — stored on the server, never shown again": "请求头（如 Authorization）— 保存在服务端，不会再显示",
   "Advanced": "高级",
-  "Local command (stdio; the server must set HARNESS_MCP_ALLOW_STDIO)": "本地命令（stdio；服务端需设置 HARNESS_MCP_ALLOW_STDIO）",
+  "Local command (advanced; requires server permission)": "本地命令（高级；需要服务端授权）",
   "Arguments": "参数",
   "Call timeout": "调用超时",
   "Connecting…": "连接中…",
@@ -374,8 +379,8 @@ const ZH = {
   "Input schema (JSON Schema, type object)": "输入 Schema（JSON Schema，type 为 object）",
   "Target argument (policy scope, optional)": "目标参数（策略作用范围，可选）",
   "Timeout": "超时",
-  "GET tools must be R0. Calls carry Idempotency-Key, X-Harness-Run-ID and X-Harness-Step-ID headers.":
-    "GET 工具必须是 R0。调用会带上 Idempotency-Key、X-Harness-Run-ID 和 X-Harness-Step-ID 请求头。",
+  "GET tools must be read-only (R0). Calls include idempotency and run context headers.":
+    "GET 工具必须是只读（R0）。调用会带上幂等键和运行上下文请求头。",
   "HTTP tool · {name}": "HTTP 工具 · {name}",
   "Input schema is not valid JSON: {err}": "输入 Schema 不是合法的 JSON：{err}",
   "When to use it": "适用场景",
@@ -392,16 +397,17 @@ const ZH = {
   "fastest": "最快",
   "default": "默认",
   "New runs use": "新 Run 使用",
-  "configured for this tenant": "已为本租户配置",
-  "the built-in scripted demo model — it only calls tools when you write “use <tool> {json}”. Add a model below to let the agent reason and pick tools itself.":
-    "内置的脚本演示模型——只有写“use <tool> {json}”时才会调用工具。在下方添加模型后，Agent 才能自己推理并选择工具。",
-  "the deployment's default model": "部署的默认模型",
+  "Not configured": "未配置",
+  "configured for this workspace": "已为本工作区配置",
+  "not configured — add a model below to enable agent reasoning and tool selection":
+    "尚未配置——在下方添加模型后即可启用 Agent 推理和工具选择",
+  "the workspace default model": "工作区默认模型",
   "Add another model": "再添加一个模型",
   "Add a model": "添加模型",
   "OpenAI-compatible": "OpenAI 兼容",
   "effort {v}": "推理强度 {v}",
-  "The key is stored on the server and used only for this tenant's runs; it is never sent back to clients. ":
-    "密钥保存在服务端，只用于本租户的 Run，不会再返回给客户端。",
+  "The key is stored on the server and used only for this workspace's runs; it is never sent back to clients. ":
+    "密钥保存在服务端，仅用于本工作区的运行，不会再返回给客户端。",
   "If several models are enabled, the first by name is preferred and the others are fallbacks.":
     "启用多个模型时，按名称排序的第一个优先，其余作为备用。",
   "OpenAI-compatible (vLLM, Ollama, …)": "OpenAI 兼容（vLLM、Ollama 等）",
@@ -425,8 +431,8 @@ const ZH = {
   "Source": "来源",
   "Profile": "Profile",
   "built-in": "内置",
-  "Hide this tool from runs of this tenant": "对本租户的 Run 隐藏此工具",
-  "The profile does not allow this tool": "Profile 不允许此工具",
+  "Hide this tool from runs in this workspace": "对本工作区的运行隐藏此工具",
+  "This tool is not allowed by the current profile": "当前 Profile 不允许此工具",
   "Enabled {name}": "已开启 {name}",
   "Disabled {name}": "已关闭 {name}",
   "allowed": "允许",
@@ -448,9 +454,8 @@ const ZH = {
   "Add": "添加",
   "Added {name}": "已添加 {name}",
   "Adding skills needs the admin role.": "添加技能需要 admin 角色。",
-  "You're on the built-in scripted model. Add a real model for better answers.":
-    "当前使用内置脚本模型，配置真实模型后回答会更好。",
-  "Configure a model": "配置模型",
+  "No model is configured yet. Add one to enable full reasoning and tool use.":
+    "尚未配置模型。添加模型后即可启用完整推理与工具调用。",
   "Toggle {name}": "切换 {name}",
   "Diagram could not be rendered": "流程图渲染失败",
   // graph
@@ -502,16 +507,16 @@ const ZH = {
   "Knowledge": "知识",
   "Capability graph": "能力图",
   "Projection": "图投影",
-  "Capabilities, skills, MCP servers and plugins are synced from the registries.":
-    "能力、技能、MCP 服务和插件会从注册表同步到图谱。",
+  "Capabilities, skills and connected services stay in sync automatically.":
+    "能力、技能和已接入的服务会自动保持同步。",
   "Rebuild": "重建",
   "Refreshed": "已刷新",
   "Decision trace": "决策轨迹",
-  "New runs record plan, action, observation, verification and reflection. Hidden model reasoning is never stored.":
-    "新的 Run 会记录计划、动作、观察、验证和反思；不会保存模型隐藏的推理。",
+  "Each run keeps its plan, actions, observations and conclusions. Hidden model reasoning is never stored.":
+    "每次运行都会保留计划、动作、观察和结论；不会保存模型隐藏的推理。",
   "Memory shards": "记忆分片",
-  "Memories are partitioned by service, incident, run and capability.":
-    "记忆会按服务、事件、Run 和能力分区。",
+  "Memories are organized by service, incident, run and capability.":
+    "记忆按服务、事件、运行和能力归档。",
   "Search tools": "搜索工具",
   "Select all": "全选",
   "Clear": "清空",

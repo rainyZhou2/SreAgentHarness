@@ -25,7 +25,7 @@ type Settings struct {
 	Creds     harness.Credentials `json:"creds"`
 	// Mode is "local" (supervised local runtime) or "remote" (team server).
 	Mode string `json:"mode,omitempty"`
-	// LocalDataDir is the per-user directory for PostgreSQL, artifacts and logs.
+	// LocalDataDir is the per-user directory for local state, artifacts and logs.
 	LocalDataDir string `json:"local_data_dir,omitempty"`
 	// Optional local model selection. The key is kept in the OS keychain.
 	ModelProvider string `json:"model_provider,omitempty"`
@@ -66,7 +66,7 @@ type App struct {
 	// native is false in browser preview mode (no Wails runtime).
 	native    bool
 	inboxKick chan struct{}
-	// local supervises the bundled PostgreSQL + harness core in local mode.
+	// local supervises the bundled harness core in local mode.
 	local   LocalRuntime
 	secrets localruntime.SecretStore
 }
