@@ -473,6 +473,12 @@ const ZH = {
   "Memory shards": "记忆分片",
   "Memories are partitioned by service, incident, run and capability.":
     "记忆会按服务、事件、Run 和能力分区。",
+  "Search tools": "搜索工具",
+  "Select all": "全选",
+  "Clear": "清空",
+  "{selected} of {total} selected": "已选 {selected} / {total}",
+  "No tools match": "没有匹配的工具",
+  "Click to expand": "点击展开",
 };
 
 const i18n = { lang: "en" };

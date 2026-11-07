@@ -1849,7 +1849,7 @@ function editMCP(x) {
     name: x ? x.name : "", url: spec.url || "", enabled: x ? x.enabled : true,
     headers: Object.keys(spec.headers || {}).map((k) => ({ k, v: "", saved: true })),
     allow: JSON.parse(JSON.stringify(spec.allow || {})),
-    remote: null, probing: false, probeError: null,
+    remote: null, probing: false, probeError: null, q: "", expanded: new Set(),
     command: spec.command || "", args: (spec.args || []).join(" "), callTimeout: spec.call_timeout || "",
   };
   const buildSpec = (withAllow) => {
@@ -1877,22 +1877,60 @@ function editMCP(x) {
     render() {
       const nameIn = h("input", { value: f.name, placeholder: t("e.g. {x}", { x: "grafana" }), spellcheck: "false", disabled: !!x, oninput: (e) => (f.name = e.target.value) });
       const remote = f.remote || Object.keys(f.allow).map((n) => ({ name: n, description: "", input_schema: null, stored: true }));
-      const toolRows = remote.map((rt) => {
+      const visible = () => {
+        const q = f.q.trim().toLowerCase();
+        return remote.filter((rt) => !q || rt.name.toLowerCase().includes(q) || (rt.description || "").toLowerCase().includes(q));
+      };
+      let toolsBox = null;
+      const toolRow = (rt) => {
         const pol = f.allow[rt.name];
         const props = Object.keys((rt.input_schema && rt.input_schema.properties) || {});
         const def = rt.read_only_hint ? "R0" : "R2";
-        return h("tr", { class: pol ? "" : "off" },
-          h("td", {}, h("input", { type: "checkbox", checked: !!pol, onchange: (e) => {
+        const open = f.expanded.has(rt.name);
+        return h("div", { class: "mcp-tool" + (pol ? " on" : " off") },
+          h("input", { type: "checkbox", checked: !!pol, "aria-label": rt.name, onchange: (e) => {
             if (e.target.checked) f.allow[rt.name] = { risk: def }; else delete f.allow[rt.name];
-            renderCustomize();
-          } })),
-          h("td", {}, h("div", { class: "mono" }, rt.name), h("div", { class: "muted small" }, rt.description || (rt.stored ? t("(connect to refresh)") : "")),
-            rt.read_only_hint ? h("span", { class: "hint-tag" }, t("read-only hint")) : null,
-            rt.destructive_hint ? h("span", { class: "hint-tag bad" }, t("destructive hint")) : null),
-          h("td", {}, pol ? riskSelect(pol.risk, (v) => (pol.risk = v)) : h("span", { class: "muted small" }, t("not exposed"))),
-          h("td", {}, pol && props.length ? h("select", { onchange: (e) => { if (e.target.value) pol.target_arg = e.target.value; else delete pol.target_arg; } },
-            h("option", { value: "" }, t("no target")), props.map((p) => h("option", { value: p, selected: pol.target_arg === p }, p))) : null));
-      });
+            paintTools();
+          } }),
+          h("div", { class: "mcp-tool-main", title: rt.description ? t("Click to expand") : "",
+            onclick: () => {
+              if (!rt.description) return;
+              if (open) f.expanded.delete(rt.name); else f.expanded.add(rt.name);
+              paintTools();
+            } },
+            h("div", { class: "mcp-tool-head" },
+              h("span", { class: "mono mcp-tool-name" }, rt.name),
+              rt.read_only_hint ? h("span", { class: "hint-tag" }, t("read-only hint")) : null,
+              rt.destructive_hint ? h("span", { class: "hint-tag bad" }, t("destructive hint")) : null),
+            rt.description || rt.stored
+              ? h("div", { class: "mcp-tool-desc" + (open ? " open" : "") }, rt.description || t("(connect to refresh)")) : null),
+          h("div", { class: "mcp-tool-controls" },
+            pol ? riskSelect(pol.risk, (v) => (pol.risk = v)) : h("span", { class: "muted small" }, t("not exposed")),
+            pol && props.length ? h("select", { onchange: (e) => {
+              if (e.target.value) pol.target_arg = e.target.value; else delete pol.target_arg;
+            } }, h("option", { value: "" }, t("no target")), props.map((p) => h("option", { value: p, selected: pol.target_arg === p }, p))) : null));
+      };
+      const paintTools = () => {
+        if (!toolsBox) return;
+        const list = visible();
+        toolsBox.replaceChildren(...(list.length ? list.map(toolRow) : [h("div", { class: "mcp-tools-empty muted small" }, t("No tools match"))]));
+        const count = $("#mcp-tool-count");
+        if (count) count.textContent = t("{selected} of {total} selected", { selected: Object.keys(f.allow).length, total: remote.length });
+      };
+      const toolsBar = remote.length ? h("div", { class: "mcp-tools-bar" },
+        h("input", { class: "mcp-tool-search", type: "search", value: f.q, placeholder: t("Search tools"),
+          autocomplete: "off", spellcheck: "false", oninput: (e) => { f.q = e.target.value; paintTools(); } }),
+        h("span", { class: "muted small", id: "mcp-tool-count" },
+          t("{selected} of {total} selected", { selected: Object.keys(f.allow).length, total: remote.length })),
+        h("button", { class: "btn", type: "button", onclick: () => {
+          for (const rt of visible()) if (!f.allow[rt.name]) f.allow[rt.name] = { risk: rt.read_only_hint ? "R0" : "R2" };
+          paintTools();
+        } }, t("Select all")),
+        h("button", { class: "btn ghost", type: "button", onclick: () => {
+          for (const rt of visible()) delete f.allow[rt.name];
+          paintTools();
+        } }, t("Clear"))) : null;
+      if (remote.length) toolsBox = h("div", { class: "mcp-tools", id: "mcp-tools" });
       const fields = h("div", {},
         h("div", { class: "grid2" },
           h("label", {}, t("Name") + " ", nameIn, h("span", { class: "muted small" }, t("Tools appear as {prefix}", { prefix: `mcp.${f.name || "<name>"}.<tool>` }))),
@@ -1908,8 +1946,10 @@ function editMCP(x) {
           h("button", { class: "btn", type: "button", disabled: f.probing, onclick: probe }, t(f.probing ? "Connecting…" : (f.remote ? "Reconnect" : "Connect & list tools"))),
           h("span", { class: "muted small" }, f.remote ? t("{n} tools on the server · tick the ones the agent may call", { n: f.remote.length }) : t("Only ticked tools are exposed to the agent."))),
         f.probeError ? h("div", { class: "error small" }, f.probeError) : null,
-        remote.length ? h("table", { class: "tool-table" }, h("thead", {}, h("tr", {}, h("th", {}), h("th", {}, t("Tool")), h("th", {}, t("Risk")), h("th", {}, t("Target arg")))), h("tbody", {}, toolRows)) : null,
+        toolsBar,
+        toolsBox,
         h("label", { class: "check" }, h("input", { type: "checkbox", checked: f.enabled, onchange: (e) => (f.enabled = e.target.checked) }), " " + t("Enabled")));
+      paintTools();
       return editorShell(x ? t("MCP server · {name}", { name: x.name }) : t("Add MCP server"), fields, [
         x ? h("button", { class: "btn danger", onclick: () => deleteExt("mcp-servers", x.name) }, t("Delete")) : null,
         h("span", { class: "spacer" }),
