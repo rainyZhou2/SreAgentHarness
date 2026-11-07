@@ -1,7 +1,8 @@
-// Package localstore is the single-user SQLite store used by the local
-// harness runtime. It keeps the working set in memory and persists each
-// changed object as JSON in one SQLite table. The local runtime is one process,
-// so a mutex provides the row-locking semantics PostgreSQL gives the server.
+// Package localstore is the single-user local store used by the harness
+// runtime. State objects are persisted as JSON in SQLite; execution events are
+// appended to JSONL first, and SQLite keeps only byte-range indexes into those
+// files. JSONL is the execution source of truth and can rebuild the index.
+// The local runtime is one process, so a mutex provides row locking.
 package localstore
 
 import (
@@ -30,31 +31,35 @@ type Store struct {
 
 	mu sync.Mutex
 
-	runs       map[string]domain.Run
-	runByKey   map[string]string // tenant/idempotency -> run id
-	steps      map[string]domain.Step
-	attempts   map[string]attempt
-	events     map[string][]domain.Event
-	sessions   map[string]domain.Session
-	sessionKey map[string]string
-	branches   map[string]domain.Branch
-	turns      map[string]domain.Turn
-	messages   map[string][]domain.Message
-	profiles   map[string]profileRec
-	flows      map[string]domain.FlowSnapshot
-	flowInputs map[string]flowInput
-	intents    map[string]domain.ActionIntent
-	intentStep map[string]string
-	approvals  map[string]approvalRec
-	decisions  map[string][]decisionRec
-	grants     map[string]grantRec
-	kv         map[string]kvRec
-	effects    map[string]effectRec
-	outbox     map[string]domain.OutboxMessage
-	commands   map[string]domain.Command
-	cmdKey     map[string]string
-	thoughts   map[string][]domain.Thought
-	caps       map[string][]domain.CapabilityRef
+	runs         map[string]domain.Run
+	runByKey     map[string]string // tenant/idempotency -> run id
+	steps        map[string]domain.Step
+	attempts     map[string]attempt
+	eventDir     string
+	events       map[string][]eventIndex
+	eventCache   map[string]domain.Event
+	eventSeq     map[string]int64
+	legacyEvents []domain.Event
+	sessions     map[string]domain.Session
+	sessionKey   map[string]string
+	branches     map[string]domain.Branch
+	turns        map[string]domain.Turn
+	messages     map[string][]domain.Message
+	profiles     map[string]profileRec
+	flows        map[string]domain.FlowSnapshot
+	flowInputs   map[string]flowInput
+	intents      map[string]domain.ActionIntent
+	intentStep   map[string]string
+	approvals    map[string]approvalRec
+	decisions    map[string][]decisionRec
+	grants       map[string]grantRec
+	kv           map[string]kvRec
+	effects      map[string]effectRec
+	outbox       map[string]domain.OutboxMessage
+	commands     map[string]domain.Command
+	cmdKey       map[string]string
+	thoughts     map[string][]domain.Thought
+	caps         map[string][]domain.CapabilityRef
 }
 
 type attempt struct {
@@ -161,9 +166,23 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS event_index (
+		run_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, type TEXT NOT NULL,
+		step_id TEXT NOT NULL DEFAULT '', file TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL,
+		occurred_at TEXT NOT NULL, PRIMARY KEY (run_id, seq)
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	eventDir := filepath.Join(filepath.Dir(path), "events")
+	if err := os.MkdirAll(eventDir, 0o700); err != nil {
+		db.Close()
+		return nil, err
+	}
 	s := &Store{
-		db: db, runs: map[string]domain.Run{}, runByKey: map[string]string{}, steps: map[string]domain.Step{},
-		attempts: map[string]attempt{}, events: map[string][]domain.Event{}, sessions: map[string]domain.Session{},
+		db: db, eventDir: eventDir, runs: map[string]domain.Run{}, runByKey: map[string]string{}, steps: map[string]domain.Step{},
+		attempts: map[string]attempt{}, events: map[string][]eventIndex{}, eventCache: map[string]domain.Event{},
+		eventSeq: map[string]int64{}, sessions: map[string]domain.Session{},
 		sessionKey: map[string]string{}, branches: map[string]domain.Branch{}, turns: map[string]domain.Turn{},
 		messages: map[string][]domain.Message{}, profiles: map[string]profileRec{}, flows: map[string]domain.FlowSnapshot{},
 		flowInputs: map[string]flowInput{}, intents: map[string]domain.ActionIntent{}, intentStep: map[string]string{}, approvals: map[string]approvalRec{},
@@ -176,6 +195,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	s.bootstrapEvents()
 	return s, nil
 }
 
@@ -225,7 +245,7 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 		if err := json.Unmarshal(data, &v); err != nil {
 			return err
 		}
-		s.events[v.RunID] = append(s.events[v.RunID], v)
+		s.legacyEvents = append(s.legacyEvents, v)
 	case "session":
 		var v domain.Session
 		if err := json.Unmarshal(data, &v); err != nil {
@@ -365,6 +385,22 @@ func flowInputKey(runID, node string) string { return runID + "/" + node }
 func kvKey(k domain.KVKey) string            { return k.TenantID + "/" + k.Scope + "/" + k.OwnerID + "/" + k.Name }
 
 func (s *Store) saveRun(r domain.Run) {
+	if cur, ok := s.runs[r.ID]; ok {
+		// Callers often hold a copy from before appendEvent/insertStep updated
+		// the row. Never let a stale copy rewind the monotonic counters.
+		if r.LastEventSeq < cur.LastEventSeq {
+			r.LastEventSeq = cur.LastEventSeq
+		}
+		if r.NextStepSeq < cur.NextStepSeq {
+			r.NextStepSeq = cur.NextStepSeq
+		}
+		if r.FenceToken < cur.FenceToken {
+			r.FenceToken = cur.FenceToken
+		}
+		if r.Version < cur.Version {
+			r.Version = cur.Version
+		}
+	}
 	s.runs[r.ID] = r
 	s.put("run", r.ID, "", 0, r)
 }
@@ -430,9 +466,13 @@ func (s *Store) appendEvent(tenant, runID, stepID, attemptID, typ, actorType, ac
 		p, _ = json.Marshal(payload)
 	}
 	r := s.runs[runID]
-	r.LastEventSeq++
+	seq := s.eventSeq[runID] + 1
+	s.eventSeq[runID] = seq
+	if r.LastEventSeq < seq {
+		r.LastEventSeq = seq
+	}
 	s.runs[runID] = r
-	ev := domain.Event{TenantID: tenant, RunID: runID, Seq: r.LastEventSeq, ID: newID(), Type: typ,
+	ev := domain.Event{TenantID: tenant, RunID: runID, Seq: seq, ID: newID(), Type: typ,
 		ActorType: actorType, Payload: p, OccurredAt: now(), CommittedAt: now()}
 	if stepID != "" {
 		ev.StepID = &stepID
@@ -443,8 +483,7 @@ func (s *Store) appendEvent(tenant, runID, stepID, attemptID, typ, actorType, ac
 	if actorID != "" {
 		ev.ActorID = &actorID
 	}
-	s.events[runID] = append(s.events[runID], ev)
-	s.put("event", fmt.Sprintf("%s:%020d", runID, ev.Seq), runID, ev.Seq, ev)
+	s.appendEventLogLocked(ev)
 	s.saveRun(r)
 }
 
