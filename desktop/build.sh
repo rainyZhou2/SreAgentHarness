@@ -7,36 +7,15 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
-# bundle_local builds the harness core and, when HARNESS_PG_PREFIX is set,
-# copies the PostgreSQL runtime next to the desktop binary. Release builds set
-# HARNESS_REQUIRE_LOCAL=1 so a missing PostgreSQL cannot ship silently.
+# bundle_local builds the SQLite-backed local harness next to the desktop
+# binary. Local mode has no PostgreSQL, NATS or plugin-host dependency.
 bundle_local() {
   local dest="$1"
   mkdir -p "$dest/bin"
   local core_tmp
   core_tmp="$(mktemp)"
-  (cd "$repo_root" && go build -o "$core_tmp" ./cmd/harness)
+  (cd "$repo_root" && go build -ldflags "-w -s" -o "$core_tmp" ./cmd/harness-local)
   mv "$core_tmp" "$dest/bin/harness"
-  if [[ -n "${HARNESS_PG_PREFIX:-}" && -d "$HARNESS_PG_PREFIX" ]]; then
-    mkdir -p "$dest/lib" "$dest/share"
-    cp "$HARNESS_PG_PREFIX/bin/postgres" "$HARNESS_PG_PREFIX/bin/initdb" "$HARNESS_PG_PREFIX/bin/pg_ctl" "$dest/bin/"
-    if [[ "$(uname -s)" == "Darwin" ]] && command -v dylibbundler >/dev/null 2>&1; then
-      # Homebrew binaries point at /opt/homebrew; rewrite them to the app's
-      # Resources/local/lib so the bundle works on a machine without Homebrew.
-      for b in postgres initdb pg_ctl; do
-        dylibbundler -of -b -x "$dest/bin/$b" -d "$dest/lib" -p '@executable_path/../lib' >/dev/null
-      done
-      find "$dest/lib" -name '*.dylib' -exec codesign --force --sign - {} \; >/dev/null 2>&1 || true
-    else
-      cp -R "$HARNESS_PG_PREFIX/lib/." "$dest/lib/"
-    fi
-    cp -R "$HARNESS_PG_PREFIX/share/." "$dest/share/"
-  elif [[ "${HARNESS_REQUIRE_LOCAL:-0}" == "1" ]]; then
-    echo "HARNESS_PG_PREFIX is required for a local-capable release" >&2
-    exit 1
-  else
-    echo "warning: HARNESS_PG_PREFIX not set; local runtime will not start" >&2
-  fi
 }
 cd "$(dirname "$0")"
 out=build/bin

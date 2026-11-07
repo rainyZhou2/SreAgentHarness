@@ -3,6 +3,7 @@ package localruntime
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,32 +13,25 @@ import (
 )
 
 // startCore runs the existing harness in combined API+worker+scheduler mode.
-func (m *Manager) startCore(ctx context.Context, dbURL, tokenFile string) (string, error) {
+func (m *Manager) startCore(ctx context.Context, tokenFile string) (string, error) {
 	port, err := freePort()
 	if err != nil {
 		return "", err
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	values := map[string]string{
-		"HARNESS_DATABASE_URL":            dbURL,
-		"HARNESS_HTTP_ADDR":               addr,
-		"HARNESS_AUTH_MODE":               "token",
-		"HARNESS_AUTH_TOKENS_FILE":        tokenFile,
-		"HARNESS_DEFAULT_TENANT":          "local",
-		"HARNESS_DEFAULT_PROFILE":         "sre-diagnosis",
-		"HARNESS_DEFAULT_PROFILE_VERSION": "7",
-		"HARNESS_ARTIFACT_DIR":            filepath.Join(m.cfg.DataDir, "artifacts"),
-		"HARNESS_AUTO_MIGRATE":            "true",
-		"HARNESS_WORKER_MAX_INFLIGHT":     "8",
-		"HARNESS_SSE_MODE":                "poll",
-		"HARNESS_NATS_URL":                "",
+		"HARNESS_LOCAL_DATA":       m.cfg.DataDir,
+		"HARNESS_LOCAL_DB":         filepath.Join(m.cfg.DataDir, "harness.db"),
+		"HARNESS_HTTP_ADDR":        addr,
+		"HARNESS_AUTH_TOKENS_FILE": tokenFile,
+		"HARNESS_CONFIG":           "",
 	}
 	for k, v := range m.cfg.ModelEnv {
 		if v != "" {
 			values[k] = v
 		}
 	}
-	cmd := exec.CommandContext(ctx, m.cfg.HarnessBin, "all")
+	cmd := exec.CommandContext(ctx, m.cfg.HarnessBin)
 	cmd.Env = mergeEnv(os.Environ(), values)
 	cmd.Stdout = m.logWriter("core.log")
 	cmd.Stderr = cmd.Stdout
@@ -53,6 +47,15 @@ func (m *Manager) startCore(ctx context.Context, dbURL, tokenFile string) (strin
 		return "", err
 	}
 	return base, nil
+}
+
+func freePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
 func (m *Manager) stopCore() error {

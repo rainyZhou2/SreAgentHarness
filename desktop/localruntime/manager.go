@@ -1,6 +1,6 @@
 // Package localruntime supervises the processes that make the desktop client
-// self-contained: a loopback PostgreSQL instance and the harness core. The UI
-// still talks to the core over the normal /v1 HTTP/SSE API.
+// self-contained: a SQLite-backed harness core. The UI still talks to the
+// core over the normal /v1 HTTP/SSE API.
 package localruntime
 
 import (
@@ -18,10 +18,6 @@ import (
 // Config locates the bundled executables and the per-user data directory.
 type Config struct {
 	HarnessBin     string
-	PostgresBin    string
-	InitDBBin      string
-	PgLibDir       string
-	PgShareDir     string
 	DataDir        string
 	ModelEnv       map[string]string
 	StartupTimeout time.Duration
@@ -42,8 +38,6 @@ type Manager struct {
 	mu      sync.Mutex
 	status  string
 	core    *exec.Cmd
-	pg      *exec.Cmd
-	pgPort  int
 	token   string
 	baseURL string
 	logs    map[string]*os.File
@@ -51,8 +45,8 @@ type Manager struct {
 
 // New validates the configuration and creates the private data directory.
 func New(cfg Config) (*Manager, error) {
-	if cfg.HarnessBin == "" || cfg.PostgresBin == "" || cfg.InitDBBin == "" || cfg.DataDir == "" {
-		return nil, errors.New("local runtime needs harness/postgres/initdb binaries and a data dir")
+	if cfg.HarnessBin == "" || cfg.DataDir == "" {
+		return nil, errors.New("local runtime needs a harness binary and a data dir")
 	}
 	if cfg.StartupTimeout <= 0 {
 		cfg.StartupTimeout = 90 * time.Second
@@ -70,7 +64,7 @@ func (m *Manager) Status() string {
 	return m.status
 }
 
-// Start boots PostgreSQL, writes a fresh local token and starts the core.
+// Start writes a fresh local token and starts the SQLite-backed core.
 func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 	m.mu.Lock()
 	if m.status == "running" || m.status == "starting" {
@@ -80,20 +74,13 @@ func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 	m.status = "starting"
 	m.mu.Unlock()
 
-	dbURL, err := m.startPostgres(ctx)
-	if err != nil {
-		m.setStatus("failed")
-		return Endpoint{}, err
-	}
 	plain, data, err := newToken()
 	if err != nil {
-		_ = m.stopPostgres()
 		m.setStatus("failed")
 		return Endpoint{}, err
 	}
 	tokenFile := m.runtimeFile("tokens.json")
 	if err := writeTokenFile(tokenFile, data); err != nil {
-		_ = m.stopPostgres()
 		m.setStatus("failed")
 		return Endpoint{}, err
 	}
@@ -101,10 +88,9 @@ func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 	m.token = plain
 	m.mu.Unlock()
 
-	base, err := m.startCore(ctx, dbURL, tokenFile)
+	base, err := m.startCore(ctx, tokenFile)
 	if err != nil {
 		_ = os.Remove(tokenFile)
-		_ = m.stopPostgres()
 		m.setStatus("failed")
 		return Endpoint{}, err
 	}
@@ -119,7 +105,7 @@ func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 	return Endpoint{URL: base, Token: plain, PID: pid}, nil
 }
 
-// Stop terminates the core first, then PostgreSQL. It is safe to call twice.
+// Stop terminates the core. It is safe to call twice.
 func (m *Manager) Stop(_ context.Context) error {
 	m.mu.Lock()
 	if m.status == "stopped" || m.status == "stopping" {
@@ -130,11 +116,10 @@ func (m *Manager) Stop(_ context.Context) error {
 	m.mu.Unlock()
 
 	_ = m.stopCore()
-	_ = m.stopPostgres()
 	_ = os.Remove(m.runtimeFile("tokens.json"))
 	m.closeLogs()
 	m.mu.Lock()
-	m.token, m.baseURL, m.pgPort = "", "", 0
+	m.token, m.baseURL = "", ""
 	m.status = "stopped"
 	m.mu.Unlock()
 	return nil
