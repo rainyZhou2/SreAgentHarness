@@ -101,7 +101,7 @@ The default `dev` authentication mode only listens on loopback addresses.
 
 ## Desktop client
 
-[`desktop/`](desktop/README.md) is a native Wails client. It starts in **Local runtime** mode: the app launches a bundled SQLite-backed harness core, writes execution events to an append-only JSONL log, and keeps SQLite only as the query index. No Docker, PostgreSQL, NATS or terminal is needed. Switch to **Team server** to use a shared harness. Sessions, streamed reasoning, tool-call cards, inline approvals, an approval inbox, and model / MCP / HTTP tool / skill management are the same in both modes; local mode implements the same `/v1/extensions` and command APIs.
+[`desktop/`](desktop/README.md) is a native Wails client. It starts in **Local runtime** mode: the app launches a bundled SQLite-backed harness core, writes execution events to an append-only JSONL log, and keeps SQLite only as the query index. No Docker, PostgreSQL, NATS or terminal is needed. Switch to **Team server** to use a shared harness. Sessions, streamed reasoning, tool-call cards, inline approvals, an approval inbox, and model / MCP / HTTP tool / skill management are the same in both modes; local mode implements the same `/v1/extensions`, command, checkpoint/fork, memory, graph and evaluation APIs. Commands are version-guarded and idempotent across restarts, cancelling a flow cascades to child runs, and compaction summaries, memory hits, checkpoints and step output revisions are persisted in the local store.
 
 ```bash
 desktop/build.sh run
