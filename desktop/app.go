@@ -15,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"go-sre-harness/desktop/harness"
+	"go-sre-harness/desktop/localruntime"
 )
 
 // Settings is the saved connection. The bearer token is kept in memory only
@@ -22,6 +23,14 @@ import (
 type Settings struct {
 	ServerURL string              `json:"server_url"`
 	Creds     harness.Credentials `json:"creds"`
+	// Mode is "local" (supervised local runtime) or "remote" (team server).
+	Mode string `json:"mode,omitempty"`
+	// LocalDataDir is the per-user directory for PostgreSQL, artifacts and logs.
+	LocalDataDir string `json:"local_data_dir,omitempty"`
+	// Optional local model selection. The key is kept in the OS keychain.
+	ModelProvider string `json:"model_provider,omitempty"`
+	ModelBaseURL  string `json:"model_base_url,omitempty"`
+	ModelName     string `json:"model_name,omitempty"`
 	// Language of the interface, notifications and exports: "en" or "zh"
 	// (empty: the UI follows the system language).
 	Language string `json:"language,omitempty"`
@@ -57,9 +66,14 @@ type App struct {
 	// native is false in browser preview mode (no Wails runtime).
 	native    bool
 	inboxKick chan struct{}
+	// local supervises the bundled PostgreSQL + harness core in local mode.
+	local   LocalRuntime
+	secrets localruntime.SecretStore
 }
 
-func NewApp() *App { return &App{} }
+func NewApp() *App {
+	return &App{secrets: localruntime.DefaultSecretStore()}
+}
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -68,19 +82,27 @@ func (a *App) startup(ctx context.Context) {
 	if a.emit == nil {
 		a.emit = func(name string, data any) { runtime.EventsEmit(ctx, name, data) }
 	}
-	a.settings = Settings{ServerURL: "http://127.0.0.1:8080",
-		Creds: harness.Credentials{Mode: "dev", Tenant: "tenant-a", Actor: "alice", Roles: "operator,approver"}}
+	a.settings = defaultSettings()
 	if b, err := os.ReadFile(settingsPath()); err == nil {
 		_ = json.Unmarshal(b, &a.settings)
 	}
+	if a.settings.Mode == "" {
+		a.settings.Mode = "local"
+	}
+	if a.settings.LocalDataDir == "" {
+		a.settings.LocalDataDir = defaultLocalDataDir()
+	}
 	a.settings.Creds.Token = ""
-	if a.settings.Creds.Mode == "dev" && !a.settings.SignedOut {
+	if a.settings.Mode != "local" && a.settings.Creds.Mode == "dev" && !a.settings.SignedOut {
 		a.client, _ = harness.New(a.settings.ServerURL, a.settings.Creds)
 	}
 	go a.watchApprovals()
 }
 
-func (a *App) shutdown(context.Context) { a.UnwatchRun() }
+func (a *App) shutdown(context.Context) {
+	a.UnwatchRun()
+	a.stopLocal()
+}
 
 func settingsPath() string {
 	dir, err := os.UserConfigDir()
@@ -119,11 +141,19 @@ func (a *App) Connect(s Settings) (map[string]any, error) {
 		return nil, fmt.Errorf("cannot sign in: %w", err)
 	}
 	a.UnwatchRun()
+	a.stopLocal()
 	a.mu.Lock()
 	// The connection dialog carries only the connection; keep the rest.
 	if s.Language == "" {
 		s.Language = a.settings.Language
 	}
+	if s.LocalDataDir == "" {
+		s.LocalDataDir = a.settings.LocalDataDir
+	}
+	if s.ModelProvider == "" {
+		s.ModelProvider, s.ModelBaseURL, s.ModelName = a.settings.ModelProvider, a.settings.ModelBaseURL, a.settings.ModelName
+	}
+	s.Mode = "remote"
 	s.Preferences, s.SignedOut = a.settings.Preferences, false
 	a.client, a.settings = c, s
 	a.mu.Unlock()

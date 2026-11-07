@@ -266,6 +266,7 @@ function mdFallback(text) {
 async function openConnection() {
   const s = await api().GetSettings();
   const f = $("#form-conn");
+  f.connection_mode.value = s.mode || "local";
   f.server_url.value = s.server_url || "http://127.0.0.1:8080";
   const c = s.creds || {};
   f.mode.value = c.mode || "dev";
@@ -275,26 +276,52 @@ async function openConnection() {
   f.token.value = "";
   $("#conn-error").hidden = true;
   syncMode();
+  try {
+    const st = await api().LocalStatus();
+    $("#local-status").textContent = st && st.status ? t("Local runtime status: {status}", { status: st.status }) : "";
+  } catch { /* status is optional */ }
   $("#dlg-conn").showModal();
-  f.server_url.focus();
-  f.server_url.select();
+  if (f.connection_mode.value === "remote") { f.server_url.focus(); f.server_url.select(); }
 }
 function syncMode() {
-  const mode = $("#form-conn").mode.value;
+  const f = $("#form-conn");
+  const connection = f.connection_mode.value;
+  document.querySelectorAll("#form-conn [data-connection]").forEach((el) => (el.hidden = el.dataset.connection !== connection));
+  const mode = f.mode.value;
   document.querySelectorAll("#form-conn [data-mode]").forEach((el) => (el.hidden = el.dataset.mode !== mode));
   document.querySelectorAll("#form-conn .seg label").forEach((el) => {
     const input = el.querySelector("input");
     el.classList.toggle("on", !!(input && input.checked));
   });
+  const submit = $("#conn-submit");
+  if (submit) {
+    submit.dataset.i18n = connection === "local" ? "Start and connect" : "Connect";
+    submit.textContent = t(submit.dataset.i18n);
+  }
+}
+async function afterConnected() {
+  showWho(await api().Whoami());
+  st.settings = await api().GetSettings().catch(() => st.settings);
+  $("#dlg-conn").close();
+  state.runs.clear();
+  newChat();
+  await loadSessions();
+  loadModelHint();
 }
 async function submitConnection(ev) {
   ev.preventDefault();
   const f = ev.target;
-  const settings = {
-    server_url: f.server_url.value.trim(),
-    creds: { mode: f.mode.value, tenant: f.tenant.value.trim(), actor: f.actor.value.trim(), roles: f.roles.value.trim(), token: f.token.value },
-  };
   try {
+    if (f.connection_mode.value === "local") {
+      toast(t("Local runtime is starting…"));
+      await api().ConnectLocal();
+      await afterConnected();
+      return;
+    }
+    const settings = {
+      server_url: f.server_url.value.trim(),
+      creds: { mode: f.mode.value, tenant: f.tenant.value.trim(), actor: f.actor.value.trim(), roles: f.roles.value.trim(), token: f.token.value },
+    };
     showWho(await api().Connect(settings));
     $("#dlg-conn").close();
     state.runs.clear();
@@ -2630,8 +2657,10 @@ function renderConnection() {
       who ? row(t("Roles"), null, h("span", { class: "mono" }, (who.roles || []).join(", ") || "—")) : null,
       who ? row(t("Authentication"), null, h("span", { class: "mono" }, who.method || c.mode || "—")) : null),
     group(t("Server"),
+      row(t("Connection mode"), null, h("span", {}, t(s.mode === "remote" ? "Team server" : "Local runtime"))),
       row(t("Server URL"), null, h("span", { class: "mono" }, s.server_url || "—")),
-      row(t("Sign-in method"), null, h("span", {}, t(c.mode === "bearer" ? "Bearer token" : "Development headers")))),
+      s.mode !== "remote" ? row(t("Local data directory"), null, h("span", { class: "mono" }, s.local_data_dir || "—")) : null,
+      row(t("Sign-in method"), null, h("span", {}, t(c.mode === "bearer" ? (s.mode === "local" ? "Local token" : "Bearer token") : "Development headers")))),
     h("div", { class: "set-actions" },
       h("button", { class: "btn", onclick: openConnection }, t("Edit connection…")),
       who ? h("button", { class: "btn danger", onclick: signOut }, t("Sign out")) : null));
@@ -2882,6 +2911,19 @@ async function boot() {
   applyStatic();
   bind();
   render();
+  if (saved.mode === "local" && !saved.signed_out) {
+    toast(t("Local runtime is starting…"));
+    try {
+      await api().ConnectLocal();
+      showWho(await api().Whoami());
+      st.settings = await api().GetSettings().catch(() => st.settings);
+      await loadSessions();
+      loadModelHint();
+      return;
+    } catch (e) {
+      toast(t("Local runtime failed: {err}", { err: errText(e) }), true);
+    }
+  }
   if (await api().Connected()) {
     try {
       showWho(await api().Whoami());
