@@ -65,6 +65,9 @@ The app starts in **Local runtime** mode by default:
     logs/
   ```
 - execution events are written to JSONL first; SQLite only stores byte-range indexes. `RebuildEventIndex` can rebuild the index from the JSONL files.
+- **Models**, **MCP servers**, **HTTP tools**, **skills** and **tool toggles** use the same `/v1/extensions` API and settings UI as team mode. Specs keep the same provider/model/base URL/API key fields; they are stored in the local SQLite database.
+- Local mode supports the full command set: pause/resume/cancel, approve/reject, provide input, retry, resolve unknown, replace pending input, override result, inject evidence and migrate profile.
+- stdio MCP servers stay disabled unless `HARNESS_MCP_ALLOW_STDIO=true`; loopback destinations are allowed by default, additional networks use `HARNESS_EXTENSIONS_ALLOW_NETWORKS`.
 
 Switch to **Team server** in Connection to use a shared harness instead. Team mode accepts development headers (local development only) or a bearer token. Settings are saved to `<user config dir>/sre-harness-desktop/settings.json` (mode 0600); tokens are kept in memory only.
 
