@@ -85,7 +85,8 @@ func (s *Server) prepareCommand(r *http.Request, id identity, req *domain.Comman
 		}
 		// Same decision path as the kernel: profile allowlist, risk
 		// overrides and approval rules apply to replaced inputs too.
-		pd, desc := rules.Decide(s.Policy, call.Name, reg, call.Args)
+		pd, desc := rules.DecideCall(r.Context(), s.Policy, profile.Call{TenantID: id.tenant, RunID: r.PathValue("run_id"),
+			Name: call.Name, Args: call.Args}, reg)
 		in.PolicyDecision, _ = json.Marshal(pd)
 		switch pd.Verdict {
 		case policy.Deny:

@@ -22,6 +22,40 @@ plugins:
   # for every gap and reconnect.
   event_bus: {name: nats, config: {url: "${HARNESS_NATS_URL}", stream: HARNESS_EVENTS, max_age: 1h, max_bytes: 2147483648}}
   policy: {name: default, config: {environment: production, approval_ttl: 30m}}
+  # Rule-based policy: the most restrictive matching rule decides; without a
+  # match the risk-class engine decides; the framework floor (R2 approval,
+  # R3 deny, unregistered tools and missing targets denied) always applies.
+  # policy:
+  #   name: rules
+  #   config:
+  #     default_environment: production
+  #     approval_ttl: 30m
+  #     environments:
+  #       - {name: staging, targets: ["*-staging", "staging/*"]}
+  #     rules:
+  #       - {name: change-freeze, effect: deny, reason: "weekend freeze",
+  #          match: {risks: [R1, R2], environments: [production],
+  #                  windows: [{days: [fri], start: "18:00", end: "23:59", timezone: "Asia/Shanghai"}]}}
+  #       - {name: wide-blast-radius, effect: require_approval, approvals: 2,
+  #          match: {blast_radius: {arg: hosts, over: 5}}}
+  #       - {name: restart-storm, effect: deny,
+  #          match: {labels: {action: restart}, rate: {window: 10m, over: 3, per: target}}}
+  #       - {name: sandbox-free, effect: allow, match: {environments: [staging], risks: [R1]}}
+
+  # Environment facts gathered once per run and pinned (untrusted data).
+  context_provider: []
+  # context_provider:
+  #   - {name: dependencies}
+  #   - name: static
+  #     instance: owners
+  #     config: {facts: [{services: ["checkout*"], kind: owner, summary: "team payments, #pay-oncall"}]}
+  #   - name: http
+  #     instance: changes
+  #     config: {http: {url: "http://changes.internal/api/recent?service=${service}&since=${start}",
+  #              headers: {Authorization: "Bearer ${env:CHANGES_TOKEN}"}, per_service: true, kind: change}}
+  #   - name: tool
+  #     instance: deploys
+  #     config: {tool: {tool: "k8s.rollout_history", args: {service: "${service}"}, per_service: true, kind: change}}
 
   model_provider:                        # route preference follows this order
     - {name: anthropic, config: {api_key: "${ANTHROPIC_API_KEY}"}}
@@ -72,3 +106,42 @@ plugins:
   event_sink: []
   # event_sink:
   #   - {name: webhook, instance: slack-approvals, config: {url: "${SLACK_WEBHOOK_URL}", format: slack, types: ["approval.requested", "run.failed"]}}
+
+# Inbound triggers: POST /v1/triggers/{name} (operator role) and schedules.
+# Expressions use the flow DSL over payload, item, headers, trigger and now.
+triggers: []
+# triggers:
+#   - name: alertmanager
+#     items: payload.alerts
+#     filter: "item.labels.severity != 'info'"
+#     resolve: "item.status == 'resolved'"      # attach to the open run, never start one
+#     goal: "Investigate ${item.labels.alertname} on ${item.labels.service}: ${item.annotations.summary}"
+#     fingerprint: "${item.fingerprint}"
+#     services: ["${item.labels.service}"]
+#     labels: {severity: "${item.labels.severity}"}
+#     window: {start: "${item.startsAt}", lookback: 30m}
+#     dedup: {window: 30m, extend_on_hit: true}
+#     rate_limit: {per_minute: 20, burst: 40}
+#     secret_env: ALERTMANAGER_HMAC_KEY         # X-Harness-Signature: sha256=<hex>
+#   - name: daily-review
+#     tenant: default
+#     goal: "Review error budgets and open alerts for the last 24h"
+#     window: {lookback: 24h}
+#     schedule: {interval: 24h}
+
+# Operator metadata for tools by name, whatever their source (native, MCP,
+# HTTP, tenant extensions).
+tool_overlays: {}
+# tool_overlays:
+#   k8s.rollout_restart:
+#     labels: {action: restart}
+#     lifecycle:
+#       verify: {tool: k8s.rollout_status, args: {deployment: "${args.deployment}", namespace: "${args.namespace}"}}
+#       expect: "output.ready == true"
+#       attempts: 6
+#       interval: 20s
+#       delay: 10s
+#       compensate: {tool: k8s.rollout_undo, args: {deployment: "${args.deployment}", namespace: "${args.namespace}"}}
+#   prometheus.query_range:
+#     time_args: {start: start, end: end, format: rfc3339, lookback: 1h}
+#     max_inline_bytes: 32768

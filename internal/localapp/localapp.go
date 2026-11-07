@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/envctx"
 	"go-sre-harness/internal/eval"
 	"go-sre-harness/internal/extensions"
 	"go-sre-harness/internal/gateway"
@@ -35,6 +37,8 @@ import (
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/tools"
+	"go-sre-harness/internal/tools/artifactq"
+	"go-sre-harness/internal/trigger"
 	"go-sre-harness/plugins/profiles"
 )
 
@@ -47,6 +51,9 @@ type Config struct {
 	TokenFile string
 	Log       *slog.Logger
 	MaxRuns   int
+	// ConfigFile is the optional JSON configuration (default
+	// <DataDir>/harness.local.json, or HARNESS_LOCAL_CONFIG).
+	ConfigFile string
 }
 
 // Run starts the local harness and blocks until ctx is cancelled.
@@ -67,6 +74,19 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.MaxRuns = 8
 	}
 
+	cfgPath, explicit := cfg.ConfigFile, cfg.ConfigFile != ""
+	if !explicit {
+		if v := os.Getenv("HARNESS_LOCAL_CONFIG"); v != "" {
+			cfgPath, explicit = v, true
+		} else if cfg.DataDir != "" {
+			cfgPath = filepath.Join(cfg.DataDir, "harness.local.json")
+		}
+	}
+	local, err := loadLocalFile(cfgPath, explicit)
+	if err != nil {
+		return err
+	}
+
 	store, err := localstore.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open local store: %w", err)
@@ -82,7 +102,19 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	reg := tools.NewRegistry(tools.DemoTools()...)
-	pol := policy.Default()
+	reg.Register(artifactq.New(arts))
+	if len(local.ToolOverlays) > 0 {
+		reg.SetOverlays(local.ToolOverlays)
+	}
+	var pol policy.Gate = policy.Default()
+	if local.Policy != nil {
+		engine, err := policy.NewRuleEngine(*local.Policy, store)
+		if err != nil {
+			return fmt.Errorf("local config policy: %w", err)
+		}
+		pol = engine
+	}
+	pol = policy.Guarded(pol)
 	rules := &profile.RulesFor{Loader: store}
 	metrics := obs.NewMetrics()
 
@@ -117,17 +149,40 @@ func Run(ctx context.Context, cfg Config) error {
 			// run and must not be charged to the tenant.
 			return &cognitive.LLM{Gateway: offlineGW, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}, nil
 		}}
+	router, err := planner.NewRouter(orPatterns(local.PlannerReactPatterns, planner.ParsePatterns(os.Getenv("HARNESS_PLANNER_REACT_PATTERNS"), planner.DefaultReactPatterns)),
+		orPatterns(local.PlannerFlowPatterns, planner.ParsePatterns(os.Getenv("HARNESS_PLANNER_FLOW_PATTERNS"), planner.DefaultFlowPatterns)))
+	if err != nil {
+		return err
+	}
+	var gatherer kernel.ContextGatherer
+	if len(local.ContextProviders) > 0 {
+		deps := envctx.Deps{Registry: reg, Dependencies: store, Network: extensions.NetPolicy{Allow: networks}, Timeout: 5 * time.Second}
+		var providers []envctx.Provider
+		for i, pc := range local.ContextProviders {
+			p, err := envctx.Build(pc, deps)
+			if err != nil {
+				return fmt.Errorf("local config context_providers[%d]: %w", i, err)
+			}
+			providers = append(providers, p)
+		}
+		gatherer = &envctx.Gatherer{Providers: providers, Log: cfg.Log.With("component", "envctx")}
+	}
+	offload := local.OutputOffloadBytes
+	if offload == 0 {
+		offload = kernel.DefaultOffloadBytes
+	}
 	plannerSvc := &planner.Service{Gateway: modelGW, Artifacts: arts, Profiles: store,
 		Log: cfg.Log.With("component", "planner"), Observer: metrics,
 		Config: planner.Config{ModelAlias: "sre-reasoning", MaxRepairs: 2, MaxNodes: 20,
 			MaxOutputTokens: 8000, MaxChildren: 8, MaxTotalRuns: 24, MaxDepth: 3, MaxIterations: 8,
 			MaxModelCalls: 40, MaxEstimatedTokens: 400000, ApprovalMode: "auto", ApprovalApprovers: 1,
-			FallbackProfileID: "sre-diagnosis", FallbackVersion: 8, FallbackReact: true}}
+			FallbackProfileID: "sre-diagnosis", FallbackVersion: 8, FallbackReact: true, Router: router}}
 
 	worker := kernel.NewWorker(kernel.Config{ID: "local-worker", LeaseTTL: 30 * time.Second,
 		StepTimeout: 2 * time.Minute, Checkpoints: true, Rules: rules, Planner: plannerSvc,
 		Memory: retriever, CapabilityMap: graphSvc,
-		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics},
+		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics,
+		Context: gatherer, OutputOffloadBytes: offload},
 		store, arts, strategy, reg, pol, cfg.Log)
 	pool := kernel.NewPool(worker, cfg.MaxRuns)
 
@@ -153,6 +208,13 @@ func Run(ctx context.Context, cfg Config) error {
 		}})
 	server.Extend(&api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server})
 	server.Extend(&api.EvalAPI{Service: evalSvc, Store: store, Server: server})
+	var triggers *trigger.Service
+	if len(local.Triggers) > 0 {
+		if triggers, err = trigger.New(local.Triggers, server, store, cfg.Log.With("component", "trigger")); err != nil {
+			return fmt.Errorf("local config triggers: %w", err)
+		}
+		server.Extend(&trigger.API{Service: triggers})
+	}
 	if err := extRT.Sync(ctx); err != nil {
 		cfg.Log.Warn("initial extensions sync", "err", err)
 	}
@@ -174,6 +236,13 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 	go runLoop(ctx, store, pool, cfg.Log)
 	go reconcileLoop(ctx, store, graphSvc, cfg.Log)
+	if triggers != nil {
+		go func() {
+			if err := triggers.RunSchedules(ctx); err != nil && ctx.Err() == nil {
+				cfg.Log.Warn("trigger schedules", "err", err)
+			}
+		}()
+	}
 
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -214,6 +283,9 @@ func reconcileLoop(ctx context.Context, store *localstore.Store, graphSvc *graph
 			}
 			if err := graphSvc.Sync(ctx, tenant); err != nil {
 				log.Warn("graph sync", "err", err)
+			}
+			if _, err := store.PurgeTriggerClaims(ctx, time.Now(), 500); err != nil {
+				log.Warn("purge trigger claims", "err", err)
 			}
 		}
 	}
@@ -262,6 +334,14 @@ func buildGateway(arts *artifact.FS, ledger gateway.Ledger, log *slog.Logger) (*
 	providers = append(providers, cognitive.ScriptedModel(cognitive.RuleBased{}))
 	pol := gateway.DefaultPolicy(anthropicEnabled, openaiEnabled, openaiModel)
 	return gateway.New(pol, ledger, arts, gateway.Admission{}, log, providers...), nil
+}
+
+// orPatterns prefers patterns from the local file over the environment.
+func orPatterns(fromFile, fromEnv []string) []string {
+	if len(fromFile) > 0 {
+		return fromFile
+	}
+	return fromEnv
 }
 
 func FirstNonEmpty(v ...string) string {

@@ -217,7 +217,8 @@ func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("session_id")
-	data, _ := json.Marshal(map[string]string{"goal": body.Text})
+	// The turn input pins the time the turn arrived: prompts use it as "now".
+	data, _ := json.Marshal(goalDoc{Goal: body.Text, Context: &domain.GoalContext{ReceivedAt: time.Now().UTC(), Source: "session"}})
 	ref, hash, err := s.Artifacts.Put(r.Context(), id.tenant, "turn-input", data)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "artifact_store_unavailable", "retry later")

@@ -7,6 +7,7 @@ import (
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
+	"go-sre-harness/internal/envctx"
 	"go-sre-harness/internal/eval"
 	"go-sre-harness/internal/eventbus"
 	"go-sre-harness/internal/eventsink"
@@ -24,7 +25,7 @@ import (
 //
 //	telemetry → artifact_store → tools → profile_source → policy →
 //	stream_bus → broker → event_bus → route_policy → model_provider (→ Host.Gateway) →
-//	embedder → memory_retriever → context_assembler → strategy → compactor →
+//	embedder → memory_retriever → context_provider → context_assembler → strategy → compactor →
 //	grader → event_sink → job → authenticator → api
 var (
 	Telemetry       = NewKind[TelemetryExporter]("telemetry", true, "tracing/metrics exporters; may also implement kernel.Observer")
@@ -48,6 +49,7 @@ var (
 	ContextAssembler = NewKind[cognitive.ContextAssembler]("context_assembler", false, "renders reasoning input into model requests + prompt manifests; trust rules always apply")
 	Compactor        = NewKind[kernel.Compactor]("compactor", false, "summarizes old observations; the kernel always appends safety facts")
 	EventSink        = NewKind[eventsink.Sink]("event_sink", true, "at-least-once delivery of committed run events (webhooks, chat, paging)")
+	ContextProvider  = NewKind[envctx.Provider]("context_provider", true, "environment facts (topology, ownership, on-call, recent changes) pinned per run as untrusted data")
 )
 
 // TelemetryExporter is a telemetry plugin. Implement kernel.Observer as

@@ -22,6 +22,7 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/envctx"
 	"go-sre-harness/internal/eval"
 	"go-sre-harness/internal/eventsink"
 	"go-sre-harness/internal/extensions"
@@ -36,6 +37,8 @@ import (
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/stream"
 	"go-sre-harness/internal/tools"
+	"go-sre-harness/internal/tools/artifactq"
+	"go-sre-harness/internal/trigger"
 	"go-sre-harness/migrations"
 )
 
@@ -136,6 +139,9 @@ type App struct {
 	worker  *kernel.Worker
 	sinks   []*eventsink.Dispatcher
 	metrics *obs.Metrics
+
+	triggerCfgs []trigger.Config
+	triggers    *trigger.Service
 }
 
 // Build assembles the core and all enabled plugins without starting anything.
@@ -218,6 +224,14 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			}
 			h.Tools.Register(t)
 		}
+	}
+	// framework tools: reading offloaded tool results
+	if _, dup := h.Tools.Lookup(artifactq.Name); dup {
+		return nil, fmt.Errorf("tool %q is reserved for the harness", artifactq.Name)
+	}
+	h.Tools.Register(artifactq.New(h.Artifacts))
+	if err := applyToolOverlays(h.Tools, cfgFile.ToolOverlays, log); err != nil {
+		return nil, err
 	}
 	// tenant extensions: MCP servers, HTTP tools and skills managed through
 	// /v1/extensions are loaded per tenant and overlay the global registry.
@@ -324,6 +338,18 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if err != nil {
 		return nil, err
 	}
+	// environment context: facts pinned per run
+	ctxProviders, err := plugin.BuildAll(ctx, plugin.ContextProvider, h, specs["context_provider"])
+	if err != nil {
+		return nil, err
+	}
+	var gatherer kernel.ContextGatherer
+	if len(ctxProviders) > 0 {
+		gatherer = &envctx.Gatherer{Providers: ctxProviders,
+			Timeout:  e.dur("HARNESS_CONTEXT_PROVIDER_TIMEOUT", 5*time.Second),
+			MaxFacts: e.int("HARNESS_CONTEXT_MAX_FACTS", 30),
+			Log:      log.With("component", "envctx")}
+	}
 	// strategies
 	strategies := map[string]plugin.StrategyBuilder{}
 	for _, s := range specs["strategy"].Enabled() {
@@ -382,6 +408,12 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	graphSvc := &graph.Service{Store: store, Tools: h.Tools, Extensions: h.Extensions,
 		Log: log.With("component", "graph")}
 	// planner: auto runs decide between ReAct and a generated flow
+	router, err := planner.NewRouter(
+		planner.ParsePatterns(e("HARNESS_PLANNER_REACT_PATTERNS"), planner.DefaultReactPatterns),
+		planner.ParsePatterns(e("HARNESS_PLANNER_FLOW_PATTERNS"), planner.DefaultFlowPatterns))
+	if err != nil {
+		return nil, err
+	}
 	plannerSvc := &planner.Service{
 		Gateway: h.Gateway, Artifacts: h.Artifacts, Profiles: store,
 		Log: log.With("component", "planner"), Observer: metrics,
@@ -402,28 +434,36 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			FallbackProfileID:  e.str("HARNESS_PLANNER_FALLBACK_PROFILE", h.Settings.DefaultProfile),
 			FallbackVersion:    e.int64("HARNESS_PLANNER_FALLBACK_VERSION", 8),
 			FallbackReact:      e.bool("HARNESS_PLANNER_FALLBACK_REACT", true),
+			Router:             router,
 		},
 	}
 	// worker
 	if mode == "all" || mode == "worker" {
 		hostname, _ := os.Hostname()
 		a.worker = kernel.NewWorker(kernel.Config{
-			ID:               e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
-			LeaseTTL:         e.dur("HARNESS_LEASE_TTL", 45*time.Second),
-			StepTimeout:      e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
-			Checkpoints:      e.bool("HARNESS_CHECKPOINTS", true),
-			Memory:           retriever,
-			Compactor:        compactor,
-			Rules:            rules,
-			Skills:           h.Extensions,
-			ToolToggles:      store,
-			CapabilityMap:    graphSvc,
-			Planner:          plannerSvc,
-			PlanApprovers:    e.int("HARNESS_PLAN_APPROVERS", 1),
-			PlanApprovalMode: e.str("HARNESS_PLAN_APPROVAL", "auto"),
-			Strategies:       &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
-			Observer:         observers,
+			ID:                 e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
+			LeaseTTL:           e.dur("HARNESS_LEASE_TTL", 45*time.Second),
+			StepTimeout:        e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
+			Checkpoints:        e.bool("HARNESS_CHECKPOINTS", true),
+			Memory:             retriever,
+			Compactor:          compactor,
+			Rules:              rules,
+			Skills:             h.Extensions,
+			ToolToggles:        store,
+			CapabilityMap:      graphSvc,
+			Planner:            plannerSvc,
+			PlanApprovers:      e.int("HARNESS_PLAN_APPROVERS", 1),
+			PlanApprovalMode:   e.str("HARNESS_PLAN_APPROVAL", "auto"),
+			Strategies:         &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
+			Observer:           observers,
+			Context:            gatherer,
+			OutputOffloadBytes: e.int("HARNESS_OUTPUT_OFFLOAD_BYTES", kernel.DefaultOffloadBytes),
 		}, store, h.Artifacts, defaultStrategy, h.Tools, h.Policy, log)
+	}
+	// triggers: webhooks are served by the API role, schedules fire in the
+	// scheduler role; deduplication is shared through the store.
+	if len(cfgFile.Triggers) > 0 && (mode == "all" || mode == "api" || mode == "scheduler") {
+		a.triggerCfgs = cfgFile.Triggers
 	}
 	// API
 	if mode == "all" || mode == "api" {
@@ -469,6 +509,12 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		for _, x := range exts {
 			srv.Extend(x)
 		}
+		if a.triggerCfgs != nil {
+			if a.triggers, err = trigger.New(a.triggerCfgs, srv, store, log.With("component", "trigger")); err != nil {
+				return nil, err
+			}
+			srv.Extend(&trigger.API{Service: a.triggers})
+		}
 		active := h.Active()
 		plugins := make([]graph.PluginInfo, 0, len(active))
 		for _, p := range active {
@@ -477,6 +523,17 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		graphSvc.Plugins = plugins
 		srv.Graph = graphSvc
 		a.Server, a.Handler = srv, srv.Handler()
+	}
+	if a.triggerCfgs != nil && a.triggers == nil {
+		// scheduler-only role: schedules start runs through an API core
+		// without listeners.
+		srv := &api.Server{Store: store, Artifacts: h.Artifacts, DefaultProfile: h.Settings.DefaultProfile,
+			DefaultVersion: h.Settings.DefaultProfileVersion, AutoProfileID: autoProfileID,
+			AutoProfileVersion: autoProfileVersion, Log: log, Tools: h.Tools, Policy: h.Policy, Rules: rules.Rules,
+			ResolveProfile: h.Eval.ResolveProfile}
+		if a.triggers, err = trigger.New(a.triggerCfgs, srv, store, log.With("component", "trigger")); err != nil {
+			return nil, err
+		}
 	}
 	log.Info("plugins active", "mode", mode, "plugins", h.Active(), "tools", len(h.Tools.Descriptors()))
 	return a, nil
@@ -514,6 +571,10 @@ func (a *App) Run(ctx context.Context) error {
 		g.Go(func() error { return (&scheduler.Publisher{Store: a.Store, Broker: a.broker, Log: log}).Run(ctx) })
 		for _, d := range a.sinks {
 			g.Go(func() error { return d.Run(ctx) })
+		}
+		if a.triggers != nil {
+			g.Go(func() error { return a.triggers.RunSchedules(ctx) })
+			g.Go(func() error { return purgeTriggerClaims(ctx, a.Store, log) })
 		}
 		g.Go(func() error {
 			return (&scheduler.Reconciler{Store: a.Store, Interval: e.dur("HARNESS_RECONCILE_INTERVAL", 10*time.Second), Log: log}).Run(ctx)

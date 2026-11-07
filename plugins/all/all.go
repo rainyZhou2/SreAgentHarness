@@ -5,6 +5,7 @@ package all
 import (
 	_ "go-sre-harness/plugins/apiext"
 	_ "go-sre-harness/plugins/authn"
+	_ "go-sre-harness/plugins/contextproviders"
 	_ "go-sre-harness/plugins/eventsinks"
 	_ "go-sre-harness/plugins/governance"
 	_ "go-sre-harness/plugins/memory"

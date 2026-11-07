@@ -226,6 +226,9 @@ type Lease struct {
 type ToolCall struct {
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args"`
+	// Followup is set only on steps the kernel plans after an action
+	// (verification, compensation); model decisions never carry it.
+	Followup *ToolFollowup `json:"followup,omitempty"`
 }
 
 type Hypothesis struct {
@@ -291,6 +294,11 @@ type Observation struct {
 	Content  json.RawMessage `json:"content,omitempty"`
 	Note     string          `json:"note,omitempty"`
 	TrustTag string          `json:"trust"` // T2 trusted API result, T4 untrusted text, ...
+	// Artifact is set when the full result was offloaded; Content then holds
+	// a structured summary and the handle.
+	Artifact *ObservationArtifact `json:"artifact,omitempty"`
+	// Verification is set on verify steps.
+	Verification *VerificationResult `json:"verification,omitempty"`
 }
 
 // Evidence injected by an operator through the inject_evidence command.

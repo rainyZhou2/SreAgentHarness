@@ -85,6 +85,7 @@ type Store struct {
 	candidates     map[string]evalCandidateRec
 	rollouts       map[string]evalRolloutRec
 	snapshots      map[string]string // context snapshot id -> run id
+	triggerClaims  map[string]triggerClaimRec
 }
 
 type attempt struct {
@@ -228,7 +229,7 @@ func Open(path string) (*Store, error) {
 		datasets: map[string]evalDatasetRec{}, evalCases: map[string]evalCaseRec{},
 		evalRuns: map[string]evalRunRec{}, candidates: map[string]evalCandidateRec{},
 		rollouts:  map[string]evalRolloutRec{},
-		snapshots: map[string]string{},
+		snapshots: map[string]string{}, triggerClaims: map[string]triggerClaimRec{},
 	}
 	if err := s.load(); err != nil {
 		db.Close()
@@ -594,6 +595,12 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 		if v.RunID != "" {
 			s.runByKey[id] = v.RunID
 		}
+	case "triggerclaim":
+		var v triggerClaimRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.triggerClaims[id] = v
 	}
 	return nil
 }

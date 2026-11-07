@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/flow"
@@ -113,7 +114,8 @@ func (r Rules) Restricted() bool { return r.restricted }
 
 // AllowsTool reports whether the profile lets the run use the tool.
 func (r Rules) AllowsTool(name string) bool {
-	if !r.restricted {
+	if !r.restricted || tools.IsBuiltin(name) {
+		// Framework tools (harness.*) only read the run's own artifacts.
 		return true
 	}
 	for _, p := range r.tools {
@@ -146,21 +148,38 @@ func (r Rules) Visible(ds []tools.Descriptor) []tools.Descriptor {
 	return out
 }
 
-// Decide evaluates a tool intent: allowlist → risk override → policy gate →
-// policy version pin → approval rules. desc is the registry descriptor (nil
-// for an unregistered tool); the returned descriptor carries the effective
-// risk and must be used to build and verify the ActionIntent.
+// Call identifies a tool intent for DecideCall.
+type Call struct {
+	TenantID string
+	RunID    string
+	Name     string
+	Args     json.RawMessage
+	// Now is the decision time (zero = time.Now()).
+	Now time.Time
+}
+
+// Decide evaluates a tool intent without request context (no tenant, so
+// rate-based policy rules fail closed). Prefer DecideCall.
 func (r Rules) Decide(g policy.Gate, name string, desc *tools.Descriptor, args json.RawMessage) (policy.Decision, *tools.Descriptor) {
-	if !r.AllowsTool(name) {
+	return r.DecideCall(context.Background(), g, Call{Name: name, Args: args}, desc)
+}
+
+// DecideCall evaluates a tool intent: allowlist → risk override → policy gate
+// → policy version pin → approval rules. desc is the registry descriptor
+// (nil for an unregistered tool); the returned descriptor carries the
+// effective risk and must be used to build and verify the ActionIntent.
+func (r Rules) DecideCall(ctx context.Context, g policy.Gate, c Call, desc *tools.Descriptor) (policy.Decision, *tools.Descriptor) {
+	if !r.AllowsTool(c.Name) {
 		pd := g.Evaluate(nil, "")
-		return policy.Decision{Verdict: policy.Deny, Reason: fmt.Sprintf("tool %q is not allowed by profile %s", name, r.Ref),
+		return policy.Decision{Verdict: policy.Deny, Reason: fmt.Sprintf("tool %q is not allowed by profile %s", c.Name, r.Ref),
 			PolicyVersion: pd.PolicyVersion}, nil
 	}
 	if desc == nil {
 		return g.Evaluate(nil, ""), nil
 	}
 	eff := r.Effective(*desc)
-	pd := g.Evaluate(&eff, tools.Target(eff, args))
+	pd := policy.EvaluateRequest(ctx, g, policy.Request{TenantID: c.TenantID, RunID: c.RunID, Tool: &eff,
+		Target: tools.Target(eff, c.Args), Args: c.Args, Now: c.Now})
 	if r.policyVersion != "" && pd.PolicyVersion != r.policyVersion {
 		return policy.Decision{Verdict: policy.Deny, Risk: eff.Risk, PolicyVersion: pd.PolicyVersion,
 			Reason: fmt.Sprintf("profile %s requires policy %s, active policy is %s", r.Ref, r.policyVersion, pd.PolicyVersion)}, &eff

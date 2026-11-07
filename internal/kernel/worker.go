@@ -24,6 +24,7 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/flow"
 	gw "go-sre-harness/internal/gateway"
+	"go-sre-harness/internal/outsum"
 	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
@@ -105,6 +106,14 @@ type Config struct {
 	// always or never. It is enforced here as well as in the planner so a
 	// planner bug cannot skip the gate.
 	PlanApprovalMode string
+	// Context gathers environment facts on a run's first reason step; they
+	// are pinned in run KV (optional).
+	Context ContextGatherer
+	// OutputOffloadBytes is the size above which tool results are stored as
+	// artifacts and summarized (0 = DefaultOffloadBytes, <0 = never).
+	OutputOffloadBytes int
+	// Summarizers summarize offloaded results (default outsum.Default()).
+	Summarizers outsum.Registry
 }
 
 // Planner produces a generated flow plan for an auto run.
@@ -192,6 +201,12 @@ func (c *Config) defaults() {
 	}
 	if c.PlanApprovalMode == "" {
 		c.PlanApprovalMode = "auto"
+	}
+	if c.OutputOffloadBytes == 0 {
+		c.OutputOffloadBytes = DefaultOffloadBytes
+	}
+	if len(c.Summarizers) == 0 {
+		c.Summarizers = outsum.Default()
 	}
 }
 
@@ -451,6 +466,9 @@ type goalDoc struct {
 	Goal   string         `json:"goal"`
 	Inputs map[string]any `json:"inputs,omitempty"`
 	Flow   *flowNodeGoal  `json:"flow,omitempty"`
+	// Context is the run context pinned at creation (time, window,
+	// services); nil for older goals.
+	Context *domain.GoalContext `json:"context,omitempty"`
 }
 
 // flowNodeGoal is stored in a child run's goal artifact. It carries the DSL
@@ -495,6 +513,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	if err != nil {
 		return domain.StepSuccess{}, err
 	}
+	factsWrite := w.gatherFacts(ctx, lease, &in)
 	canon, _ := json.Marshal(in)
 	contextHash := artifact.Hash(canon)
 	in.Call = cognitive.CallScope{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
@@ -551,6 +570,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return domain.StepSuccess{}, err
 	}
 	res := domain.StepSuccess{OutputRef: outRef, OutputHash: outHash, ArtifactKind: "decision", ContextHash: contextHash}
+	if factsWrite != nil {
+		res.KVWrites = append(res.KVWrites, *factsWrite)
+	}
 	res.Thoughts, res.Capabilities = reasonTrace(decision, in, lease.TenantID)
 	summary := map[string]any{"decision_kind": decision.Kind, "intent": decision.Intent, "reason_summary": truncate(decision.ReasonSummary, 500),
 		"hypotheses": len(decision.Hypotheses), "thoughts": len(res.Thoughts), "capabilities": len(res.Capabilities)}
@@ -581,10 +603,8 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return domain.StepSuccess{}, fmt.Errorf("tool %q is not visible to flow node %q", decision.Tool.Name, in.FlowNode.ID)
 	}
 	call := *decision.Tool
-	callRef, callHash, err := w.put(ctx, lease.TenantID, "tool-input", call)
-	if err != nil {
-		return domain.StepSuccess{}, err
-	}
+	// Follow-up markers are kernel-owned; a model decision never carries one.
+	call.Followup = nil
 	rules, err := w.rules(ctx, lease)
 	if err != nil {
 		return domain.StepSuccess{}, err
@@ -594,8 +614,16 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		d := t.Descriptor()
 		reg = &d
 	}
+	// Missing time-range arguments come from the run's pinned time context,
+	// so the approved call names a concrete range.
+	call.Args = fillTimeArgs(reg, call.Args, in.Time)
+	callRef, callHash, err := w.put(ctx, lease.TenantID, "tool-input", call)
+	if err != nil {
+		return domain.StepSuccess{}, err
+	}
 	// The model cannot influence the risk class; the profile can only tighten.
-	pd, desc := rules.Decide(w.policy, call.Name, reg, call.Args)
+	pd, desc := rules.DecideCall(ctx, w.policy, profile.Call{TenantID: lease.TenantID, RunID: lease.RunID,
+		Name: call.Name, Args: call.Args}, reg)
 	pdJSON := mustJSON(pd)
 	toolStep := domain.PlannedStep{Kind: domain.StepTool, Executor: "tool", InputRef: callRef, InputHash: callHash,
 		PolicyDecision: pdJSON}
@@ -642,6 +670,7 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		return in, err
 	}
 	in.Goal = g.Goal
+	in.Time = g.Context
 	if g.Flow != nil {
 		in.FlowNode = &cognitive.FlowNode{
 			ID: g.Flow.ID, Type: g.Flow.Type, Role: g.Flow.Role, Prompt: g.Flow.Prompt,
@@ -767,6 +796,16 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 			keys = append(keys, k)
 		}
 	}
+	if v, ok := versions[factsKey]; ok {
+		data, err := w.store.KVDataAt(ctx, domain.KVKey{TenantID: lease.TenantID, Scope: "run", OwnerID: lease.RunID, Name: factsKey}, v)
+		if err != nil {
+			return in, err
+		}
+		facts := []domain.ContextFact{}
+		if json.Unmarshal(data, &facts) == nil {
+			in.Facts = facts // pinned: never nil from here on
+		}
+	}
 	sort.Strings(keys)
 	for _, k := range keys {
 		data, err := w.store.KVDataAt(ctx, domain.KVKey{TenantID: lease.TenantID, Scope: "run", OwnerID: lease.RunID, Name: k}, versions[k])
@@ -831,6 +870,22 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	}
 	sideEffect := desc.Risk.HasSideEffects()
 
+	if call.Followup != nil && call.Followup.Role == domain.FollowupVerify {
+		select {
+		case w.toolSem <- struct{}{}:
+		case <-ctx.Done():
+			return domain.StepSuccess{}, ctx.Err()
+		}
+		vo, lc := w.executeVerify(ctx, lease, call, tool, desc)
+		<-w.toolSem
+		if ctx.Err() != nil {
+			// Deadline or cancellation: let the step machinery classify it.
+			return domain.StepSuccess{}, ctx.Err()
+		}
+		w.cfg.Observer.ObserveTool(desc.Source, string(desc.Risk), "verify_"+strings.ToLower(vo.verdict))
+		return w.verifyStepResult(ctx, lease, rules, call, desc, vo, lc, plan)
+	}
+
 	if sideEffect {
 		state, priorRef, err := w.store.PrepareEffect(ctx, lease, target)
 		if err != nil {
@@ -839,9 +894,21 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		if state == domain.EffectConfirmed {
 			// Already applied by an earlier attempt whose commit was lost: reuse.
 			thoughts, caps := toolTrace(call.Name, desc, true)
+			summary := map[string]any{"tool": call.Name, "reused": true}
+			var prior domain.Observation
+			if priorRef != "" && w.get(ctx, lease.TenantID, priorRef, &prior) == nil {
+				vstep, note, err := w.planVerify(ctx, lease, rules, desc, call, priorRef, prior.Content)
+				if err != nil {
+					return domain.StepSuccess{}, err
+				}
+				plan = withVerify(plan, vstep)
+				if note != "" {
+					summary["lifecycle"] = note
+				}
+			}
 			return domain.StepSuccess{OutputRef: priorRef, OutputHash: "", ArtifactKind: "observation",
 				Plan: plan, SideEffect: true, Thoughts: thoughts, Capabilities: caps,
-				Summary: mustJSON(map[string]any{"tool": call.Name, "reused": true})}, nil
+				Summary: mustJSON(summary)}, nil
 		}
 		st.dispatched = true
 	}
@@ -864,7 +931,7 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		span.SetStatus(codes.Error, "tool error")
 		span.End()
 		w.cfg.Observer.ObserveTool(desc.Source, string(desc.Risk), "error")
-		if !sideEffect && strings.HasPrefix(desc.Source, "mcp:") {
+		if !sideEffect && (strings.HasPrefix(desc.Source, "mcp:") || tools.IsBuiltin(desc.Name)) {
 			trust := desc.Trust
 			if trust == "" {
 				trust = "T4"
@@ -887,7 +954,15 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	if trust == "" {
 		trust = "T2"
 	}
-	obs := domain.Observation{StepSeq: lease.StepSeq, Tool: call.Name, Outcome: "ok", Content: out, TrustTag: trust}
+	obs, err := w.observe(ctx, lease.TenantID, desc,
+		domain.Observation{StepSeq: lease.StepSeq, Tool: call.Name, Outcome: "ok", TrustTag: trust}, out)
+	if err != nil {
+		if sideEffect {
+			// The effect happened but we cannot persist proof: treat as unknown.
+			return domain.StepSuccess{}, fmt.Errorf("%w: %v", domain.ErrUnknownEffect, err)
+		}
+		return domain.StepSuccess{}, err
+	}
 	ref, h, err := w.put(ctx, lease.TenantID, "observation", obs)
 	if err != nil {
 		if sideEffect {
@@ -896,9 +971,41 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		}
 		return domain.StepSuccess{}, err
 	}
+	summary := map[string]any{"tool": call.Name, "risk": desc.Risk}
+	if obs.Artifact != nil {
+		summary["offloaded_bytes"] = obs.Artifact.Bytes
+	}
+	if sideEffect {
+		// The effect is applied; planning the verification must not turn a
+		// committed effect into an unknown one, so failures only skip it.
+		vstep, note, verr := w.planVerify(ctx, lease, rules, desc, call, ref, out)
+		switch {
+		case verr != nil:
+			summary["lifecycle"] = "verification not planned: " + verr.Error()
+		case note != "":
+			summary["lifecycle"] = note
+		}
+		plan = withVerify(plan, vstep)
+	}
 	thoughts, caps := toolTrace(call.Name, desc, true)
 	return domain.StepSuccess{OutputRef: ref, OutputHash: h, ArtifactKind: "observation", SideEffect: sideEffect,
-		Plan: plan, Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(map[string]any{"tool": call.Name, "risk": desc.Risk})}, nil
+		Plan: plan, Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(summary)}, nil
+}
+
+// withVerify puts a planned verification first. A verification waiting for
+// approval stands alone: approving it runs it (it plans the next reason
+// step), rejecting it resumes reasoning. A denied one is recorded as skipped
+// ahead of the normal continuation.
+func withVerify(plan []domain.PlannedStep, v *domain.PlannedStep) []domain.PlannedStep {
+	if v == nil {
+		return plan
+	}
+	switch v.Status {
+	case domain.StepPending, domain.StepWaitingApproval:
+		return []domain.PlannedStep{*v}
+	default:
+		return append([]domain.PlannedStep{*v}, plan...)
+	}
 }
 
 // messageText renders a committed conversation message for the context.
