@@ -22,6 +22,9 @@ import (
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/flow"
+	gw "go-sre-harness/internal/gateway"
+	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/tools"
@@ -93,6 +96,20 @@ type Config struct {
 	ToolToggles ToolToggles
 	// CapabilityMap supplies the optional [E] prompt section (optional).
 	CapabilityMap CapabilityMapSource
+	// Planner generates the orchestration plan for an auto run (optional).
+	Planner Planner
+	// PlanApprovers is the default number of approvals for a generated plan;
+	// R3 plans always require at least two.
+	PlanApprovers int
+	// PlanApprovalMode is auto (review plans whose analysis requires it),
+	// always or never. It is enforced here as well as in the planner so a
+	// planner bug cannot skip the gate.
+	PlanApprovalMode string
+}
+
+// Planner produces a generated flow plan for an auto run.
+type Planner interface {
+	Plan(ctx context.Context, scope gw.Scope, in planner.Input) (planner.Result, error)
 }
 
 // CapabilityMapSource renders capability-to-service notes for the prompt.
@@ -169,6 +186,12 @@ func (c *Config) defaults() {
 	}
 	if c.Observer == nil {
 		c.Observer = nopObserver{}
+	}
+	if c.PlanApprovers <= 0 {
+		c.PlanApprovers = 1
+	}
+	if c.PlanApprovalMode == "" {
+		c.PlanApprovalMode = "auto"
 	}
 }
 
@@ -387,6 +410,12 @@ func (w *Worker) execute(ctx context.Context, lease domain.Lease, st *execState)
 		return w.executeReason(ctx, lease)
 	case domain.StepTool:
 		return w.executeTool(ctx, lease, st)
+	case domain.StepFlow:
+		return w.executeFlow(ctx, lease)
+	case domain.StepPlan:
+		return w.executePlan(ctx, lease)
+	case domain.StepPlanReview:
+		return w.executePlanReview(ctx, lease)
 	case domain.StepCompact:
 		return w.executeCompact(ctx, lease)
 	case domain.StepRetrieve:
@@ -419,7 +448,25 @@ func (w *Worker) rules(ctx context.Context, lease domain.Lease) (profile.Rules, 
 }
 
 type goalDoc struct {
-	Goal string `json:"goal"`
+	Goal   string         `json:"goal"`
+	Inputs map[string]any `json:"inputs,omitempty"`
+	Flow   *flowNodeGoal  `json:"flow,omitempty"`
+}
+
+// flowNodeGoal is stored in a child run's goal artifact. It carries the DSL
+// node's role, prompt, tool subset and, for subflows, the nested spec.
+type flowNodeGoal struct {
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Role       string         `json:"role,omitempty"`
+	Prompt     string         `json:"prompt,omitempty"`
+	Tools      []string       `json:"tools,omitempty"`
+	ModelAlias string         `json:"model_alias,omitempty"`
+	MaxSteps   int            `json:"max_steps,omitempty"`
+	Tool       string         `json:"tool,omitempty"`
+	Args       map[string]any `json:"args,omitempty"`
+	Input      map[string]any `json:"input,omitempty"`
+	Subflow    *flow.Spec     `json:"subflow,omitempty"`
 }
 
 func (w *Worker) put(ctx context.Context, tenantID, kind string, v any) (string, string, error) {
@@ -459,13 +506,26 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return domain.StepSuccess{}, ctx.Err()
 	}
 	strat := w.strategy
-	if w.cfg.Strategies != nil && lease.ProfileID != "" {
+	switch {
+	case in.FlowNode != nil && in.FlowNode.Type == "tool":
+		strat = cognitive.FlowTool{}
+	case in.FlowNode != nil:
+		// Flow agent/subflow child: the profile strategy is the flow
+		// strategy itself, so use the deployment's default agent strategy.
+	case w.cfg.Strategies != nil && lease.ProfileID != "":
 		ps, err := w.cfg.Strategies.StrategyFor(ctx, lease.TenantID, lease.ProfileID, lease.ProfileVersion)
 		if err != nil {
 			<-w.reasonSem
 			return domain.StepSuccess{}, domain.Retryable(fmt.Errorf("resolve profile strategy: %w", err), 0)
 		}
 		strat = ps
+	}
+	if in.FlowNode != nil && in.FlowNode.ModelAlias != "" {
+		if llm, ok := strat.(*cognitive.LLM); ok {
+			copy := *llm
+			copy.Alias = in.FlowNode.ModelAlias
+			strat = &copy
+		}
 	}
 	decision, err := strat.Decide(ctx, in)
 	<-w.reasonSem
@@ -502,9 +562,13 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		InputHash: lease.InputHash, Status: domain.StepPending}
 
 	if decision.Kind == domain.DecisionFinal {
-		resultRef, _, err := w.put(ctx, lease.TenantID, "result", map[string]any{
+		result := map[string]any{
 			"answer": decision.Answer, "intent": decision.Intent, "hypotheses": decision.Hypotheses,
-			"thought": decision.Thought, "decision_ref": outRef})
+			"thought": decision.Thought, "decision_ref": outRef}
+		if len(decision.Output) > 0 {
+			result["flow_output"] = decision.Output
+		}
+		resultRef, _, err := w.put(ctx, lease.TenantID, "result", result)
 		if err != nil {
 			return domain.StepSuccess{}, err
 		}
@@ -513,6 +577,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return res, nil
 	}
 
+	if in.FlowNode != nil && len(in.FlowNode.Tools) > 0 && !flowToolVisible(in.FlowNode.Tools, decision.Tool.Name) {
+		return domain.StepSuccess{}, fmt.Errorf("tool %q is not visible to flow node %q", decision.Tool.Name, in.FlowNode.ID)
+	}
 	call := *decision.Tool
 	callRef, callHash, err := w.put(ctx, lease.TenantID, "tool-input", call)
 	if err != nil {
@@ -575,7 +642,41 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		return in, err
 	}
 	in.Goal = g.Goal
-	if rules.CapabilityMap && w.cfg.CapabilityMap != nil {
+	if g.Flow != nil {
+		in.FlowNode = &cognitive.FlowNode{
+			ID: g.Flow.ID, Type: g.Flow.Type, Role: g.Flow.Role, Prompt: g.Flow.Prompt,
+			Tools: g.Flow.Tools, ModelAlias: g.Flow.ModelAlias, MaxSteps: g.Flow.MaxSteps,
+			Tool: g.Flow.Tool, Args: g.Flow.Args, Input: g.Flow.Input,
+		}
+		if g.Flow.Role != "" || g.Flow.Prompt != "" {
+			instr := cognitive.DefaultInstructions
+			if role := strings.TrimSpace(g.Flow.Role); role != "" {
+				instr += "\n\nYou are the \"" + role + "\" agent in a flow. Stay within this role."
+			}
+			if prompt := strings.TrimSpace(g.Flow.Prompt); prompt != "" {
+				instr += "\n\n" + prompt
+			}
+			in.Instructions = instr
+		}
+		if len(g.Flow.Tools) > 0 {
+			allowed := make(map[string]bool, len(g.Flow.Tools))
+			for _, t := range g.Flow.Tools {
+				allowed[t] = true
+			}
+			filtered := make([]tools.Descriptor, 0, len(visible))
+			for _, t := range visible {
+				if allowed[t.Name] {
+					filtered = append(filtered, t)
+				}
+			}
+			visible = filtered
+			in.Tools = visible
+		}
+		if g.Flow.MaxSteps > 0 && (in.MaxSteps == 0 || g.Flow.MaxSteps < in.MaxSteps) {
+			in.MaxSteps = g.Flow.MaxSteps
+		}
+	}
+	if rules.CapabilityMap && w.cfg.CapabilityMap != nil && g.Flow == nil {
 		lines, mapErr := w.cfg.CapabilityMap.CapabilityMap(ctx, lease.TenantID, in.Goal, 5)
 		if mapErr != nil {
 			w.log.Warn("capability map", "err", mapErr)

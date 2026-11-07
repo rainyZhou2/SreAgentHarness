@@ -45,6 +45,78 @@ const MCPDeepSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*
 // capability map to the prompt.
 const CapabilityMapSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":30,"prompt_prefix_version":"sre-prefix-v6","capability_map":true}`
 
+// FlowSpec (sre-diagnosis@8) demonstrates the orchestration DSL: a triage
+// agent, parallel metrics/log branches, a join, a human approval gate and a
+// remediation tool. The flow can only use tools the profile allows.
+const FlowSpec = `{
+  "strategy":"flow",
+  "tools":["demo.*","mcp.*","http.*","web.*"],
+  "max_steps":40,
+  "prompt_prefix_version":"sre-prefix-v6",
+  "capability_map":true,
+  "flow":{
+    "version":1,
+    "entry":"triage",
+    "inputs":[{"name":"goal","required":true}],
+    "limits":{"max_steps":20,"max_children":4,"max_total_runs":8,"max_depth":2},
+    "nodes":[
+      {"id":"triage","type":"agent","role":"triage",
+       "prompt":"Classify the incident, identify the affected service and state what evidence is needed.",
+       "tools":["demo.metrics"],
+       "next":[{"to":"diagnose"}]},
+      {"id":"diagnose","type":"parallel","branches":["metrics","logs"],"next":[{"to":"join"}]},
+      {"id":"metrics","type":"tool","tool":"demo.metrics","args":{"service":"${input.goal}"}},
+      {"id":"logs","type":"agent","role":"log-analyst",
+       "prompt":"Inspect the available evidence and summarize the most likely cause.",
+       "tools":["demo.metrics"]},
+      {"id":"join","type":"join","wait":["diagnose"],"join_policy":"all","on_error":"fail",
+       "next":[{"to":"approve"}]},
+      {"id":"approve","type":"approval","risk":"R2","approvers":1,"next":[{"to":"remediate"}]},
+      {"id":"remediate","type":"tool","tool":"demo.restart","args":{"service":"${input.goal}"},
+       "next":[{"to":"finish"}]},
+      {"id":"finish","type":"end","output":"${nodes.logs.output}"}
+    ]
+  }
+}`
+
+// AutoSpec (sre-diagnosis@10) is the run profile for automatic planning. The
+// planner may choose any registered tool; policy, risk and approvals still
+// gate every side effect. Operators can override this profile in deployment.
+const AutoSpec = `{"strategy":"llm","tools":["*"],"max_steps":40,"prompt_prefix_version":"sre-prefix-v6","capability_map":true}`
+
+// InteractiveFlowSpec (sre-diagnosis@9) exercises a human input gate and a
+// nested subflow. The answer is available to the subflow as input.vars.answer.
+const InteractiveFlowSpec = `{
+  "strategy":"flow",
+  "tools":["demo.*"],
+  "max_steps":40,
+  "prompt_prefix_version":"sre-prefix-v6",
+  "flow":{
+    "version":1,
+    "entry":"ask",
+    "inputs":[{"name":"goal","required":true}],
+    "limits":{"max_steps":20,"max_children":2,"max_total_runs":4,"max_depth":2},
+    "nodes":[
+      {"id":"ask","type":"input","output":"answer",
+       "input_schema":{"type":"object","properties":{"service":{"type":"string"}},"required":["service"]},
+       "next":[{"to":"sub"}]},
+      {"id":"sub","type":"subflow","flow":{
+        "version":1,
+        "entry":"work",
+        "limits":{"max_steps":5,"max_children":1,"max_total_runs":2,"max_depth":1},
+        "nodes":[
+          {"id":"work","type":"agent","role":"worker",
+           "prompt":"Use the answer provided by the parent flow and summarize it.",
+           "tools":["demo.metrics"],
+           "next":[{"to":"done"}]},
+          {"id":"done","type":"end","output":"${nodes.work.output}"}
+        ]
+      },"next":[{"to":"finish"}]},
+      {"id":"finish","type":"end","output":"${nodes.sub.output}"}
+    ]
+  }
+}`
+
 // BuiltinConfig configures the builtin source.
 type BuiltinConfig struct {
 	ID      string          `json:"id,omitempty"`      // default sre-diagnosis
@@ -84,6 +156,12 @@ func init() {
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 6, Spec: json.RawMessage(MCPDeepSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 7, Spec: json.RawMessage(CapabilityMapSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 8, Spec: json.RawMessage(FlowSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 9, Spec: json.RawMessage(InteractiveFlowSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 10, Spec: json.RawMessage(AutoSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 			}
 			return profile.SourceFunc(func(context.Context) ([]profile.Definition, error) { return defs, nil }), nil

@@ -66,6 +66,7 @@ var commandRoles = map[domain.CommandType]auth.Role{
 	domain.CmdOverrideResult:      auth.Approver,
 	domain.CmdMigrateProfile:      auth.Admin,
 	domain.CmdReplacePendingInput: auth.Operator,
+	domain.CmdProvideInput:        auth.Operator,
 }
 
 func (s *Server) authMiddleware(mux *http.ServeMux) http.Handler {

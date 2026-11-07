@@ -31,6 +31,9 @@ type Spec struct {
 	MemoryTopK          int    `json:"memory_top_k,omitempty"`
 	CompactEvery        int    `json:"compact_every,omitempty"`
 	CapabilityMap       bool   `json:"capability_map,omitempty"`
+	// Flow is the optional orchestration DSL. It is frozen with the profile
+	// version and only valid together with strategy "flow".
+	Flow json.RawMessage `json:"flow,omitempty"`
 
 	// frozen
 	Tools          []string          `json:"tools"`
@@ -42,7 +45,7 @@ type Spec struct {
 }
 
 // Frozen lists the JSON fields an evolution candidate may not change.
-var Frozen = []string{"tools", "policy_version", "risk_overrides", "approval_rules", "allowed_aliases", "max_steps", "strategy"}
+var Frozen = []string{"tools", "policy_version", "risk_overrides", "approval_rules", "allowed_aliases", "max_steps", "strategy", "flow"}
 
 func Parse(raw json.RawMessage) (Spec, error) {
 	var s Spec

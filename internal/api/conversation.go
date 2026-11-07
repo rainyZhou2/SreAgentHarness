@@ -15,6 +15,8 @@ import (
 
 // ---------- sessions and turns (§29) ----------
 
+const autoProfile = "auto"
+
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	id, ok := ident(w, r)
 	if !ok {
@@ -26,19 +28,30 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title      string  `json:"title"`
-		ProfileID  string  `json:"profile_id"`
-		IncidentID *string `json:"incident_id"`
+		Title          string  `json:"title"`
+		ProfileID      string  `json:"profile_id"`
+		ProfileVersion int64   `json:"profile_version"`
+		IncidentID     *string `json:"incident_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
 	if body.ProfileID == "" {
-		body.ProfileID = s.DefaultProfile
+		body.ProfileID = autoProfile
+	}
+	if body.ProfileID == autoProfile {
+		body.ProfileVersion = 0
+	} else if body.ProfileVersion == 0 {
+		if body.ProfileID == s.DefaultProfile {
+			body.ProfileVersion = s.DefaultVersion
+		} else if s.ResolveProfile != nil {
+			body.ProfileVersion, _ = s.ResolveProfile(r.Context(), id.tenant, body.ProfileID, key)
+		}
 	}
 	sess, created, err := s.Store.CreateSession(r.Context(), domain.CreateSessionRequest{TenantID: id.tenant, ActorID: id.actor,
-		ProfileID: body.ProfileID, Title: body.Title, IncidentID: body.IncidentID, IdempotencyKey: key})
+		ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion, Title: body.Title, IncidentID: body.IncidentID,
+		IdempotencyKey: key})
 	if err != nil {
 		s.domainErr(w, err)
 		return
@@ -210,14 +223,36 @@ func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "artifact_store_unavailable", "retry later")
 		return
 	}
-	req := domain.SubmitTurnRequest{TenantID: id.tenant, ActorID: id.actor, SessionID: sessionID, BranchID: body.BranchID,
-		ClientRequestID: body.ClientRequestID, InputRef: ref, InputHash: hash, ExpectedVersion: body.ExpectedVersion,
-		ProfileVersion: s.DefaultVersion}
-	if s.ResolveProfile != nil {
-		if v, rollout := s.ResolveProfile(r.Context(), id.tenant, s.DefaultProfile, sessionID); v > 0 {
-			req.ProfileVersion, req.RolloutID = v, rollout
+	sess, err := s.Store.GetSession(r.Context(), id.tenant, sessionID)
+	if err != nil {
+		s.domainErr(w, err)
+		return
+	}
+	profileID, version := sess.ProfileID, sess.ProfileVersion
+	var rollout *string
+	var initialSteps []domain.PlannedStep
+	switch {
+	case profileID == "" || profileID == autoProfile:
+		// Auto sessions start with a durable planning step. The planner
+		// decides between ReAct and a generated flow inside the run, so the
+		// model call is leased, ledgered and auditable like any other step.
+		profileID, version = s.AutoProfileID, s.AutoProfileVersion
+		if profileID == "" {
+			profileID, version = s.DefaultProfile, s.DefaultVersion
+		}
+		initialSteps = []domain.PlannedStep{{Kind: domain.StepPlan, Executor: "planner",
+			InputRef: ref, InputHash: hash, Status: domain.StepPending}}
+	case version == 0:
+		version = s.DefaultVersion
+		if s.ResolveProfile != nil {
+			if v, r := s.ResolveProfile(r.Context(), id.tenant, profileID, sessionID); v > 0 {
+				version, rollout = v, r
+			}
 		}
 	}
+	req := domain.SubmitTurnRequest{TenantID: id.tenant, ActorID: id.actor, SessionID: sessionID, BranchID: body.BranchID,
+		ClientRequestID: body.ClientRequestID, InputRef: ref, InputHash: hash, ExpectedVersion: body.ExpectedVersion,
+		ProfileID: profileID, ProfileVersion: version, RolloutID: rollout, InitialSteps: initialSteps}
 	policy := s.BranchPolicy
 	if policy == "" {
 		policy = domain.BranchQueue

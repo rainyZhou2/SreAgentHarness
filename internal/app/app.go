@@ -29,6 +29,7 @@ import (
 	"go-sre-harness/internal/graph"
 	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/obs"
+	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/scheduler"
@@ -230,6 +231,20 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if err != nil {
 		return nil, err
 	}
+	autoProfileID := e.str("HARNESS_AUTO_PROFILE", h.Settings.DefaultProfile)
+	autoProfileVersion := e.int64("HARNESS_AUTO_PROFILE_VERSION", 10)
+	autoFound := false
+	for _, p := range profiles {
+		if p.ID == autoProfileID && p.Version == autoProfileVersion {
+			autoFound = true
+			break
+		}
+	}
+	if !autoFound {
+		log.Warn("auto profile is not registered; falling back to the default profile",
+			"profile", autoProfileID, "version", autoProfileVersion)
+		autoProfileID, autoProfileVersion = h.Settings.DefaultProfile, h.Settings.DefaultProfileVersion
+	}
 	// policy
 	if h.Policy, err = plugin.BuildOne(ctx, plugin.Policy, h, specs["policy"]); err != nil {
 		return nil, err
@@ -366,22 +381,48 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	// graph projection: capability map for prompts and the read-only API
 	graphSvc := &graph.Service{Store: store, Tools: h.Tools, Extensions: h.Extensions,
 		Log: log.With("component", "graph")}
+	// planner: auto runs decide between ReAct and a generated flow
+	plannerSvc := &planner.Service{
+		Gateway: h.Gateway, Artifacts: h.Artifacts, Profiles: store,
+		Log: log.With("component", "planner"), Observer: metrics,
+		Config: planner.Config{
+			ModelAlias:         e.str("HARNESS_PLANNER_MODEL_ALIAS", h.Settings.ModelAlias),
+			Effort:             e.str("HARNESS_PLANNER_EFFORT", h.Settings.ModelEffort),
+			MaxRepairs:         e.int("HARNESS_PLANNER_MAX_REPAIRS", 2),
+			MaxNodes:           e.int("HARNESS_PLANNER_MAX_NODES", 20),
+			MaxOutputTokens:    e.int64("HARNESS_PLANNER_MAX_OUTPUT_TOKENS", 8000),
+			MaxChildren:        e.int("HARNESS_PLANNER_MAX_CHILDREN", 8),
+			MaxTotalRuns:       e.int("HARNESS_PLANNER_MAX_TOTAL_RUNS", 32),
+			MaxDepth:           e.int("HARNESS_PLANNER_MAX_DEPTH", 3),
+			MaxIterations:      e.int("HARNESS_PLANNER_MAX_ITERATIONS", 10),
+			MaxModelCalls:      e.int("HARNESS_PLANNER_MAX_MODEL_CALLS", 40),
+			MaxEstimatedTokens: e.int64("HARNESS_PLANNER_MAX_ESTIMATED_TOKENS", 400000),
+			ApprovalMode:       e.str("HARNESS_PLAN_APPROVAL", "auto"),
+			ApprovalApprovers:  e.int("HARNESS_PLAN_APPROVERS", 1),
+			FallbackProfileID:  e.str("HARNESS_PLANNER_FALLBACK_PROFILE", h.Settings.DefaultProfile),
+			FallbackVersion:    e.int64("HARNESS_PLANNER_FALLBACK_VERSION", 8),
+			FallbackReact:      e.bool("HARNESS_PLANNER_FALLBACK_REACT", true),
+		},
+	}
 	// worker
 	if mode == "all" || mode == "worker" {
 		hostname, _ := os.Hostname()
 		a.worker = kernel.NewWorker(kernel.Config{
-			ID:            e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
-			LeaseTTL:      e.dur("HARNESS_LEASE_TTL", 45*time.Second),
-			StepTimeout:   e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
-			Checkpoints:   e.bool("HARNESS_CHECKPOINTS", true),
-			Memory:        retriever,
-			Compactor:     compactor,
-			Rules:         rules,
-			Skills:        h.Extensions,
-			ToolToggles:   store,
-			CapabilityMap: graphSvc,
-			Strategies:    &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
-			Observer:      observers,
+			ID:               e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
+			LeaseTTL:         e.dur("HARNESS_LEASE_TTL", 45*time.Second),
+			StepTimeout:      e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
+			Checkpoints:      e.bool("HARNESS_CHECKPOINTS", true),
+			Memory:           retriever,
+			Compactor:        compactor,
+			Rules:            rules,
+			Skills:           h.Extensions,
+			ToolToggles:      store,
+			CapabilityMap:    graphSvc,
+			Planner:          plannerSvc,
+			PlanApprovers:    e.int("HARNESS_PLAN_APPROVERS", 1),
+			PlanApprovalMode: e.str("HARNESS_PLAN_APPROVAL", "auto"),
+			Strategies:       &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
+			Observer:         observers,
 		}, store, h.Artifacts, defaultStrategy, h.Tools, h.Policy, log)
 	}
 	// API
@@ -412,7 +453,8 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			return nil, errors.New("no authenticator plugin is enabled")
 		}
 		srv := &api.Server{Store: store, Artifacts: h.Artifacts, DefaultProfile: h.Settings.DefaultProfile,
-			DefaultVersion: h.Settings.DefaultProfileVersion, Log: log,
+			DefaultVersion: h.Settings.DefaultProfileVersion,
+			AutoProfileID:  autoProfileID, AutoProfileVersion: autoProfileVersion, Log: log,
 			Deltas: h.Deltas, BranchPolicy: domain.BranchPolicy(e.str("HARNESS_BRANCH_POLICY", string(domain.BranchQueue))),
 			MaxPendingTurn: e.int("HARNESS_MAX_PENDING_TURNS", 8), Tools: h.Tools, Policy: h.Policy,
 			Events: h.Events, StreamMode: streamMode, StreamTick: e.dur("HARNESS_SSE_TICK", 30*time.Second),

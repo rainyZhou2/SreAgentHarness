@@ -189,6 +189,15 @@ func SystemPrompt(instructions string) string {
 	return strings.TrimSpace(instructions) + "\n\n" + TrustRules
 }
 
+// instructions resolves the per-run override (flow agent roles) before the
+// assembler's operator configuration.
+func (a Assembler) instructions(in ReasoningInput) string {
+	if strings.TrimSpace(in.Instructions) != "" {
+		return in.Instructions
+	}
+	return a.Instructions
+}
+
 // Build renders the request and its manifest. It is a pure function of its
 // inputs: the same snapshot renders byte-identical requests on retry.
 func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptManifest) {
@@ -197,11 +206,11 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		CompactionEpoch: in.CompactionEpoch, SectionHashes: map[string]string{}}
 
 	// [A] stable prefix.
-	sys := SystemPrompt(a.Instructions)
+	sys := SystemPrompt(a.instructions(in))
 	if block, refs := renderSkills(in.Skills); block != "" {
 		// Skills sit between the role text and the trust rules, so the
 		// trust rules stay last and keep precedence.
-		instr := a.Instructions
+		instr := a.instructions(in)
 		if strings.TrimSpace(instr) == "" {
 			instr = DefaultInstructions
 		}

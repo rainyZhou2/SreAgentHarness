@@ -16,11 +16,11 @@ import (
 // branch row in PostgreSQL — never by an in-process mutex — so it holds across
 // API replicas. Lock order: run → branch → (next) run → turn.
 
-const sessionCols = `id, tenant_id, created_by, title, profile_id, status, coalesce(default_branch_id::text,''), incident_id, created_at`
+const sessionCols = `id, tenant_id, created_by, title, profile_id, profile_version, status, coalesce(default_branch_id::text,''), incident_id, created_at`
 
 func scanSession(row pgx.Row) (domain.Session, error) {
 	var s domain.Session
-	err := row.Scan(&s.ID, &s.TenantID, &s.CreatedBy, &s.Title, &s.ProfileID, &s.Status, &s.DefaultBranchID, &s.IncidentID, &s.CreatedAt)
+	err := row.Scan(&s.ID, &s.TenantID, &s.CreatedBy, &s.Title, &s.ProfileID, &s.ProfileVersion, &s.Status, &s.DefaultBranchID, &s.IncidentID, &s.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, domain.ErrNotFound
 	}
@@ -61,10 +61,11 @@ func (s *Store) CreateSession(ctx context.Context, req domain.CreateSessionReque
 		id, branchID := newID(), newID()
 		var inserted string
 		err := tx.QueryRow(ctx, `INSERT INTO conversation_sessions (id, tenant_id, created_by, title, profile_id,
-			default_branch_id, incident_id, create_idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			profile_version, default_branch_id, incident_id, create_idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			ON CONFLICT (tenant_id, create_idempotency_key) DO NOTHING RETURNING id`,
-			id, req.TenantID, req.ActorID, nullable(req.Title), req.ProfileID, branchID, req.IncidentID,
-			req.IdempotencyKey).Scan(&inserted)
+			id, req.TenantID, req.ActorID, nullable(req.Title), req.ProfileID, req.ProfileVersion, branchID,
+			req.IncidentID, req.IdempotencyKey).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			out, err = scanSession(tx.QueryRow(ctx, `SELECT `+sessionCols+` FROM conversation_sessions
 				WHERE tenant_id=$1 AND create_idempotency_key=$2`, req.TenantID, req.IdempotencyKey))
@@ -72,6 +73,11 @@ func (s *Store) CreateSession(ctx context.Context, req domain.CreateSessionReque
 		}
 		if err != nil {
 			return err
+		}
+		if req.ProfileVersion > 0 {
+			if err := checkProfileRunnable(ctx, tx, req.TenantID, req.ProfileID, req.ProfileVersion, nil); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO conversation_branches (id, tenant_id, session_id, created_by)
 			VALUES ($1,$2,$3,$4)`, branchID, req.TenantID, id, req.ActorID); err != nil {
@@ -149,10 +155,18 @@ func (s *Store) SubmitTurn(ctx context.Context, req domain.SubmitTurnRequest, po
 			req.ActorID, status); err != nil {
 			return err
 		}
+		profileID := sess.ProfileID
+		if req.ProfileID != "" {
+			profileID = req.ProfileID
+		}
+		version, rollout := req.ProfileVersion, req.RolloutID
+		if req.ProfileID == "" && sess.ProfileVersion > 0 {
+			version, rollout = sess.ProfileVersion, nil
+		}
 		r, _, err := s.createRunTx(ctx, tx, CreateRunRequest{TenantID: req.TenantID, IncidentID: sess.IncidentID,
-			ProfileID: sess.ProfileID, ProfileVersion: req.ProfileVersion, GoalRef: req.InputRef, GoalHash: req.InputHash,
+			ProfileID: profileID, ProfileVersion: version, GoalRef: req.InputRef, GoalHash: req.InputHash,
 			IdempotencyKey: "turn:" + turnID, InitiatorType: "user", InitiatorID: req.ActorID, SessionID: &sess.ID,
-			BranchID: &branchID, TurnID: &turnID, PendingActivation: true, RolloutID: req.RolloutID,
+			BranchID: &branchID, TurnID: &turnID, PendingActivation: true, RolloutID: rollout,
 			InitialSteps: req.InitialSteps})
 		if err != nil {
 			return err
@@ -594,7 +608,7 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, f SessionFilt
 		f.Limit = 50
 	}
 	like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.Query) + "%"
-	rows, err := s.pool.Query(ctx, `SELECT s.id, s.tenant_id, s.created_by, s.title, s.profile_id, s.status,
+	rows, err := s.pool.Query(ctx, `SELECT s.id, s.tenant_id, s.created_by, s.title, s.profile_id, s.profile_version, s.status,
 			COALESCE(s.default_branch_id::text, ''), s.incident_id::text, s.created_at,
 			COALESCE(t.last_at, s.created_at), COALESCE(t.n, 0), COALESCE(t.active, 0)
 		FROM conversation_sessions s
@@ -610,7 +624,7 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, f SessionFilt
 	var out []SessionSummary
 	for rows.Next() {
 		var x SessionSummary
-		if err := rows.Scan(&x.ID, &x.TenantID, &x.CreatedBy, &x.Title, &x.ProfileID, &x.Status, &x.DefaultBranchID,
+		if err := rows.Scan(&x.ID, &x.TenantID, &x.CreatedBy, &x.Title, &x.ProfileID, &x.ProfileVersion, &x.Status, &x.DefaultBranchID,
 			&x.IncidentID, &x.CreatedAt, &x.LastActivityAt, &x.Turns, &x.ActiveTurns); err != nil {
 			return nil, err
 		}

@@ -19,6 +19,8 @@ const (
 	RunRunning           RunStatus = "RUNNING"
 	RunPaused            RunStatus = "PAUSED"
 	RunWaitingApproval   RunStatus = "WAITING_APPROVAL"
+	RunWaitingChildren   RunStatus = "WAITING_CHILDREN"
+	RunWaitingInput      RunStatus = "WAITING_INPUT"
 	RunNeedsHuman        RunStatus = "NEEDS_HUMAN"
 	RunCancelled         RunStatus = "CANCELLED"
 	RunCompleted         RunStatus = "COMPLETED"
@@ -45,6 +47,11 @@ const (
 	StepTool     StepKind = "tool"
 	StepRetrieve StepKind = "retrieve_memory"
 	StepCompact  StepKind = "compact"
+	StepFlow     StepKind = "flow"
+	StepPlan     StepKind = "plan"
+	// StepPlanReview is the human approval gate between a generated plan and
+	// its execution. Its input hash is the plan hash.
+	StepPlanReview StepKind = "plan_review"
 )
 
 type StepStatus string
@@ -53,6 +60,8 @@ const (
 	StepPending         StepStatus = "PENDING"
 	StepRunning         StepStatus = "RUNNING"
 	StepWaitingApproval StepStatus = "WAITING_APPROVAL"
+	StepWaitingChildren StepStatus = "WAITING_CHILDREN"
+	StepWaitingInput    StepStatus = "WAITING_INPUT"
 	StepRetryWait       StepStatus = "RETRY_WAIT"
 	StepSucceeded       StepStatus = "SUCCEEDED"
 	StepFailed          StepStatus = "FAILED"
@@ -111,6 +120,10 @@ type Run struct {
 	SessionID         *string      `json:"session_id,omitempty"`
 	BranchID          *string      `json:"branch_id,omitempty"`
 	TurnID            *string      `json:"turn_id,omitempty"`
+	ParentRunID       *string      `json:"parent_run_id,omitempty"`
+	ParentStepID      *string      `json:"parent_step_id,omitempty"`
+	FlowNodeID        string       `json:"flow_node_id,omitempty"`
+	FlowDepth         int          `json:"flow_depth,omitempty"`
 	ForkedFrom        *string      `json:"forked_from_checkpoint_id,omitempty"`
 	CompactionEpoch   int64        `json:"compaction_epoch"`
 	RolloutID         *string      `json:"rollout_id,omitempty"`
@@ -138,6 +151,7 @@ type Step struct {
 	Seq               int64      `json:"seq"`
 	Kind              StepKind   `json:"kind"`
 	ExecutorName      string     `json:"executor_name"`
+	FlowNodeID        string     `json:"flow_node_id,omitempty"`
 	Status            StepStatus `json:"status"`
 	InputRef          string     `json:"input_ref"`
 	InputHash         string     `json:"input_hash"`
@@ -193,6 +207,7 @@ type Lease struct {
 	FenceToken        int64
 	Kind              StepKind
 	ExecutorName      string
+	FlowNodeID        string
 	InputRef          string
 	InputHash         string
 	GoalRef           string
@@ -202,6 +217,9 @@ type Lease struct {
 	Intent            *ActionIntent
 	ProfileID         string
 	ProfileVersion    int64
+	ParentRunID       string
+	ParentStepID      string
+	FlowDepth         int
 }
 
 // ToolCall is a complete, schema-validated tool intent produced by a model.
@@ -239,16 +257,18 @@ const (
 // Decision is the auditable Decision Trace artifact of a reason step (§7.3).
 // It is an explicitly produced explanation, not the model's hidden reasoning.
 type Decision struct {
-	SchemaVersion     int          `json:"schema_version"`
-	Kind              DecisionKind `json:"kind"`
-	Intent            Intent       `json:"intent,omitempty"`
-	ReasonSummary     string       `json:"reason_summary"`
-	Hypotheses        []Hypothesis `json:"hypotheses,omitempty"`
-	Alternatives      []string     `json:"alternatives,omitempty"`
-	Answer            string       `json:"answer,omitempty"`
-	Tool              *ToolCall    `json:"tool,omitempty"`
-	EvidenceRefs      []string     `json:"evidence_refs,omitempty"`
-	ContextSnapshotID string       `json:"context_snapshot_id"`
+	SchemaVersion int          `json:"schema_version"`
+	Kind          DecisionKind `json:"kind"`
+	Intent        Intent       `json:"intent,omitempty"`
+	ReasonSummary string       `json:"reason_summary"`
+	Hypotheses    []Hypothesis `json:"hypotheses,omitempty"`
+	Alternatives  []string     `json:"alternatives,omitempty"`
+	Answer        string       `json:"answer,omitempty"`
+	Tool          *ToolCall    `json:"tool,omitempty"`
+	// Output is the structured result of a deterministic flow tool node.
+	Output            json.RawMessage `json:"flow_output,omitempty"`
+	EvidenceRefs      []string        `json:"evidence_refs,omitempty"`
+	ContextSnapshotID string          `json:"context_snapshot_id"`
 	// Model provenance (P0-B/P0-C): which ledger request and prompt manifest
 	// produced this decision. Empty for non-model strategies.
 	ModelRequestID      string `json:"model_request_id,omitempty"`
@@ -298,6 +318,7 @@ const (
 	CmdReplacePendingInput CommandType = "replace_pending_input"
 	CmdRetry               CommandType = "retry"
 	CmdMigrateProfile      CommandType = "migrate_profile"
+	CmdProvideInput        CommandType = "provide_input"
 )
 
 type CommandStatus string

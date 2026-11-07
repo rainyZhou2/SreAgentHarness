@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,8 +23,15 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepS
 		if err := s.finishAttempt(ctx, r, lease, domain.AttemptSucceeded, "", ""); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE agent_steps SET status='SUCCEEDED', output_ref=$2, output_hash=$3,
-			updated_at=now() WHERE id=$1`, lease.StepID, res.OutputRef, res.OutputHash); err != nil {
+		stepStatus := domain.StepSucceeded
+		switch res.Wait {
+		case domain.WaitChildren:
+			stepStatus = domain.StepWaitingChildren
+		case domain.WaitInput:
+			stepStatus = domain.StepWaitingInput
+		}
+		if _, err := tx.Exec(ctx, `UPDATE agent_steps SET status=$2, output_ref=$3, output_hash=$4,
+			updated_at=now() WHERE id=$1`, lease.StepID, stepStatus, nullable(res.OutputRef), nullable(res.OutputHash)); err != nil {
 			return err
 		}
 		if res.ArtifactKind != "" {
@@ -63,6 +71,14 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepS
 			res.Summary); err != nil {
 			return err
 		}
+		for _, e := range res.Events {
+			if e.Type == "" {
+				continue
+			}
+			if err := r.event(ctx, e.Type, "system", "", &lease.StepID, &lease.AttemptID, e.Payload); err != nil {
+				return err
+			}
+		}
 		if err := insertThoughts(ctx, tx, lease.TenantID, lease.RunID, lease.StepID, res.Thoughts); err != nil {
 			return err
 		}
@@ -90,6 +106,12 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepS
 			}
 		}
 
+		if res.Flow != nil {
+			if err := s.applyFlowCommit(ctx, r, lease, res.Flow); err != nil {
+				return err
+			}
+		}
+
 		r.releaseLease()
 		r.run.Version++ // step progress is control-plane visible
 		if res.CheckpointRef != "" {
@@ -103,11 +125,131 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepS
 			if err := r.event(ctx, "run.completed", "system", "", nil, nil, map[string]string{"result_ref": res.ResultRef}); err != nil {
 				return err
 			}
+			if lease.ParentRunID != "" {
+				if err := s.flowChildFinished(ctx, r, lease, "SUCCEEDED", res.ResultRef, ""); err != nil {
+					return err
+				}
+			}
+		} else if res.Wait != domain.WaitNone {
+			switch res.Wait {
+			case domain.WaitChildren:
+				r.setStatus(domain.RunWaitingChildren)
+				if err := r.event(ctx, "flow.waiting_children", "system", "", &lease.StepID, nil,
+					map[string]string{"flow_node": lease.FlowNodeID}); err != nil {
+					return err
+				}
+			case domain.WaitInput:
+				r.setStatus(domain.RunWaitingInput)
+				if err := r.event(ctx, "flow.waiting_input", "system", "", &lease.StepID, nil,
+					map[string]string{"flow_node": lease.FlowNodeID}); err != nil {
+					return err
+				}
+			}
 		} else if err := r.appendPlan(ctx, res.Plan); err != nil {
 			return err
 		}
 		return r.save(ctx)
 	})
+}
+
+// applyFlowCommit persists the flow state and creates every child run in the
+// same transaction as the parent step. Child creation is idempotent on the
+// (flow run, node, attempt) key.
+func (s *Store) applyFlowCommit(ctx context.Context, r *runTx, lease domain.Lease, fc *domain.FlowCommit) error {
+	if fc == nil {
+		return nil
+	}
+	flowRunID := fc.FlowRunID
+	if flowRunID == "" {
+		flowRunID = newID()
+	}
+	status := fc.Status
+	if status == "" {
+		status = "RUNNING"
+	}
+	state := fc.State
+	if len(state) == 0 {
+		state = []byte("{}")
+	}
+	var actualID string
+	if err := r.tx.QueryRow(ctx, `INSERT INTO flow_runs
+		(id, tenant_id, run_id, compiled_ref, compiled_hash, state, status, current_node, depth, child_runs)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (tenant_id, run_id) DO UPDATE SET
+		  compiled_ref=EXCLUDED.compiled_ref, compiled_hash=EXCLUDED.compiled_hash,
+		  state=EXCLUDED.state, status=EXCLUDED.status, current_node=EXCLUDED.current_node,
+		  child_runs=GREATEST(flow_runs.child_runs, EXCLUDED.child_runs), updated_at=now()
+		RETURNING id`,
+		flowRunID, r.run.TenantID, r.run.ID, fc.CompiledRef, fc.CompiledHash, jsonb(state), status,
+		fc.CurrentNode, r.run.FlowDepth, fc.ChildRuns).Scan(&actualID); err != nil {
+		return err
+	}
+	for _, child := range fc.Children {
+		parentID := r.run.ID
+		stepID := lease.StepID
+		attempt := child.Attempt
+		if attempt < 1 {
+			attempt = 1
+		}
+		key := child.IdempotencyKey
+		if key == "" {
+			key = "flow:" + actualID + ":" + child.NodeID + ":" + itoa(attempt)
+		}
+		cr, isNew, err := s.createRunTx(ctx, r.tx, CreateRunRequest{
+			TenantID: r.run.TenantID, ProfileID: child.ProfileID, ProfileVersion: child.ProfileVersion,
+			GoalRef: child.GoalRef, GoalHash: child.GoalHash, IdempotencyKey: key,
+			InitiatorType: "system", ParentRunID: &parentID, ParentStepID: &stepID,
+			FlowNodeID: child.NodeID, FlowDepth: r.run.FlowDepth + 1, InitialSteps: child.InitialSteps,
+		})
+		if err != nil {
+			return err
+		}
+		if isNew {
+			if err := cr.save(ctx); err != nil {
+				return err
+			}
+		}
+		if _, err := r.tx.Exec(ctx, `INSERT INTO flow_node_runs
+			(id, tenant_id, flow_run_id, node_id, node_type, child_run_id, status, attempt)
+			VALUES ($1,$2,$3,$4,$5,$6,'RUNNING',$7)
+			ON CONFLICT (tenant_id, flow_run_id, node_id, attempt) DO UPDATE SET
+			  child_run_id=EXCLUDED.child_run_id, status='RUNNING', updated_at=now()`,
+			newID(), r.run.TenantID, actualID, child.NodeID, child.NodeType, cr.run.ID, attempt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flowChildFinished records a child result and wakes the coordinator. The
+// parent has no lease, so this is a plain row update plus an outbox message.
+func (s *Store) flowChildFinished(ctx context.Context, r *runTx, lease domain.Lease, status, resultRef, errMsg string) error {
+	if lease.ParentRunID == "" {
+		return nil
+	}
+	if _, err := r.tx.Exec(ctx, `UPDATE flow_node_runs SET status=$3, output_ref=$4, error=$5, updated_at=now()
+		WHERE tenant_id=$1 AND child_run_id=$2`, r.run.TenantID, lease.RunID, status,
+		nullable(resultRef), nullable(errMsg)); err != nil {
+		return err
+	}
+	var parentID string
+	err := r.tx.QueryRow(ctx, `UPDATE agent_runs SET status='QUEUED', not_before=now(), version=version+1, updated_at=now()
+		WHERE tenant_id=$1 AND id=$2 AND status='WAITING_CHILDREN' AND desired_state='RUNNING'
+		RETURNING id`, r.run.TenantID, lease.ParentRunID).Scan(&parentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // paused or cancelled: the command path settles it
+	}
+	if err != nil {
+		return err
+	}
+	_, err = r.tx.Exec(ctx, `INSERT INTO outbox_messages (id, tenant_id, aggregate_id, subject, payload, next_retry_at)
+		VALUES ($1,$2,$3,$4,$5,now())`, newID(), r.run.TenantID, parentID, WakeSubject,
+		jsonb(map[string]string{"run_id": parentID, "tenant_id": r.run.TenantID}))
+	return err
+}
+
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
 }
 
 func (s *Store) finishAttempt(ctx context.Context, r *runTx, lease domain.Lease, st domain.AttemptStatus, code, msg string) error {
@@ -219,6 +361,25 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFai
 			if _, err := tx.Exec(ctx, `UPDATE external_tool_effects SET state=$3, last_check_at=now()
 				WHERE tenant_id=$1 AND idempotency_key=$2 AND state <> 'CONFIRMED'`,
 				lease.TenantID, lease.IdempotencyKey, effectState); err != nil {
+				return err
+			}
+		}
+		if lease.Kind == domain.StepFlow {
+			switch class {
+			case FailPermanent, FailUnknownEffect:
+				if _, err := tx.Exec(ctx, `UPDATE flow_runs SET status='FAILED', updated_at=now()
+					WHERE tenant_id=$1 AND run_id=$2`, lease.TenantID, lease.RunID); err != nil {
+					return err
+				}
+			case FailCancelled:
+				if _, err := tx.Exec(ctx, `UPDATE flow_runs SET status='CANCELLED', updated_at=now()
+					WHERE tenant_id=$1 AND run_id=$2`, lease.TenantID, lease.RunID); err != nil {
+					return err
+				}
+			}
+		}
+		if lease.ParentRunID != "" && class == FailUnknownEffect {
+			if err := s.flowChildFinished(ctx, r, lease, "FAILED", "", f.Message); err != nil {
 				return err
 			}
 		}
