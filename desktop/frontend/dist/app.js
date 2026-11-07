@@ -15,6 +15,7 @@ const SUGGESTIONS = [
 
 const state = {
   who: null,
+  connectionMode: "local", // local | remote; local has no plugin host
   sessions: [],
   sessionId: null,      // null = new chat
   session: null,
@@ -302,6 +303,7 @@ function syncMode() {
 async function afterConnected() {
   showWho(await api().Whoami());
   st.settings = await api().GetSettings().catch(() => st.settings);
+  applyConnectionMode(st.settings.mode);
   $("#dlg-conn").close();
   state.runs.clear();
   newChat();
@@ -323,6 +325,7 @@ async function submitConnection(ev) {
       creds: { mode: f.mode.value, tenant: f.tenant.value.trim(), actor: f.actor.value.trim(), roles: f.roles.value.trim(), token: f.token.value },
     };
     showWho(await api().Connect(settings));
+    applyConnectionMode("remote");
     $("#dlg-conn").close();
     state.runs.clear();
     newChat();
@@ -338,6 +341,13 @@ function showWho(who) {
   $("#who").textContent = who ? `${who.subject} · ${who.tenant}` : t("Not connected");
   $("#who").title = who ? t("roles: {roles} · auth: {method}", { roles: (who.roles || []).join(", "), method: who.method }) : "";
   $("#who-initial").textContent = who ? (who.subject || "?").slice(0, 1).toUpperCase() : "?";
+}
+
+function applyConnectionMode(mode) {
+  state.connectionMode = mode === "remote" ? "remote" : "local";
+  const btn = $("#btn-plugins");
+  if (btn) btn.hidden = state.connectionMode === "local";
+  if (state.connectionMode === "local" && state.view === "plugins") newChat();
 }
 
 // ---------- sidebar ----------
@@ -1319,6 +1329,11 @@ async function showPlugins() {
   $("#composer-wrap").hidden = true;
   const thread = $("#thread");
   thread.replaceChildren(h("div", { class: "plugins" }, h("h1", {}, t("Plugins")), h("div", { class: "muted" }, t("Loading…"))));
+  if (state.connectionMode === "local") {
+    // The local runtime has no plugin host; extensions are managed in Customize.
+    return thread.replaceChildren(h("div", { class: "plugins" }, h("h1", {}, t("Plugins")),
+      h("div", { class: "muted" }, t("Plugins are managed by team servers. In local runtime, use Customize to manage models, MCP servers, HTTP tools and skills."))));
+  }
   let data;
   try {
     data = await api().Plugins();
@@ -2910,6 +2925,7 @@ async function boot() {
   const saved = await api().GetSettings().catch(() => ({}));
   i18n.lang = saved.language || ((navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en");
   st.settings = saved;
+  applyConnectionMode(saved.mode);
   applyPrefs(saved);
   applyStatic();
   bind();
