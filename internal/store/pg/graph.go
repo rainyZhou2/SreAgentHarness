@@ -402,13 +402,17 @@ func insertThoughts(ctx context.Context, tx pgx.Tx, tenantID, runID, stepID stri
 		if status == "" {
 			status = domain.ThoughtUnknown
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO run_thoughts (id, tenant_id, run_id, step_id, seq, kind, summary,
+		tag, err := tx.Exec(ctx, `INSERT INTO run_thoughts (id, tenant_id, run_id, step_id, seq, kind, summary,
 			detail_ref, status, confidence, structured, attrs)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,0),$11,$12)
 			ON CONFLICT DO NOTHING`,
 			th.ID, tenantID, runID, stepID, seq, string(th.Kind), th.Summary, th.DetailRef, string(status), th.Confidence,
-			th.Structured, jsonb(th.Attrs)); err != nil {
+			th.Structured, jsonb(th.Attrs))
+		if err != nil {
 			return fmt.Errorf("insert thought: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			continue
 		}
 		for _, ref := range th.Refs {
 			if ref.Ref == "" || ref.Relation == "" {
