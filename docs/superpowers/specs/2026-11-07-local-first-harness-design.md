@@ -1,8 +1,10 @@
 # Local-First Harness Design
 
-**Status:** proposed  
+**Status:** Phase 1 shipped; Phase 2 shipped  
 **Date:** 2026-11-07  
-**Scope:** Phase 1 — downloadable desktop client that runs the harness locally without Docker, PostgreSQL, NATS or a CLI.
+**Scope:** downloadable desktop client that runs the harness locally without Docker, PostgreSQL, NATS or a CLI.
+
+> **Update:** Phase 1 used an embedded PostgreSQL child process as a bridge. Phase 2 replaced it with `internal/localstore` (SQLite, pure Go) and `cmd/harness-local`; local mode no longer starts or bundles PostgreSQL. The embedded-PostgreSQL sections below describe the historical Phase 1 design; the runtime contract (same `/v1` client, local token, data directory, remote team mode) is unchanged.
 
 ## Problem
 

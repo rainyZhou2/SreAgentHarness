@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-07-local-first-harness-design.md`
 
+> **Phase 2 update:** local mode now uses `internal/localstore` (SQLite) and `cmd/harness-local`; the embedded-PostgreSQL tasks in this plan were the Phase 1 bridge and have been superseded. The desktop local/remote contract remains the same.
+
 ## Global Constraints
 
 - Local listeners bind `127.0.0.1` only.
