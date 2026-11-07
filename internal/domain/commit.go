@@ -42,6 +42,10 @@ type StepSuccess struct {
 	// MemoryHits are committed with a retrieve_memory step and pinned for the
 	// following reason steps (§10.2 ①).
 	MemoryHits []MemoryHit
+	// Thoughts is the explicit decision trace produced by this step.
+	Thoughts []Thought
+	// Capabilities records which capabilities the step used or considered.
+	Capabilities []CapabilityRef
 }
 
 type MemoryHit struct {

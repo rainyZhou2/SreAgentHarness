@@ -257,8 +257,9 @@ type Decision struct {
 	Model               string `json:"model,omitempty"`
 	// Additional tool calls the model proposed in the same response. V1
 	// executes only the first; the rest are kept in the trace (§35.3).
-	DeferredToolCalls []ToolCall `json:"deferred_tool_calls,omitempty"`
-	MemoryRefs        []string   `json:"memory_refs,omitempty"`
+	DeferredToolCalls []ToolCall    `json:"deferred_tool_calls,omitempty"`
+	MemoryRefs        []string      `json:"memory_refs,omitempty"`
+	Thought           *ThoughtChain `json:"thought,omitempty"`
 }
 
 // Observation is a tool result (or a policy/approval outcome) fed back to reasoning.

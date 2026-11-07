@@ -15,6 +15,75 @@ import (
 	"go-sre-harness/internal/memory"
 )
 
+func (s *Store) KnownServices(ctx context.Context, tenantID string, limit int) ([]string, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `SELECT service_id FROM (
+			SELECT DISTINCT scope_id AS service_id FROM agent_memories WHERE tenant_id=$1 AND scope='service'
+			UNION SELECT DISTINCT service_id FROM incidents WHERE tenant_id=$1
+			UNION SELECT DISTINCT service_id FROM service_dependencies WHERE tenant_id=$1
+		) s WHERE service_id <> '' ORDER BY service_id LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ServiceShards(ctx context.Context, tenantID string, services []string, limit int) ([]string, error) {
+	if len(services) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT s.shard_key FROM memory_shards s
+		JOIN agent_memories m ON m.tenant_id = s.tenant_id AND m.id = s.memory_id
+		WHERE s.tenant_id=$1 AND s.shard_key LIKE 'capability:%'
+		  AND m.scope='service' AND m.scope_id = ANY($2)
+		ORDER BY s.shard_key LIMIT $3`, tenantID, services, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RunCapabilities(ctx context.Context, tenantID, runID string) ([]domain.CapabilityRef, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT capability_ref, role FROM step_capability_refs
+		WHERE tenant_id=$1 AND run_id=$2 AND role='used' ORDER BY capability_ref`, tenantID, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CapabilityRef
+	for rows.Next() {
+		var ref domain.CapabilityRef
+		if err := rows.Scan(&ref.Ref, &ref.Role); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
 // pinnedMemories returns the hits of the latest retrieve_memory step committed
 // before beforeSeq. Hits are immutable once committed, so every retry of a
 // reason step sees the same memories (§10.2 ①).
@@ -41,7 +110,37 @@ func (s *Store) pinnedMemories(ctx context.Context, tenantID, runID, _ string, b
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	ids := make([]string, 0, len(out))
+	for _, m := range out {
+		ids = append(ids, m.ID)
+	}
+	shardRows, err := s.pool.Query(ctx, `SELECT memory_id, shard_key FROM memory_shards
+		WHERE tenant_id=$1 AND memory_id = ANY($2) ORDER BY memory_id, weight DESC, shard_key`, tenantID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer shardRows.Close()
+	byID := map[string][]string{}
+	for shardRows.Next() {
+		var id, key string
+		if err := shardRows.Scan(&id, &key); err != nil {
+			return nil, err
+		}
+		byID[id] = append(byID[id], key)
+	}
+	if err := shardRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Shards = byID[out[i].ID]
+	}
+	return out, nil
 }
 
 // ---------- long-term memory (§8–§11) ----------
@@ -109,6 +208,12 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 				return err
 			}
 		}
+		for _, sh := range memoryShards(m) {
+			if _, err := tx.Exec(ctx, `INSERT INTO memory_shards (tenant_id, memory_id, shard_key, weight, source)
+				VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, m.TenantID, id, sh.ShardKey, sh.Weight, sh.Source); err != nil {
+				return err
+			}
+		}
 		if m.Status == "ACTIVE" {
 			if err := supersedeSubject(ctx, tx, m.TenantID, id, m.Scope, m.ScopeID, m.Subject); err != nil {
 				return err
@@ -118,6 +223,26 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		return err
 	})
 	return out, created, err
+}
+
+func memoryShards(m memory.NewMemory) []domain.MemoryShard {
+	key := "org:" + m.TenantID
+	if m.Scope != "organization" && m.ScopeID != "" {
+		key = m.Scope + ":" + m.ScopeID
+	}
+	out := []domain.MemoryShard{{ShardKey: key, Weight: 1, Source: "scope"}}
+	seen := map[string]bool{key: true}
+	for _, sh := range m.Shards {
+		if sh.ShardKey == "" || seen[sh.ShardKey] {
+			continue
+		}
+		seen[sh.ShardKey] = true
+		if sh.Weight == 0 {
+			sh.Weight = 0.8
+		}
+		out = append(out, sh)
+	}
+	return out
 }
 
 func nonNil(xs []string) []string {
@@ -257,7 +382,9 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 	}
 	tq := tsQuery(q.Text)
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixCols("m.", memoryCols)+`,
-		CASE WHEN $4 = '' THEN 0 ELSE ts_rank(m.search_tsv, to_tsquery('simple', $4)) END AS rank, e.embedding
+		CASE WHEN $4 = '' THEN 0 ELSE ts_rank(m.search_tsv, to_tsquery('simple', $4)) END AS rank, e.embedding,
+		COALESCE((SELECT MAX(ms.weight) FROM memory_shards ms
+			WHERE ms.tenant_id = m.tenant_id AND ms.memory_id = m.id AND ms.shard_key = ANY($8)), 0) AS shard_weight
 		FROM agent_memories m
 		LEFT JOIN memory_embeddings e ON e.memory_id = m.id AND e.memory_version = m.current_version AND e.embedding_model = $5
 		WHERE m.tenant_id=$1 AND m.status='ACTIVE' AND m.sensitivity = ANY($6)
@@ -265,7 +392,7 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 		AND (m.scope='organization' OR (m.scope='service' AND m.scope_id = ANY($2))
 		     OR (m.scope='incident' AND m.scope_id = $3) OR m.scope='agent')
 		ORDER BY rank DESC, m.updated_at DESC LIMIT $7`,
-		q.TenantID, q.Services, q.IncidentID, tq, q.EmbeddingModel, allowed, q.Limit)
+		q.TenantID, q.Services, q.IncidentID, tq, q.EmbeddingModel, allowed, q.Limit, q.Shards)
 	if err != nil {
 		return nil, err
 	}
@@ -275,11 +402,12 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 		var c memory.Candidate
 		var rank float32
 		var emb []float32
-		m, err := scanMemory(rows, &rank, &emb)
+		var shardW float64
+		m, err := scanMemory(rows, &rank, &emb, &shardW)
 		if err != nil {
 			return nil, err
 		}
-		c.Memory, c.FTSRank, c.Embedding = m, float64(rank), emb
+		c.Memory, c.FTSRank, c.Embedding, c.ShardWeight = m, float64(rank), emb, shardW
 		out = append(out, c)
 	}
 	return out, rows.Err()

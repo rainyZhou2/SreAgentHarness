@@ -31,6 +31,8 @@ var routeRoles = map[string]auth.Role{
 	"DELETE /v1/admin/role-bindings":          auth.Admin,
 	"GET /v1/admin/audit":                     auth.Admin,
 	"GET /v1/admin/plugins":                   auth.Admin,
+	"POST /v1/graph/relations":                auth.Admin,
+	"DELETE /v1/graph/relations":              auth.Admin,
 }
 
 var publicRoutes = map[string]bool{"GET /healthz": true, "GET /metrics": true}

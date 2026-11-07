@@ -32,6 +32,9 @@ type NewMemory struct {
 	Environment  *string
 	CreatedBy    string
 	ExpiresAt    *time.Time
+	// Shards are additional retrieval partitions (capability, run, incident).
+	// CreateMemory always adds the scope-derived shard.
+	Shards []domain.MemoryShard
 	// Filled by Writer.Prepare.
 	ContentRef     string
 	ContentHash    string
@@ -127,6 +130,7 @@ type ConsolidationStore interface {
 	ClaimConsolidation(ctx context.Context, limit int, claimFor time.Duration) ([]ConsolidationJob, error)
 	CompleteConsolidation(ctx context.Context, runID string, failure error) error
 	RunRecord(ctx context.Context, tenantID, runID string) (RunRecord, error)
+	RunCapabilities(ctx context.Context, tenantID, runID string) ([]domain.CapabilityRef, error)
 	InsertExperience(ctx context.Context, e Experience) (bool, error)
 	CreateMemory(ctx context.Context, m NewMemory) (Memory, bool, error)
 }
@@ -244,7 +248,42 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 	}
 
 	service := ServiceFromGoal(goal.Goal)
+	if service == "" {
+		for _, s := range rec.Steps {
+			if s.Kind != domain.StepTool {
+				continue
+			}
+			var call domain.ToolCall
+			if data, err := c.Artifacts.Get(ctx, j.TenantID, s.InputRef); err == nil {
+				_ = json.Unmarshal(data, &call)
+			}
+			var args struct {
+				Service string `json:"service"`
+			}
+			if json.Unmarshal(call.Args, &args) == nil && args.Service != "" {
+				service = args.Service
+				break
+			}
+		}
+	}
 	sourceRefs := []string{"run:" + run.ID}
+	shards := []domain.MemoryShard{{ShardKey: "run:" + run.ID, Weight: 0.4, Source: "run"}}
+	if service != "" {
+		shards = append(shards, domain.MemoryShard{ShardKey: "service:" + service, Weight: 1, Source: "scope"})
+	}
+	if run.IncidentID != nil && *run.IncidentID != "" {
+		shards = append(shards, domain.MemoryShard{ShardKey: "incident:" + *run.IncidentID, Weight: 1, Source: "incident"})
+	}
+	if caps, err := c.Store.RunCapabilities(ctx, j.TenantID, j.RunID); err == nil {
+		seen := map[string]bool{}
+		for _, cap := range caps {
+			if cap.Role != "used" || cap.Ref == "" || seen[cap.Ref] {
+				continue
+			}
+			seen[cap.Ref] = true
+			shards = append(shards, domain.MemoryShard{ShardKey: "capability:" + cap.Ref, Weight: 0.8, Source: "capability"})
+		}
+	}
 	if run.Status == domain.RunCompleted && l.Conclusion != "" && service != "" && quality != "DISPUTED" {
 		// Operator feedback is not approval: a verified run only yields a
 		// VALIDATING memory, which an approver activates (TransitionMemory).
@@ -258,12 +297,12 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 		}
 		mems := []NewMemory{{TenantID: j.TenantID, Scope: "service", ScopeID: service, Type: "episodic", Status: status,
 			Subject: service + ":incident_resolution", Title: "Past incident on " + service + ": " + firstSentence(l.Conclusion),
-			Content: content, SourceRefs: sourceRefs, Trust: trust, CreatedBy: "consolidator"}}
+			Content: content, SourceRefs: sourceRefs, Trust: trust, CreatedBy: "consolidator", Shards: shards}}
 		if len(l.Actions) > 0 && quality == "VERIFIED" {
 			mems = append(mems, NewMemory{TenantID: j.TenantID, Scope: "service", ScopeID: service, Type: "procedural",
 				Status: status, Subject: service + ":remediation", Title: "Remediation that worked for " + service,
 				Content:    "After verifying: " + firstSentence(l.Conclusion) + "\nRemediation: " + strings.Join(l.Actions, "; "),
-				SourceRefs: sourceRefs, Trust: trust, CreatedBy: "consolidator"})
+				SourceRefs: sourceRefs, Trust: trust, CreatedBy: "consolidator", Shards: shards})
 		}
 		for _, nm := range mems {
 			prepared, err := c.Writer.Prepare(ctx, nm)

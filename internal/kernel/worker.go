@@ -484,8 +484,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return domain.StepSuccess{}, err
 	}
 	res := domain.StepSuccess{OutputRef: outRef, OutputHash: outHash, ArtifactKind: "decision", ContextHash: contextHash}
+	res.Thoughts, res.Capabilities = reasonTrace(decision, in, lease.TenantID)
 	summary := map[string]any{"decision_kind": decision.Kind, "intent": decision.Intent, "reason_summary": truncate(decision.ReasonSummary, 500),
-		"hypotheses": len(decision.Hypotheses)}
+		"hypotheses": len(decision.Hypotheses), "thoughts": len(res.Thoughts), "capabilities": len(res.Capabilities)}
 	if decision.ModelRequestID != "" {
 		summary["model_request_id"], summary["model"], summary["manifest_ref"] = decision.ModelRequestID, decision.Model, decision.ManifestRef
 	}
@@ -495,7 +496,8 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 
 	if decision.Kind == domain.DecisionFinal {
 		resultRef, _, err := w.put(ctx, lease.TenantID, "result", map[string]any{
-			"answer": decision.Answer, "intent": decision.Intent, "hypotheses": decision.Hypotheses, "decision_ref": outRef})
+			"answer": decision.Answer, "intent": decision.Intent, "hypotheses": decision.Hypotheses,
+			"thought": decision.Thought, "decision_ref": outRef})
 		if err != nil {
 			return domain.StepSuccess{}, err
 		}
@@ -720,8 +722,10 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		}
 		if state == domain.EffectConfirmed {
 			// Already applied by an earlier attempt whose commit was lost: reuse.
+			thoughts, caps := toolTrace(call.Name, desc, true)
 			return domain.StepSuccess{OutputRef: priorRef, OutputHash: "", ArtifactKind: "observation",
-				Plan: plan, SideEffect: true, Summary: mustJSON(map[string]any{"tool": call.Name, "reused": true})}, nil
+				Plan: plan, SideEffect: true, Thoughts: thoughts, Capabilities: caps,
+				Summary: mustJSON(map[string]any{"tool": call.Name, "reused": true})}, nil
 		}
 		st.dispatched = true
 	}
@@ -761,8 +765,9 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		}
 		return domain.StepSuccess{}, err
 	}
+	thoughts, caps := toolTrace(call.Name, desc, true)
 	return domain.StepSuccess{OutputRef: ref, OutputHash: h, ArtifactKind: "observation", SideEffect: sideEffect,
-		Plan: plan, Summary: mustJSON(map[string]any{"tool": call.Name, "risk": desc.Risk})}, nil
+		Plan: plan, Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(map[string]any{"tool": call.Name, "risk": desc.Risk})}, nil
 }
 
 // messageText renders a committed conversation message for the context.
@@ -785,6 +790,95 @@ func (w *Worker) messageText(ctx context.Context, tenantID string, m domain.Mess
 	return string(data)
 }
 
+func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string) ([]domain.Thought, []domain.CapabilityRef) {
+	var out []domain.Thought
+	var caps []domain.CapabilityRef
+	seq := 0
+	next := func(kind domain.ThoughtKind, summary string, status domain.ThoughtStatus, confidence float64, refs []domain.ThoughtRef) {
+		if strings.TrimSpace(summary) == "" {
+			return
+		}
+		seq++
+		out = append(out, domain.Thought{Seq: seq, Kind: kind, Summary: truncate(summary, 1000), Status: status,
+			Confidence: confidence, Structured: d.Thought != nil && d.Thought.Structured, Refs: refs})
+	}
+	var memoryRefs []domain.ThoughtRef
+	for _, m := range in.Memories {
+		memoryRefs = append(memoryRefs, domain.ThoughtRef{Ref: fmt.Sprintf("memory:%s@%d", m.ID, m.Version), Relation: "based_on"})
+	}
+	var evidenceRefs []domain.ThoughtRef
+	for _, ref := range d.EvidenceRefs {
+		evidenceRefs = append(evidenceRefs, domain.ThoughtRef{Ref: ref, Relation: "supports"})
+	}
+	if d.Thought != nil {
+		next(domain.ThoughtPlan, d.Thought.Plan, domain.ThoughtUnknown, d.Thought.Confidence, memoryRefs)
+	}
+	next(domain.ThoughtDecision, d.ReasonSummary, domain.ThoughtUnknown, 0, evidenceRefs)
+	for _, h := range d.Hypotheses {
+		status := domain.ThoughtUnverified
+		switch strings.ToUpper(h.Status) {
+		case string(domain.ThoughtVerified):
+			status = domain.ThoughtVerified
+		case string(domain.ThoughtRefuted):
+			status = domain.ThoughtRefuted
+		}
+		var refs []domain.ThoughtRef
+		for _, ref := range h.Supports {
+			refs = append(refs, domain.ThoughtRef{Ref: ref, Relation: "supports"})
+		}
+		for _, ref := range h.Refutes {
+			refs = append(refs, domain.ThoughtRef{Ref: ref, Relation: "refutes"})
+		}
+		next(domain.ThoughtHypothesis, h.Statement, status, h.ConfidenceEstimate, refs)
+	}
+	if d.Kind == domain.DecisionTool && d.Tool != nil {
+		var refs []domain.ThoughtRef
+		for _, desc := range in.Tools {
+			if desc.Name != d.Tool.Name {
+				continue
+			}
+			ref := tools.CapabilityRef(desc)
+			caps = append(caps, domain.CapabilityRef{Ref: ref, Role: "considered"})
+			refs = append(refs, domain.ThoughtRef{Ref: ref, Relation: "uses"})
+			break
+		}
+		next(domain.ThoughtAction, "Call "+d.Tool.Name, domain.ThoughtUnknown, 0, refs)
+	}
+	if d.Kind == domain.DecisionFinal && d.Thought != nil {
+		if v := d.Thought.Verification; v != nil && (v.Verdict != "" || v.Expected != "" || v.Observed != "") {
+			summary := strings.TrimSpace(strings.Join([]string{v.Verdict, v.Expected, v.Observed}, " · "))
+			var status domain.ThoughtStatus
+			switch strings.ToUpper(v.Verdict) {
+			case string(domain.ThoughtVerified):
+				status = domain.ThoughtVerified
+			case string(domain.ThoughtRefuted):
+				status = domain.ThoughtRefuted
+			default:
+				status = domain.ThoughtUnverified
+			}
+			next(domain.ThoughtVerification, summary, status, 0, evidenceRefs)
+		}
+		next(domain.ThoughtReflection, d.Thought.Reflection, domain.ThoughtUnknown, 0, nil)
+		next(domain.ThoughtConclusion, d.Answer, domain.ThoughtUnknown, 0, evidenceRefs)
+	}
+	for _, s := range in.Skills {
+		caps = append(caps, domain.CapabilityRef{Ref: cognitive.SkillRef(tenantID, s), Role: "considered"})
+	}
+	return out, caps
+}
+
+func toolTrace(name string, d tools.Descriptor, ok bool) ([]domain.Thought, []domain.CapabilityRef) {
+	ref := tools.CapabilityRef(d)
+	status := domain.ThoughtOK
+	word := "ok"
+	if !ok {
+		status, word = domain.ThoughtFailed, "failed"
+	}
+	return []domain.Thought{{Seq: 1, Kind: domain.ThoughtObservation, Summary: name + " → " + word, Status: status,
+			Refs: []domain.ThoughtRef{{Ref: ref, Relation: "uses"}}}},
+		[]domain.CapabilityRef{{Ref: ref, Role: "used"}}
+}
+
 // withoutDisabled removes tools the tenant switched off.
 func withoutDisabled(ds []tools.Descriptor, off map[string]bool) []tools.Descriptor {
 	if len(off) == 0 {
@@ -800,10 +894,14 @@ func withoutDisabled(ds []tools.Descriptor, off map[string]bool) []tools.Descrip
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(runes[:n]) + "…"
 }
 
 func mustJSON(v any) json.RawMessage {

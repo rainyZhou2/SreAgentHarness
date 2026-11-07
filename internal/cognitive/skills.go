@@ -19,6 +19,15 @@ type Skill struct {
 	Manual bool `json:"manual,omitempty"`
 }
 
+// SkillRef is the stable graph reference for a skill's current content.
+func SkillRef(tenantID string, s Skill) string {
+	hash := strings.TrimPrefix(artifact.Hash([]byte(s.Description+"\x00"+s.Instructions)), "sha256:")
+	if len(hash) > 16 {
+		hash = hash[:16]
+	}
+	return "skill:" + tenantID + "/" + s.Name + "@" + hash
+}
+
 // SelectSkills returns the skills that apply to a run: every automatic
 // skill, and each manual one whose "/name" appears as a word in texts
 // (the run's goal and the chat's earlier user messages).

@@ -275,7 +275,7 @@ func one(name string, cfg any) plugin.Specs { return plugin.Specs{plugin.NewSpec
 func FromEnv(e Env) (File, error) {
 	f := File{Plugins: map[string]plugin.Specs{}}
 	f.Settings = plugin.Settings{ModelAlias: e.str("HARNESS_MODEL_ALIAS", "sre-reasoning"), ModelEffort: e("HARNESS_MODEL_EFFORT"),
-		DefaultTenant: e.str("HARNESS_DEFAULT_TENANT", "tenant-a"), DefaultProfile: "sre-diagnosis", DefaultProfileVersion: 3}
+		DefaultTenant: e.str("HARNESS_DEFAULT_TENANT", "tenant-a"), DefaultProfile: "sre-diagnosis", DefaultProfileVersion: 4}
 	budget, _ := strconv.ParseFloat(e.str("HARNESS_MODEL_DAILY_BUDGET_USD", "0"), 64)
 	f.Models = ModelSettings{DailyBudgetUSD: budget, MaxInflightPerTenant: e.int("HARNESS_MODEL_MAX_INFLIGHT_PER_TENANT", 32)}
 	f.Strategy = StrategyConfig{Default: "llm", Aliases: map[string]string{"rule_based_demo": "llm"}}
