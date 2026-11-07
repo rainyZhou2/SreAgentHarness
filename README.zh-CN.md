@@ -101,10 +101,10 @@ scripts/demo.sh "remediate high latency service=checkout"
 
 ## 桌面客户端
 
-[`desktop/`](desktop/README.zh-CN.md) 是 Wails 原生客户端（约 9 MB）：会话、流式推理、工具调用卡片、对话内审批、审批收件箱，以及模型 / MCP / HTTP 工具 / 技能管理。
+[`desktop/`](desktop/README.zh-CN.md) 是 Wails 原生客户端。默认进入 **本地运行** 模式：应用会启动自带的 PostgreSQL 和 harness core，不需要 Docker、系统 PostgreSQL、NATS 或命令行。切换到 **团队服务** 即可连接共享 harness。会话、流式推理、工具调用卡片、对话内审批、审批收件箱，以及模型 / MCP / HTTP 工具 / 技能管理在两种模式下一致。
 
 ```bash
-desktop/build.sh run
+HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" desktop/build.sh run
 ```
 
 ## 部署

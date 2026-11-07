@@ -46,17 +46,19 @@ Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（se
 不需要 Node.js，也不需要 Wails CLI。
 
 ```bash
-./build.sh        # macOS：build/bin/SRE Harness.app
-./build.sh run    # 构建并打开
+# 本地模式构建：打包 harness core 与 PostgreSQL。
+HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh
+HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh run
 ```
 
-首次启动打开 **Connection**，填写：
-- 服务端地址（默认 `http://127.0.0.1:8080`）；
-- 认证方式：
-  - **Development headers**：tenant / actor / roles，仅适用于 `dev` 认证模式的服务端；
-  - **Bearer token**：静态 Token 或 OIDC JWT。
+应用默认进入 **本地运行** 模式：
 
-设置保存在 `<用户配置目录>/sre-harness-desktop/settings.json`（权限 0600）。Bearer Token 只保存在内存中。
+- 桌面进程启动自带的 PostgreSQL 和 harness core；
+- UI 通过回环地址和每次启动随机生成的 Token 连接；
+- 不需要 Docker、系统 PostgreSQL、NATS 或命令行；
+- 数据保存在 `<用户配置目录>/sre-harness-desktop/local/`。
+
+在 Connection 中切换到 **团队服务** 即可连接共享 harness。团队模式支持开发请求头（仅本机调试）或 Bearer Token。设置保存在 `<用户配置目录>/sre-harness-desktop/settings.json`（权限 0600）；Token 只保存在内存中。
 
 ## 浏览器预览
 

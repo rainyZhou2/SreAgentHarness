@@ -46,17 +46,19 @@ Requirements: Go 1.26+.
 No Node.js or Wails CLI is needed.
 
 ```bash
-./build.sh        # macOS: build/bin/SRE Harness.app
-./build.sh run    # build and open
+# Local-capable build: bundle the harness core and PostgreSQL.
+HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh
+HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh run
 ```
 
-On first launch, open **Connection** and set:
-- the server URL (default `http://127.0.0.1:8080`);
-- the authentication mode:
-  - **Development headers**: tenant, actor, roles. Only works against a server in `dev` auth mode.
-  - **Bearer token**: a static token or an OIDC JWT.
+The app starts in **Local runtime** mode by default:
 
-Settings are saved to `<user config dir>/sre-harness-desktop/settings.json` (mode 0600). The bearer token is kept in memory only.
+- the desktop process starts a bundled PostgreSQL and the harness core;
+- the UI talks to it over loopback with a per-launch random token;
+- no Docker, system PostgreSQL, NATS or terminal is needed;
+- data lives under `<user config dir>/sre-harness-desktop/local/`.
+
+Switch to **Team server** in Connection to use a shared harness instead. Team mode accepts development headers (local development only) or a bearer token. Settings are saved to `<user config dir>/sre-harness-desktop/settings.json` (mode 0600); tokens are kept in memory only.
 
 ## Browser preview
 
