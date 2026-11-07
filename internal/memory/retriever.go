@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/domain"
@@ -20,17 +21,21 @@ type CandidateQuery struct {
 	Text           string
 	EmbeddingModel string
 	MaxSensitivity string // public | internal | restricted
+	Shards         []string
 	Limit          int
 }
 
 type Candidate struct {
 	Memory
-	FTSRank float64
+	FTSRank     float64
+	ShardWeight float64
 }
 
 type Store interface {
 	MemoryCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error)
 	ServiceDependencies(ctx context.Context, tenantID, service string) ([]string, error)
+	KnownServices(ctx context.Context, tenantID string, limit int) ([]string, error)
+	ServiceShards(ctx context.Context, tenantID string, services []string, limit int) ([]string, error)
 	RunIncident(ctx context.Context, tenantID, runID string) (string, error)
 }
 
@@ -40,6 +45,22 @@ type Retriever struct {
 	Embedder  Embedder
 	Artifacts artifact.Store
 	TopK      int
+}
+
+func uniqueStrings(in []string, max int) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+		if max > 0 && len(out) >= max {
+			break
+		}
+	}
+	return out
 }
 
 type hitView struct {
@@ -55,9 +76,20 @@ type hitView struct {
 func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal string) (domain.StepSuccess, error) {
 	service := ServiceFromGoal(goal)
 	services := []string{}
-	var deps []string
 	if service != "" {
 		services = append(services, service)
+	}
+	if known, err := r.Store.KnownServices(ctx, lease.TenantID, 200); err == nil {
+		lower := strings.ToLower(goal)
+		for _, s := range known {
+			if s == "" || s == service || !strings.Contains(lower, strings.ToLower(s)) {
+				continue
+			}
+			services = append(services, s)
+		}
+	}
+	var deps []string
+	if service != "" {
 		d, err := r.Store.ServiceDependencies(ctx, lease.TenantID, service)
 		if err != nil {
 			return domain.StepSuccess{}, domain.Retryable(err, 0)
@@ -66,13 +98,26 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 		services = append(services, deps...)
 	}
 	incident, _ := r.Store.RunIncident(ctx, lease.TenantID, lease.RunID)
+	shards := []string{"run:" + lease.RunID}
+	for _, s := range services {
+		shards = append(shards, "service:"+s)
+	}
+	if incident != "" {
+		shards = append(shards, "incident:"+incident)
+	}
+	if extra, err := r.Store.ServiceShards(ctx, lease.TenantID, services, 20); err == nil {
+		shards = append(shards, extra...)
+	}
+	shards = uniqueStrings(shards, 20)
 	cands, err := r.Store.MemoryCandidates(ctx, CandidateQuery{TenantID: lease.TenantID, Services: services,
-		IncidentID: incident, Text: goal, EmbeddingModel: r.Embedder.Model(), MaxSensitivity: "internal", Limit: 500})
+		IncidentID: incident, Text: goal, EmbeddingModel: r.Embedder.Model(), MaxSensitivity: "internal",
+		Shards: shards, Limit: 500})
 	if err != nil {
 		return domain.StepSuccess{}, domain.Retryable(err, 0)
 	}
 
 	byID := map[string]Memory{}
+	shardW := map[string]float64{}
 	var fts, vec, graph []string
 	type scored struct {
 		id string
@@ -86,6 +131,7 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 	}
 	for _, c := range cands {
 		byID[c.ID] = c.Memory
+		shardW[c.ID] = c.ShardWeight
 		if c.FTSRank > 0 {
 			ftsS = append(ftsS, scored{c.ID, c.FTSRank})
 		}
@@ -107,6 +153,13 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 		vec = append(vec, s.id)
 	}
 	fused := RRF(fts, vec, graph)
+	for id, score := range fused {
+		affinity := shardW[id]
+		if affinity > 1 {
+			affinity = 1
+		}
+		fused[id] = score * (1 + 0.25*affinity)
+	}
 	ids := make([]string, 0, len(fused))
 	for id := range fused {
 		ids = append(ids, id)
@@ -149,8 +202,8 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 		views = append(views, hitView{MemoryID: m.ID, Version: m.Version, Title: m.Title, Scope: m.Scope + ":" + m.ScopeID,
 			Trust: m.Trust, Score: fused[m.ID], Branches: branches(m.ID)})
 	}
-	out := map[string]any{"query": goal, "service": service, "dependencies": deps, "candidates": len(cands),
-		"embedding_model": r.Embedder.Model(), "hits": views, "conflicts": conflicts}
+	out := map[string]any{"query": goal, "service": service, "dependencies": deps, "shards": shards,
+		"candidates": len(cands), "embedding_model": r.Embedder.Model(), "hits": views, "conflicts": conflicts}
 	data, _ := json.Marshal(out)
 	ref, h, err := r.Artifacts.Put(ctx, lease.TenantID, "memory-retrieval", data)
 	if err != nil {

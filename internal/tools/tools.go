@@ -38,6 +38,15 @@ type Descriptor struct {
 	Source string `json:"source,omitempty"`
 }
 
+// CapabilityRef is the stable graph reference for a tool descriptor.
+func CapabilityRef(d Descriptor) string {
+	version := d.Version
+	if version == "" {
+		version = "0"
+	}
+	return "tool:" + d.Name + "@" + version
+}
+
 // CallInfo identifies the step attempt a tool call belongs to. Remote
 // executors forward it so downstream systems can audit and fence.
 type CallInfo struct {

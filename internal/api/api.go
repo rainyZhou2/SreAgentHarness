@@ -20,6 +20,7 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eventbus"
+	"go-sre-harness/internal/graph"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
@@ -33,6 +34,8 @@ type Store interface {
 	GetRun(ctx context.Context, tenantID, runID string) (domain.Run, error)
 	ListRuns(ctx context.Context, tenantID string, status domain.RunStatus, limit int) ([]domain.Run, error)
 	ListSteps(ctx context.Context, tenantID, runID string) ([]domain.Step, error)
+	// RunTrace returns the thoughts and capability refs keyed by step id.
+	RunTrace(ctx context.Context, tenantID, runID string) (map[string][]domain.Thought, map[string][]domain.CapabilityRef, error)
 	ListEvents(ctx context.Context, tenantID, runID string, afterSeq int64, limit int) ([]domain.Event, error)
 	ListApprovals(ctx context.Context, tenantID, runID string) ([]domain.ApprovalRequest, error)
 	ApplyCommand(ctx context.Context, tenantID, runID string, req domain.CommandRequest) (domain.Command, error)
@@ -92,6 +95,9 @@ type Server struct {
 	// replace_pending_input (the client never supplies an intent).
 	Tools  *tools.Registry
 	Policy policy.Gate
+
+	// Graph serves the capability/memory provenance views.
+	Graph *graph.Service
 
 	// Auth authenticates requests; nil means development header mode.
 	Auth *auth.Chain
@@ -155,6 +161,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{run_id}/steps/{step_id}/revisions", s.stepRevisions)
 	mux.HandleFunc("GET /v1/runs/{run_id}/cost", s.runCost)
 	mux.HandleFunc("GET /v1/runs/{run_id}/stream-segments", s.listSegments)
+	mux.HandleFunc("GET /v1/graph/search", s.graphSearch)
+	mux.HandleFunc("GET /v1/graph/neighborhood", s.graphNeighborhood)
+	mux.HandleFunc("POST /v1/graph/relations", s.graphRelate)
+	mux.HandleFunc("DELETE /v1/graph/relations", s.graphUnrelate)
+	mux.HandleFunc("GET /v1/capabilities", s.capabilities)
 	mux.HandleFunc("GET /v1/usage", s.tenantUsage)
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
 	mux.HandleFunc("GET /v1/sessions", s.listSessions)
@@ -385,12 +396,19 @@ func (s *Server) listSteps(w http.ResponseWriter, r *http.Request) {
 	// can show tool arguments, observations and decisions inline.
 	type stepIO struct {
 		domain.Step
-		Input  json.RawMessage `json:"input,omitempty"`
-		Output json.RawMessage `json:"output,omitempty"`
+		Input        json.RawMessage        `json:"input,omitempty"`
+		Output       json.RawMessage        `json:"output,omitempty"`
+		Thoughts     []domain.Thought       `json:"thoughts,omitempty"`
+		Capabilities []domain.CapabilityRef `json:"capabilities,omitempty"`
+	}
+	thoughts, caps, traceErr := s.Store.RunTrace(r.Context(), id.tenant, r.PathValue("run_id"))
+	if traceErr != nil {
+		s.Log.Warn("run trace", "run", r.PathValue("run_id"), "err", traceErr)
 	}
 	out := make([]stepIO, 0, len(steps))
 	for _, st := range steps {
-		x := stepIO{Step: st, Input: s.artifactJSON(r.Context(), id.tenant, st.InputRef)}
+		x := stepIO{Step: st, Input: s.artifactJSON(r.Context(), id.tenant, st.InputRef),
+			Thoughts: thoughts[st.ID], Capabilities: caps[st.ID]}
 		if st.OutputRef != nil {
 			x.Output = s.artifactJSON(r.Context(), id.tenant, *st.OutputRef)
 		}

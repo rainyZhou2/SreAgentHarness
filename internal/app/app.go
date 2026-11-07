@@ -26,6 +26,7 @@ import (
 	"go-sre-harness/internal/eventsink"
 	"go-sre-harness/internal/extensions"
 	gw "go-sre-harness/internal/gateway"
+	"go-sre-harness/internal/graph"
 	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/plugin"
@@ -406,6 +407,11 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		if len(authns) == 0 {
 			return nil, errors.New("no authenticator plugin is enabled")
 		}
+		active := h.Active()
+		plugins := make([]graph.PluginInfo, 0, len(active))
+		for _, p := range active {
+			plugins = append(plugins, graph.PluginInfo{Kind: p.Kind, Name: p.Name, Instance: p.Instance})
+		}
 		srv := &api.Server{Store: store, Artifacts: h.Artifacts, DefaultProfile: h.Settings.DefaultProfile,
 			DefaultVersion: h.Settings.DefaultProfileVersion, Log: log,
 			Deltas: h.Deltas, BranchPolicy: domain.BranchPolicy(e.str("HARNESS_BRANCH_POLICY", string(domain.BranchQueue))),
@@ -422,6 +428,13 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		for _, x := range exts {
 			srv.Extend(x)
 		}
+		active = h.Active()
+		plugins = make([]graph.PluginInfo, 0, len(active))
+		for _, p := range active {
+			plugins = append(plugins, graph.PluginInfo{Kind: p.Kind, Name: p.Name, Instance: p.Instance})
+		}
+		srv.Graph = &graph.Service{Store: store, Tools: h.Tools, Extensions: h.Extensions,
+			Plugins: plugins, Log: log.With("component", "graph")}
 		a.Server, a.Handler = srv, srv.Handler()
 	}
 	log.Info("plugins active", "mode", mode, "plugins", h.Active(), "tools", len(h.Tools.Descriptors()))

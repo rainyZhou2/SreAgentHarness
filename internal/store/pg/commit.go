@@ -63,6 +63,12 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepS
 			res.Summary); err != nil {
 			return err
 		}
+		if err := insertThoughts(ctx, tx, lease.TenantID, lease.RunID, lease.StepID, res.Thoughts); err != nil {
+			return err
+		}
+		if err := insertCapabilityRefs(ctx, tx, lease.TenantID, lease.RunID, lease.StepID, res.Capabilities); err != nil {
+			return err
+		}
 
 		for _, h := range res.MemoryHits {
 			if _, err := tx.Exec(ctx, `INSERT INTO step_memory_hits (tenant_id, step_id, memory_id, memory_version, score, rank)
