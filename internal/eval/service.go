@@ -88,6 +88,10 @@ type Store interface {
 	GetRun(ctx context.Context, tenantID, runID string) (domain.Run, error)
 	ListSteps(ctx context.Context, tenantID, runID string) ([]domain.Step, error)
 	ListFeedback(ctx context.Context, tenantID, runID string) ([]memory.Feedback, error)
+	// Plan datasets also need approvals, the flow projection and run cost.
+	ListApprovals(ctx context.Context, tenantID, runID string) ([]domain.ApprovalRequest, error)
+	LoadFlow(ctx context.Context, tenantID, runID string) (domain.FlowSnapshot, error)
+	EvalRunCost(ctx context.Context, tenantID, runID string) (CostSummary, error)
 
 	CreateDataset(ctx context.Context, tenantID, name, actor string) (Dataset, error)
 	GetDataset(ctx context.Context, tenantID, id string) (Dataset, error)
