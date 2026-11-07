@@ -37,9 +37,13 @@ const ThoughtSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*
 // tool-heavy MCP investigations enough steps to finish.
 const MCPToolSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":20,"prompt_prefix_version":"sre-prefix-v5"}`
 
-// MCPDeepSpec (sre-diagnosis@6, the default) covers topology investigations
-// that need to combine several MCP sources before concluding.
+// MCPDeepSpec (sre-diagnosis@6) covers topology investigations that need to
+// combine several MCP sources before concluding.
 const MCPDeepSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":30,"prompt_prefix_version":"sre-prefix-v5"}`
+
+// CapabilityMapSpec (sre-diagnosis@7, the default) adds the bounded [E]
+// capability map to the prompt.
+const CapabilityMapSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":30,"prompt_prefix_version":"sre-prefix-v6","capability_map":true}`
 
 // BuiltinConfig configures the builtin source.
 type BuiltinConfig struct {
@@ -78,6 +82,8 @@ func init() {
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 5, Spec: json.RawMessage(MCPToolSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 6, Spec: json.RawMessage(MCPDeepSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 7, Spec: json.RawMessage(CapabilityMapSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 			}
 			return profile.SourceFunc(func(context.Context) ([]profile.Definition, error) { return defs, nil }), nil

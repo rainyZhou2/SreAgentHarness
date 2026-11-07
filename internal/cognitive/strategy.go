@@ -27,6 +27,9 @@ type ReasoningInput struct {
 	HasToolSteps bool
 	// MaxSteps is the profile's step budget; 0 means unlimited.
 	MaxSteps int
+	// CapabilityMap is the optional [E] summary of capabilities related to
+	// the services in the goal. Empty when the profile disables it.
+	CapabilityMap []string
 
 	// v1.1 context (§29, §33): all of it is pinned by the snapshot.
 	Call            CallScope

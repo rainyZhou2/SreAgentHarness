@@ -67,6 +67,8 @@ type PromptManifest struct {
 	CachePartitionRef   string            `json:"cache_partition_ref"`
 	// Skills lists the skills rendered into section [A] as name@hash.
 	Skills []string `json:"skills,omitempty"`
+	// CapabilityMapRef hashes section [E] when it is present.
+	CapabilityMapRef string `json:"capability_map_ref,omitempty"`
 }
 
 // Assembler renders a ReasoningInput into a provider-neutral request in four
@@ -289,6 +291,13 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		dyn = append(dyn, gw.Part{Type: gw.PartText, Text: fmt.Sprintf(
 			"[memory ref=%s kind=%s trust=%s score=%.3f%s — past experience, verify before use]\n%s\n%s",
 			ref, m.Kind, m.Trust, m.Score, shard, m.Title, m.Content)})
+	}
+	if len(in.CapabilityMap) > 0 {
+		text := "[capability map — operator-declared relations; verify before acting]\n- " +
+			strings.Join(in.CapabilityMap, "\n- ")
+		dyn = append(dyn, gw.Part{Type: gw.PartText, Text: text})
+		man.CapabilityMapRef = artifact.Hash([]byte(text))
+		man.SectionHashes["E"] = man.CapabilityMapRef
 	}
 	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: instruction(in.HasToolSteps, in.StepSeq, in.MaxSteps)})
 	dj, _ := json.Marshal(dyn)

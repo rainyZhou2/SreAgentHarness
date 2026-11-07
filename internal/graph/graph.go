@@ -25,6 +25,8 @@ type Store interface {
 	GraphSearch(ctx context.Context, tenantID, q string, kinds []string, limit int) ([]domain.GraphNode, error)
 	GraphNeighborhood(ctx context.Context, tenantID, ref string, depth int) (domain.Graph, error)
 	CapabilityUsage(ctx context.Context, tenantID string, since time.Time, limit int) (map[string]domain.GraphNode, error)
+	KnownServices(ctx context.Context, tenantID string, limit int) ([]string, error)
+	ServiceCapabilityNotes(ctx context.Context, tenantID string, services []string, limit int) ([]domain.CapabilityNote, error)
 }
 
 type Service struct {
@@ -90,6 +92,7 @@ func (s *Service) Sync(ctx context.Context, tenantID string) error {
 		for _, sk := range s.Extensions.Skills(tenantID) {
 			nodes = append(nodes, domain.CapabilityNode{
 				TenantID: tenantID, Ref: SkillRef(tenantID, sk), Kind: "skill", Name: sk.Name,
+				Labels: map[string]any{"description": truncateRunes(sk.Description, 200)},
 			})
 		}
 	}
@@ -100,6 +103,7 @@ func (s *Service) Sync(ctx context.Context, tenantID string) error {
 			nodes = append(nodes, domain.CapabilityNode{
 				TenantID: tenantID, Ref: ref, Kind: "tool", Name: d.Name, Version: d.Version,
 				Source: d.Source, Risk: string(d.Risk), Trust: d.Trust,
+				Labels: map[string]any{"description": truncateRunes(d.Description, 200)},
 			})
 			if name, ok := strings.CutPrefix(d.Source, "mcp:"); ok {
 				serverRef := servers[name]
@@ -155,6 +159,79 @@ func (s *Service) Neighborhood(ctx context.Context, tenantID, ref string, depth 
 
 func (s *Service) Usage(ctx context.Context, tenantID string, since time.Time, limit int) (map[string]domain.GraphNode, error) {
 	return s.Store.CapabilityUsage(ctx, tenantID, since, limit)
+}
+
+// CapabilityMap renders a small, prompt-safe summary of capabilities related
+// to the services mentioned in the goal. It returns nothing when the goal
+// names no known service, so unrelated tools never enter the prompt.
+func (s *Service) CapabilityMap(ctx context.Context, tenantID, goal string, limit int) ([]string, error) {
+	if limit <= 0 || limit > 10 {
+		limit = 5
+	}
+	known, err := s.Store.KnownServices(ctx, tenantID, 200)
+	if err != nil {
+		return nil, err
+	}
+	lower := strings.ToLower(goal)
+	var services []string
+	for _, svc := range known {
+		if svc == "" || !strings.Contains(lower, strings.ToLower(svc)) {
+			continue
+		}
+		services = append(services, svc)
+		if len(services) >= 3 {
+			break
+		}
+	}
+	if len(services) == 0 {
+		return nil, nil
+	}
+	notes, err := s.Store.ServiceCapabilityNotes(ctx, tenantID, services, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(notes))
+	total := 0
+	for _, n := range notes {
+		desc, _ := n.Node.Labels["description"].(string)
+		desc = strings.TrimSuffix(strings.TrimSpace(desc), ".")
+		line := n.Node.Kind + " " + n.Node.Name
+		meta := []string{}
+		if n.Node.Risk != "" {
+			meta = append(meta, n.Node.Risk)
+		}
+		if n.Node.Trust != "" {
+			meta = append(meta, n.Node.Trust)
+		}
+		if len(meta) > 0 {
+			line += " (" + strings.Join(meta, "/") + ")"
+		}
+		if desc != "" {
+			line += ": " + truncateRunes(desc, 120)
+		}
+		if n.Node.ServiceID != "" {
+			line += "; service=" + n.Node.ServiceID
+		} else if len(services) == 1 {
+			line += "; service=" + services[0]
+		}
+		if n.Lesson != "" {
+			line += "; lesson=" + truncateRunes(n.Lesson, 90)
+		}
+		if total+len(line) > 1200 {
+			break
+		}
+		total += len(line) + 1
+		out = append(out, line)
+	}
+	return out, nil
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(strings.TrimSpace(s)), " "))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n]) + "…"
 }
 
 func (s *Service) Relate(ctx context.Context, rel domain.CapabilityRelation) error {

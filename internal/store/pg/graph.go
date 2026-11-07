@@ -237,6 +237,58 @@ func (s *Store) GraphNeighborhood(ctx context.Context, tenantID, ref string, dep
 	return out, edges.Err()
 }
 
+func (s *Store) ServiceCapabilityNotes(ctx context.Context, tenantID string, services []string, limit int) ([]domain.CapabilityNote, error) {
+	if len(services) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 10 {
+		limit = 5
+	}
+	refs := make([]string, 0, len(services))
+	for _, svc := range services {
+		refs = append(refs, "service:"+svc)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT c.ref, c.kind, c.name, c.version, c.owner, c.source, c.risk, c.trust,
+			c.service_id, c.labels, c.synced_at, COALESCE(l.title, '')
+		FROM capability_nodes c
+		LEFT JOIN LATERAL (
+			SELECT m.title FROM memory_shards s
+			JOIN agent_memories m ON m.tenant_id = s.tenant_id AND m.id = s.memory_id
+			WHERE s.tenant_id = c.tenant_id AND s.shard_key = 'capability:' || c.ref
+			  AND m.status = 'ACTIVE' AND m.sensitivity <> 'restricted' AND m.trust <> 'T4'
+			  AND (m.expires_at IS NULL OR m.expires_at > now())
+			ORDER BY m.updated_at DESC LIMIT 1
+		) l ON true
+		WHERE c.tenant_id=$1 AND (
+			c.service_id = ANY($2)
+			OR EXISTS (
+				SELECT 1 FROM capability_relations r
+				WHERE r.tenant_id = c.tenant_id
+				  AND (r.src_ref = c.ref OR r.dst_ref = c.ref)
+				  AND (r.src_ref = ANY($3) OR r.dst_ref = ANY($3))
+			)
+		)
+		ORDER BY CASE c.kind WHEN 'tool' THEN 0 WHEN 'skill' THEN 1 WHEN 'mcp_server' THEN 2 ELSE 3 END,
+			c.name LIMIT $4`, tenantID, services, refs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CapabilityNote
+	for rows.Next() {
+		n := domain.CapabilityNote{Node: domain.CapabilityNode{TenantID: tenantID}}
+		var labels []byte
+		if err := rows.Scan(&n.Node.Ref, &n.Node.Kind, &n.Node.Name, &n.Node.Version, &n.Node.Owner,
+			&n.Node.Source, &n.Node.Risk, &n.Node.Trust, &n.Node.ServiceID, &labels, &n.Node.SyncedAt,
+			&n.Lesson); err != nil {
+			return nil, err
+		}
+		n.Node.Labels = decodeMap(labels)
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CapabilityUsage(ctx context.Context, tenantID string, since time.Time, limit int) (map[string]domain.GraphNode, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
