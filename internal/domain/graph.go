@@ -120,6 +120,13 @@ type Graph struct {
 	Truncated bool        `json:"truncated"`
 }
 
+// CapabilityNote is one capability-map line: a capability related to the
+// active service plus its most recent verified lesson, if any.
+type CapabilityNote struct {
+	Node   CapabilityNode `json:"node"`
+	Lesson string         `json:"lesson,omitempty"`
+}
+
 type MemoryShard struct {
 	MemoryID string  `json:"memory_id"`
 	ShardKey string  `json:"shard_key"`

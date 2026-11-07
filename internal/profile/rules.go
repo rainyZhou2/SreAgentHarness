@@ -27,9 +27,10 @@ type Rules struct {
 	minApprovals  map[string]int // tool name or risk class → minimum approvals
 	policyVersion string
 
-	MaxSteps     int
-	CompactEvery int
-	MemoryTopK   int
+	MaxSteps      int
+	CompactEvery  int
+	MemoryTopK    int
+	CapabilityMap bool
 }
 
 // ApprovalRules is the format of spec.approval_rules. Rules only tighten:
@@ -49,7 +50,8 @@ var riskOrder = map[domain.RiskClass]int{domain.RiskR0: 0, domain.RiskR1: 1, dom
 // Compile validates a spec's enforced fields.
 func Compile(ref string, s Spec) (Rules, error) {
 	r := Rules{Ref: ref, restricted: s.Tools != nil, tools: s.Tools, policyVersion: s.PolicyVersion,
-		MaxSteps: s.MaxSteps, CompactEvery: s.CompactEvery, MemoryTopK: s.MemoryTopK}
+		MaxSteps: s.MaxSteps, CompactEvery: s.CompactEvery, MemoryTopK: s.MemoryTopK,
+		CapabilityMap: s.CapabilityMap}
 	for _, t := range s.Tools {
 		if t == "" || (strings.Contains(t, "*") && t != "*" && !strings.HasSuffix(t, ".*")) || strings.Count(t, "*") > 1 {
 			return r, fmt.Errorf("profile %s: invalid tool pattern %q (use a name, \"prefix.*\" or \"*\")", ref, t)

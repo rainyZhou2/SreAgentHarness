@@ -30,6 +30,7 @@ type Spec struct {
 	MaxContextTokens    int64  `json:"max_context_tokens,omitempty"`
 	MemoryTopK          int    `json:"memory_top_k,omitempty"`
 	CompactEvery        int    `json:"compact_every,omitempty"`
+	CapabilityMap       bool   `json:"capability_map,omitempty"`
 
 	// frozen
 	Tools          []string          `json:"tools"`

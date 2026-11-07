@@ -363,21 +363,25 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			return nil, err
 		}
 	}
+	// graph projection: capability map for prompts and the read-only API
+	graphSvc := &graph.Service{Store: store, Tools: h.Tools, Extensions: h.Extensions,
+		Log: log.With("component", "graph")}
 	// worker
 	if mode == "all" || mode == "worker" {
 		hostname, _ := os.Hostname()
 		a.worker = kernel.NewWorker(kernel.Config{
-			ID:          e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
-			LeaseTTL:    e.dur("HARNESS_LEASE_TTL", 45*time.Second),
-			StepTimeout: e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
-			Checkpoints: e.bool("HARNESS_CHECKPOINTS", true),
-			Memory:      retriever,
-			Compactor:   compactor,
-			Rules:       rules,
-			Skills:      h.Extensions,
-			ToolToggles: store,
-			Strategies:  &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
-			Observer:    observers,
+			ID:            e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
+			LeaseTTL:      e.dur("HARNESS_LEASE_TTL", 45*time.Second),
+			StepTimeout:   e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
+			Checkpoints:   e.bool("HARNESS_CHECKPOINTS", true),
+			Memory:        retriever,
+			Compactor:     compactor,
+			Rules:         rules,
+			Skills:        h.Extensions,
+			ToolToggles:   store,
+			CapabilityMap: graphSvc,
+			Strategies:    &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
+			Observer:      observers,
 		}, store, h.Artifacts, defaultStrategy, h.Tools, h.Policy, log)
 	}
 	// API
@@ -407,11 +411,6 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		if len(authns) == 0 {
 			return nil, errors.New("no authenticator plugin is enabled")
 		}
-		active := h.Active()
-		plugins := make([]graph.PluginInfo, 0, len(active))
-		for _, p := range active {
-			plugins = append(plugins, graph.PluginInfo{Kind: p.Kind, Name: p.Name, Instance: p.Instance})
-		}
 		srv := &api.Server{Store: store, Artifacts: h.Artifacts, DefaultProfile: h.Settings.DefaultProfile,
 			DefaultVersion: h.Settings.DefaultProfileVersion, Log: log,
 			Deltas: h.Deltas, BranchPolicy: domain.BranchPolicy(e.str("HARNESS_BRANCH_POLICY", string(domain.BranchQueue))),
@@ -428,13 +427,13 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		for _, x := range exts {
 			srv.Extend(x)
 		}
-		active = h.Active()
-		plugins = make([]graph.PluginInfo, 0, len(active))
+		active := h.Active()
+		plugins := make([]graph.PluginInfo, 0, len(active))
 		for _, p := range active {
 			plugins = append(plugins, graph.PluginInfo{Kind: p.Kind, Name: p.Name, Instance: p.Instance})
 		}
-		srv.Graph = &graph.Service{Store: store, Tools: h.Tools, Extensions: h.Extensions,
-			Plugins: plugins, Log: log.With("component", "graph")}
+		graphSvc.Plugins = plugins
+		srv.Graph = graphSvc
 		a.Server, a.Handler = srv, srv.Handler()
 	}
 	log.Info("plugins active", "mode", mode, "plugins", h.Active(), "tools", len(h.Tools.Descriptors()))

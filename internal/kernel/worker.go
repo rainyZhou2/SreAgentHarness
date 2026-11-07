@@ -91,6 +91,13 @@ type Config struct {
 	Skills SkillSource
 	// ToolToggles hides tools the tenant switched off (optional).
 	ToolToggles ToolToggles
+	// CapabilityMap supplies the optional [E] prompt section (optional).
+	CapabilityMap CapabilityMapSource
+}
+
+// CapabilityMapSource renders capability-to-service notes for the prompt.
+type CapabilityMapSource interface {
+	CapabilityMap(ctx context.Context, tenantID, goal string, limit int) ([]string, error)
 }
 
 // SkillSource returns a tenant's enabled skills.
@@ -568,6 +575,14 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		return in, err
 	}
 	in.Goal = g.Goal
+	if rules.CapabilityMap && w.cfg.CapabilityMap != nil {
+		lines, mapErr := w.cfg.CapabilityMap.CapabilityMap(ctx, lease.TenantID, in.Goal, 5)
+		if mapErr != nil {
+			w.log.Warn("capability map", "err", mapErr)
+		} else {
+			in.CapabilityMap = lines
+		}
+	}
 
 	history, err := w.store.History(ctx, lease.TenantID, lease.RunID, lease.StepSeq)
 	if err != nil {
