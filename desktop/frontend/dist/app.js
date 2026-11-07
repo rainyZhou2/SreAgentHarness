@@ -29,6 +29,7 @@ const state = {
   sessFilter: { status: "active", q: "" },
   approvals: [],
   demoModel: null,      // true when the tenant runs on the bundled scripted model
+  flowInputs: new Map(), // run_id -> draft value for a waiting input gate
 };
 
 // ---------- DOM helpers: server data only ever becomes text nodes ----------
@@ -75,7 +76,9 @@ function actionable(el, fn) {
   });
   return el;
 }
-const BADGE = { COMPLETED: "s-ok", VERIFIED: "s-ok", ACTIVE: "s-ok", UNVERIFIED: "s-warn", REFUTED: "s-bad", FAILED: "s-bad" };
+const BADGE = { COMPLETED: "s-ok", SUCCEEDED: "s-ok", VERIFIED: "s-ok", ACTIVE: "s-ok",
+  RUNNING: "s-warn", WAITING: "s-warn", WAITING_CHILDREN: "s-warn", WAITING_INPUT: "s-warn",
+  WAITING_APPROVAL: "s-warn", UNVERIFIED: "s-warn", REFUTED: "s-bad", FAILED: "s-bad", CANCELLED: "s-bad" };
 const badge = (s) => h("span", { class: "badge " + (BADGE[s] || "s-idle") }, t(String(s || "?")).replaceAll("_", " "));
 
 function ago(ts) {
@@ -622,7 +625,7 @@ function renderHead() {
     const v = t.run_id && state.runs.get(t.run_id);
     if (!v) continue;
     cost += (v.cost && v.cost.cost_usd) || 0;
-    profile = `${v.run.run.profile_id}@${v.run.run.profile_version}`;
+    profile = v.run.run.profile_version ? `${v.run.run.profile_id}@${v.run.run.profile_version}` : v.run.run.profile_id;
   }
   head.className = "chat-head bordered";
   const sess = { id: state.sessionId, title: state.session.title, status: state.session.status };
@@ -654,9 +657,12 @@ function renderRun(v) {
   const run = v.run.run;
   const status = run.status;
   const done = TERMINAL.has(status);
+  const flow = v.flow && v.flow.state ? v.flow : null;
   const steps = ((v.steps && v.steps.steps) || []).slice().sort((a, b) => a.seq - b.seq);
   const approvals = (v.approvals && v.approvals.approvals) || [];
-  const tools = steps.filter((s) => s.kind === "tool").length;
+  const tools = flow
+    ? new Set((flow.nodes || []).filter((n) => n.node_type === "tool").map((n) => n.node_id)).size
+    : steps.filter((s) => s.kind === "tool").length;
 
   const result = v.run.result;
   let intent = (result && result.intent) || "";
@@ -670,14 +676,20 @@ function renderRun(v) {
 
   const choice = state.traceOpen.get(run.id);
   const open = choice !== undefined ? choice : !done || status === "FAILED";
+  const waiting = status === "WAITING_APPROVAL" || status === "WAITING_INPUT" || status === "WAITING_CHILDREN";
   const label = done
     ? t("Worked for {d}", { d: dur(run.created_at, run.updated_at) }) + (tools ? " · " + tn(tools, "{n} tool call", "{n} tool calls") : "")
-    : t(status === "WAITING_APPROVAL" ? "Waiting for your approval" : status === "PAUSED" ? "Paused" : "Working…");
+    : t(status === "WAITING_APPROVAL" ? "Waiting for your approval"
+      : status === "WAITING_INPUT" ? "Waiting for your input"
+      : status === "WAITING_CHILDREN" ? "Waiting for sub-tasks"
+      : status === "PAUSED" ? "Paused" : "Working…");
   const parts = [];
-  if (!conversational) {
+  if (flow) {
+    parts.push(renderFlow(run, v, label));
+  } else if (!conversational) {
     parts.push(h("button", { class: "trace-toggle", onclick: () => { state.traceOpen.set(run.id, !open); render(); } },
       h("span", { class: "caret" + (open ? " open" : "") }, "▶"),
-      h("span", { class: !done && status !== "WAITING_APPROVAL" && status !== "PAUSED" ? "shimmer" : "" }, label)));
+      h("span", { class: !done && !waiting ? "shimmer" : "" }, label)));
     if (open && steps.length) parts.push(h("div", { class: "trace" }, steps.map((s) => renderStep(run, s, approvals))));
   } else if (!done) {
     parts.push(h("div", { class: "trace-toggle" }, h("span", { class: "shimmer" }, label)));
@@ -712,7 +724,212 @@ function argsText(args) {
   return Object.entries(args).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
 }
 
+// ---------- generated plans ----------
+function planRiskBadge(risk) {
+  if (!risk) return null;
+  const cls = risk === "R3" ? "s-bad" : risk === "R2" ? "s-warn" : risk === "R1" ? "s-idle" : "s-ok";
+  return h("span", { class: "badge " + cls, title: t("risk") }, risk);
+}
+
+function planMeta(out) {
+  const a = out.analysis || {};
+  const parts = [];
+  if (a.highest_risk) parts.push(planRiskBadge(a.highest_risk));
+  if (a.side_effects) parts.push(h("span", { class: "muted small" }, tn(a.side_effects, "{n} side effect", "{n} side effects")));
+  if (a.estimated_runs) parts.push(h("span", { class: "muted small" }, t("{n} runs max", { n: a.estimated_runs })));
+  if (a.estimated_model_calls) parts.push(h("span", { class: "muted small" }, t("{n} model calls max", { n: a.estimated_model_calls })));
+  if (a.estimated_output_tokens) parts.push(h("span", { class: "muted small" }, t("{n} tokens max", { n: a.estimated_output_tokens })));
+  return parts;
+}
+
+function planFindings(out) {
+  const findings = ((out.analysis && out.analysis.findings) || [])
+    .filter((f) => f.severity === "warning" || f.severity === "error");
+  if (!findings.length) return null;
+  return h("div", { class: "plan-findings" }, findings.map((f) =>
+    h("div", { class: "finding " + (f.severity === "error" ? "s-bad" : "s-warn") },
+      h("span", { class: "finding-code" }, f.code || f.severity),
+      h("span", {}, f.message))));
+}
+
+function renderPlan(step) {
+  const out = step.output || {};
+  const mode = out.mode || "react";
+  const fallback = !!out.fallback;
+  const rationale = out.rationale || "";
+  const flow = out.flow || null;
+  const nodes = flow && Array.isArray(flow.nodes) ? flow.nodes.length : 0;
+  const key = "plan:" + step.id;
+  const open = state.open.has(key);
+  const head = h("div", { class: "item-row", onclick: () => { open ? state.open.delete(key) : state.open.add(key); render(); } },
+    h("span", { class: "ico" }, icon("spark")),
+    h("span", { class: "what" }, t(mode === "flow" ? "Generated runbook" : "Planned investigation")),
+    mode === "flow" ? h("span", { class: "muted small" }, t("{n} nodes", { n: nodes })) : null,
+    ...planMeta(out),
+    h("span", { class: "spacer" }),
+    fallback ? h("span", { class: "badge s-warn" }, t("fallback")) : h("span", { class: "badge s-ok" }, t("planned")));
+  const body = h("div", { class: "plan-body" },
+    rationale ? h("div", { class: "thought" }, rationale) : null,
+    planFindings(out),
+    open ? h("pre", { class: "flow-out" }, JSON.stringify(flow || out, null, 2)) : null);
+  return h("div", { class: "plan" }, head, body);
+}
+
+// A generated plan is reviewed before its flow step exists. The review step's
+// input is the plan artifact, so the client can show the same summary and the
+// approval bound to plan_hash.
+function renderPlanReview(run, step, approvals) {
+  const out = step.input || {};
+  const analysis = out.analysis || {};
+  const flow = out.flow || null;
+  const nodes = flow && Array.isArray(flow.nodes) ? flow.nodes.length : 0;
+  const approval = approvals.find((a) => a.step_id === step.id && a.status === "PENDING");
+  const key = "plan-review:" + step.id;
+  const open = state.open.has(key);
+  const approved = step.status === "SUCCEEDED";
+  const head = h("div", { class: "item-row", onclick: () => { open ? state.open.delete(key) : state.open.add(key); render(); } },
+    h("span", { class: "ico" }, icon("spark")),
+    h("span", { class: "what" }, t("Review generated plan")),
+    nodes ? h("span", { class: "muted small" }, t("{n} nodes", { n: nodes })) : null,
+    ...planMeta(out),
+    h("span", { class: "spacer" }),
+    approved ? h("span", { class: "badge s-ok" }, t("approved"))
+      : approval ? h("span", { class: "badge s-warn" }, t("needs approval"))
+        : h("span", { class: "badge s-idle" }, t((step.status || "").toLowerCase()).replaceAll("_", " ")));
+  const body = h("div", { class: "plan-body" },
+    out.rationale ? h("div", { class: "thought" }, out.rationale) : null,
+    planFindings(out),
+    open ? h("pre", { class: "flow-out" }, JSON.stringify(flow || out, null, 2)) : null,
+    approval ? h("div", { class: "approve-box" },
+      h("div", { class: "why" }, t("This generated plan needs a human decision before any step starts.")),
+      h("div", { class: "kv" },
+        h("span", {}, t("risk")), h("b", {}, approval.risk_class || analysis.highest_risk || "—"),
+        h("span", {}, t("plan")), h("b", { class: "mono" }, (out.plan_hash || "").replace("sha256:", "").slice(0, 16) || "—"),
+        h("span", {}, t("expires")), h("b", {}, approval.expires_at ? new Date(approval.expires_at).toLocaleString(locale()) : "—"),
+        h("span", {}, t("action")), h("b", { class: "mono" }, approval.action_hash)),
+      h("div", { class: "approve-actions" },
+        h("button", { class: "btn approve", onclick: () => command(run.id, "approve_tool", { version: true,
+          payload: { approval_request_id: approval.id, action_hash: approval.action_hash } }) }, t("Approve")),
+        h("button", { class: "btn danger", onclick: () => askReason(t("Reject generated plan"), t("Reject"),
+          (reason) => command(run.id, "reject_tool", { version: true, reason,
+            payload: { approval_request_id: approval.id, action_hash: approval.action_hash } })) }, t("Reject"))))
+      : null);
+  return h("div", { class: "plan plan-review" }, head, body);
+}
+
+// ---------- flow runs ----------
+function renderFlow(run, v, label) {
+  const flow = v.flow || {};
+  const st = flow.state || {};
+  const states = st.nodes || {};
+  const runs = (flow.nodes || []).slice().sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  const byNode = new Map();
+  for (const n of runs) {
+    if (!byNode.has(n.node_id)) byNode.set(n.node_id, []);
+    byNode.get(n.node_id).push(n);
+  }
+  const current = flow.current_node || st.current || "";
+  const ids = [];
+  const seen = new Set();
+  for (const id of (Array.isArray(st.order) ? st.order : [])) {
+    if (states[id] || byNode.has(id)) { ids.push(id); seen.add(id); }
+  }
+  for (const id of byNode.keys()) { if (!seen.has(id)) { ids.push(id); seen.add(id); } }
+  for (const id of Object.keys(states)) { if (!seen.has(id)) { ids.push(id); seen.add(id); } }
+  const head = h("div", { class: "flow-head" },
+    h("span", { class: "flow-title" }, t("Flow")),
+    h("span", { class: "muted small" }, [flow.status || "", current].filter(Boolean).join(" · ")),
+    h("span", { class: "spacer" }),
+    h("span", { class: "muted small" }, label || ""));
+  const out = h("div", { class: "flow" }, head);
+  for (const a of (v.approvals && v.approvals.approvals) || []) {
+    if (a.status === "PENDING") out.append(renderFlowApproval(run, a));
+  }
+  if (run.status === "WAITING_INPUT" || flow.status === "WAITING_INPUT") out.append(renderFlowInput(run));
+  const planStep = ((v.steps && v.steps.steps) || []).find((s) => s.kind === "plan");
+  if (planStep) out.append(renderPlan(planStep));
+  if (ids.length) out.append(h("div", { class: "trace flow-trace" },
+    ids.map((id) => renderFlowNode(run, flow, id, byNode.get(id) || [], states[id]))));
+  return out;
+}
+
+function renderFlowNode(run, flow, id, attempts, ns) {
+  const latest = attempts.length ? attempts[attempts.length - 1] : null;
+  const status = (ns && ns.status) || (latest && latest.status) || "PENDING";
+  const type = (latest && latest.node_type) || "";
+  const current = id === (flow.current_node || (flow.state || {}).current);
+  const key = "flow:" + run.id + ":" + id;
+  const isOpen = state.open.has(key);
+  const output = ns && ns.output !== undefined ? ns.output : null;
+  const error = (ns && ns.error) || (latest && latest.error) || "";
+  const child = latest && latest.child_run_id;
+  const iconName = type === "tool" ? "tool" : type === "agent" || type === "subflow" ? "spark" : "dot";
+  const body = error || (typeof output === "string" ? output : JSON.stringify(output, null, 2));
+  return h("div", { class: "flow-node" + (current ? " current" : "") },
+    h("div", { class: "item-row", onclick: () => { isOpen ? state.open.delete(key) : state.open.add(key); render(); } },
+      h("span", { class: "ico" }, icon(iconName)),
+      h("span", { class: "what" }, id),
+      type ? h("span", { class: "muted small" }, type) : null,
+      child ? h("span", { class: "muted small mono" }, "run …" + String(child).slice(-8)) : null,
+      h("span", { class: "spacer" }),
+      badge(status)),
+    isOpen || error ? h("pre", { class: "flow-out" }, body || t("no output yet")) : null);
+}
+
+function renderFlowApproval(run, approval) {
+  const payload = { approval_request_id: approval.id, action_hash: approval.action_hash };
+  const name = approval.target || t("runbook step");
+  return h("div", { class: "tool wait" },
+    h("div", { class: "tool-head" },
+      h("span", { class: "ico" }, icon("dot")),
+      h("span", { class: "name" }, t("Flow approval") + ": " + name),
+      h("span", { class: "args" }, approval.risk_class || ""),
+      h("span", { class: "state warn" }, t("needs approval"))),
+    h("div", { class: "approve-box" },
+      h("div", { class: "why" }, t("This runbook step needs a human decision before it continues.")),
+      h("div", { class: "kv" },
+        h("span", {}, t("risk")), h("b", {}, approval.risk_class || "—"),
+        h("span", {}, t("expires")), h("b", {}, approval.expires_at ? new Date(approval.expires_at).toLocaleString(locale()) : "—"),
+        h("span", {}, t("action")), h("b", { class: "mono" }, approval.action_hash)),
+      h("div", { class: "approve-actions" },
+        h("button", { class: "btn approve", onclick: () => command(run.id, "approve_tool", { version: true, payload }) }, t("Approve")),
+        h("button", { class: "btn danger", onclick: () => askReason(t("Reject {name}", { name }), t("Reject"),
+          (reason) => command(run.id, "reject_tool", { version: true, reason, payload })) }, t("Reject")))));
+}
+
+function renderFlowInput(run) {
+  const ta = h("textarea", { class: "mono flow-input", rows: 4, placeholder: t("Enter a JSON value for the waiting step") });
+  ta.value = state.flowInputs.get(run.id) || "";
+  ta.addEventListener("input", () => state.flowInputs.set(run.id, ta.value));
+  const submit = async () => {
+    const raw = ta.value.trim();
+    let value = raw;
+    try { value = JSON.parse(raw); } catch { /* send the text as a string */ }
+    try {
+      await api().ProvideInput(run.id, run.version, value);
+      state.flowInputs.delete(run.id);
+      scheduleRun(run.id, true);
+    } catch (e) {
+      toast(t("Input failed: {err}", { err: errText(e) }), true);
+    }
+  };
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } });
+  return h("div", { class: "tool wait" },
+    h("div", { class: "tool-head" },
+      h("span", { class: "ico" }, icon("dot")),
+      h("span", { class: "name" }, t("Waiting for your input")),
+      h("span", { class: "state warn" }, t("input required"))),
+    h("div", { class: "approve-box" },
+      h("div", { class: "why" }, t("The runbook is paused until you provide this value. JSON is parsed when possible; otherwise the text is sent as a string.")),
+      ta,
+      h("div", { class: "approve-actions", style: "margin-top:10px" },
+        h("button", { class: "btn primary", onclick: submit }, t("Submit input")))));
+}
+
 function renderStep(run, s, approvals) {
+  if (s.kind === "plan") return renderPlan(s);
+  if (s.kind === "plan_review") return renderPlanReview(run, s, approvals);
+  if (s.kind === "flow") return null;
   const out = s.output || {};
   const running = s.status === "RUNNING" || s.status === "PENDING" || s.status === "RETRY_WAIT";
   if (s.kind === "retrieve_memory") {
