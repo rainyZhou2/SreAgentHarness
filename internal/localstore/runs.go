@@ -26,6 +26,15 @@ func (s *Store) createRunLocked(ctx context.Context, req domain.CreateRunRequest
 			return s.runs[id], false, nil
 		}
 	}
+	if req.ProfileVersion > 0 {
+		p, ok := s.profiles[profileKey(req.TenantID, req.ProfileID, req.ProfileVersion)]
+		if !ok {
+			return domain.Run{}, false, &domain.RejectedError{Reason: "unknown_profile_version"}
+		}
+		if p.Status != "ACTIVE" {
+			return domain.Run{}, false, &domain.RejectedError{Reason: "profile_version_not_runnable"}
+		}
+	}
 	status := domain.RunQueued
 	if req.PendingActivation {
 		status = domain.RunPendingActivation
@@ -47,13 +56,19 @@ func (s *Store) createRunLocked(ctx context.Context, req domain.CreateRunRequest
 			steps = []domain.PlannedStep{{Kind: domain.StepFlow, Executor: "flow", InputRef: req.GoalRef,
 				InputHash: req.GoalHash, Status: domain.StepPending}}
 		} else {
-			steps = []domain.PlannedStep{{Kind: domain.StepReason, Executor: "reasoner", InputRef: req.GoalRef,
-				InputHash: req.GoalHash, Status: domain.StepPending}}
+			steps = []domain.PlannedStep{
+				{Kind: domain.StepRetrieve, Executor: "memory", InputRef: req.GoalRef,
+					InputHash: req.GoalHash, Status: domain.StepPending},
+				{Kind: domain.StepReason, Executor: "reasoner", InputRef: req.GoalRef,
+					InputHash: req.GoalHash, Status: domain.StepPending},
+			}
 		}
 	}
 	s.saveRun(r)
 	if req.IdempotencyKey != "" {
-		s.runByKey[req.TenantID+"/"+req.IdempotencyKey] = r.ID
+		key := req.TenantID + "/" + req.IdempotencyKey
+		s.runByKey[key] = r.ID
+		s.put("runkey", key, req.TenantID, 0, map[string]string{"run_id": r.ID})
 	}
 	s.appendEvent(r.TenantID, r.ID, "", "", "run.created", req.InitiatorType, req.InitiatorID, map[string]any{
 		"profile_id": req.ProfileID, "profile_version": req.ProfileVersion, "pending_activation": req.PendingActivation})
@@ -191,11 +206,15 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 	defer s.mu.Unlock()
 	if req.IdempotencyKey != "" {
 		if id, ok := s.cmdKey[s.commandKey(tenantID, runID, req.IdempotencyKey)]; ok {
-			c := s.commands[id]
-			if c.Status == domain.CommandRejected && c.RejectReason != nil {
-				return c, &domain.RejectedError{Reason: *c.RejectReason, Cmd: c}
+			if c, ok := s.commands[id]; ok {
+				if c.Status == domain.CommandRejected && c.RejectReason != nil {
+					if *c.RejectReason == "version_conflict" {
+						return c, fmt.Errorf("%w: %w", domain.ErrVersionConflict, &domain.RejectedError{Reason: *c.RejectReason, Cmd: c})
+					}
+					return c, &domain.RejectedError{Reason: *c.RejectReason, Cmd: c}
+				}
+				return c, nil
 			}
-			return c, nil
 		}
 	}
 	payload := req.Payload
@@ -204,32 +223,77 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 	}
 	c := domain.Command{ID: newID(), TenantID: tenantID, RunID: runID, Type: req.Type, ActorID: req.ActorID,
 		ExpectedVersion: req.ExpectedVersion, Status: domain.CommandApplied, Payload: payload, CreatedAt: now()}
-	if req.IdempotencyKey != "" {
-		s.cmdKey[s.commandKey(tenantID, runID, req.IdempotencyKey)] = c.ID
+
+	// Every command runs against a private buffer. A rejection or an error
+	// discards the buffer and restores the in-memory snapshot, so the run is
+	// never left half-mutated.
+	snap := s.snapshotStateLocked()
+	buf := newStateBuf()
+	s.buf = buf
+	defer func() {
+		if s.buf == buf {
+			s.buf = nil // a panic must not leave the next call in buffered mode
+		}
+	}()
+	s.appendEvent(tenantID, runID, "", "", "command.received", "user", req.ActorID,
+		map[string]any{"command_id": c.ID, "type": req.Type, "reason": req.Reason})
+	reason, err := s.applyCommandLocked(&c, req)
+	if err != nil {
+		s.buf = nil
+		s.restoreStateLocked(snap)
+		return domain.Command{}, err
 	}
 	applied := now()
 	c.AppliedAt = &applied
-	reason, err := s.applyCommandLocked(&c, req)
-	if err != nil {
-		return domain.Command{}, err
-	}
 	if reason != "" {
+		s.buf = nil
+		s.restoreStateLocked(snap)
 		c.Status = domain.CommandRejected
 		c.RejectReason = &reason
+		v := s.runs[runID].Version
+		c.RunVersionAfter = &v
+		s.persistCommandKey(tenantID, runID, req.IdempotencyKey, c.ID)
 		s.saveCommand(c)
+		s.appendEvent(tenantID, runID, "", "", "command.received", "user", req.ActorID,
+			map[string]any{"command_id": c.ID, "type": req.Type, "reason": req.Reason})
+		s.appendEvent(tenantID, runID, "", "", "command.rejected", "user", req.ActorID,
+			map[string]string{"command_id": c.ID, "reason": reason})
+		if reason == "version_conflict" {
+			return c, fmt.Errorf("%w: %w", domain.ErrVersionConflict, &domain.RejectedError{Reason: reason, Cmd: c})
+		}
 		return c, &domain.RejectedError{Reason: reason, Cmd: c}
 	}
 	r := s.runs[runID]
 	v := r.Version
 	c.RunVersionAfter = &v
 	s.saveCommand(c)
+	s.persistCommandKey(tenantID, runID, req.IdempotencyKey, c.ID)
+	s.appendEvent(tenantID, runID, "", "", "command.applied", "user", req.ActorID,
+		map[string]string{"command_id": c.ID})
+	s.commitBufferLocked(buf)
 	return c, nil
+}
+
+func (s *Store) persistCommandKey(tenantID, runID, key, commandID string) {
+	if key == "" {
+		return
+	}
+	k := s.commandKey(tenantID, runID, key)
+	s.cmdKey[k] = commandID
+	s.put("cmdkey", k, runID, 0, map[string]string{"command_id": commandID})
 }
 
 func (s *Store) applyCommandLocked(c *domain.Command, req domain.CommandRequest) (string, error) {
 	r, ok := s.runs[c.RunID]
 	if !ok {
 		return "run_not_found", nil
+	}
+	needsVersion := map[domain.CommandType]bool{domain.CmdResume: true, domain.CmdApproveTool: true,
+		domain.CmdRejectTool: true, domain.CmdResolveUnknown: true, domain.CmdOverrideResult: true,
+		domain.CmdReplacePendingInput: true, domain.CmdRetry: true, domain.CmdMigrateProfile: true,
+		domain.CmdProvideInput: true}
+	if needsVersion[req.Type] && req.ExpectedVersion == nil {
+		return "expected_version_required", nil
 	}
 	if req.ExpectedVersion != nil && *req.ExpectedVersion != r.Version {
 		return "version_conflict", nil
@@ -241,6 +305,9 @@ func (s *Store) applyCommandLocked(c *domain.Command, req domain.CommandRequest)
 	case domain.CmdPause:
 		if r.Status == domain.RunPaused {
 			return "", nil
+		}
+		if r.Status == domain.RunNeedsHuman {
+			return "invalid_state", nil
 		}
 		r.DesiredState = domain.DesiredPaused
 		if r.Status == domain.RunQueued || r.Status == domain.RunPendingActivation || r.Status == domain.RunWaitingApproval ||
@@ -262,11 +329,29 @@ func (s *Store) applyCommandLocked(c *domain.Command, req domain.CommandRequest)
 		s.appendEvent(r.TenantID, r.ID, "", "", "run.resumed", "user", req.ActorID, map[string]string{"command_id": c.ID})
 		return "", nil
 	case domain.CmdCancel:
-		r.DesiredState = domain.DesiredCancelled
-		r.Status = domain.RunCancelled
-		r.Version++
-		s.saveRun(r)
-		s.appendEvent(r.TenantID, r.ID, "", "", "run.cancelled", "user", req.ActorID, map[string]string{"command_id": c.ID})
+		if r.Status.Terminal() {
+			return "", nil
+		}
+		if r.Status == domain.RunRunning && r.LeaseUntil != nil && r.LeaseUntil.After(now()) {
+			// A worker is executing. Record the intent; the commit/failure
+			// path settles the run so the in-flight attempt is accounted for.
+			if r.DesiredState != domain.DesiredCancelled {
+				r.DesiredState = domain.DesiredCancelled
+				r.Version++
+				s.saveRun(r)
+				s.appendEvent(r.TenantID, r.ID, "", "", "run.cancel_requested", "user", req.ActorID,
+					map[string]string{"command_id": c.ID, "reason": req.Reason})
+			}
+			return "", nil
+		}
+		if r.Status == domain.RunRunning {
+			s.recoverExpiredLocked(&r)
+			r = s.runs[c.RunID]
+			if r.Status.Terminal() {
+				return "", nil
+			}
+		}
+		s.cancelRunLocked(&r, "user", req.ActorID, req.Reason)
 		return "", nil
 	case domain.CmdApproveTool, domain.CmdRejectTool:
 		return s.decideApprovalLocked(c, req)
@@ -314,6 +399,14 @@ func (s *Store) decideApprovalLocked(c *domain.Command, req domain.CommandReques
 	if c.Type == domain.CmdRejectTool {
 		decision = "REJECT"
 	}
+	// Local mode is single-user: the operator who started the run is also the
+	// approver. The server's distinct-approver policy is configurable and is
+	// not applied here.
+	for _, d := range s.decisions[a.Request.ID] {
+		if d.ApproverID == c.ActorID {
+			return "approver_already_decided", nil
+		}
+	}
 	s.decisions[a.Request.ID] = append(s.decisions[a.Request.ID], decisionRec{ID: newID(), ApprovalID: a.Request.ID,
 		ApproverID: c.ActorID, Decision: decision, ActionHash: p.ActionHash, CommandID: c.ID})
 	s.put("decision", newID(), a.Request.ID, int64(len(s.decisions[a.Request.ID])), s.decisions[a.Request.ID][len(s.decisions[a.Request.ID])-1])
@@ -322,18 +415,8 @@ func (s *Store) decideApprovalLocked(c *domain.Command, req domain.CommandReques
 		s.saveApproval(a)
 		s.appendEvent(a.TenantID, a.RunID, a.StepID, "", "approval.decided", "user", c.ActorID,
 			map[string]string{"approval_request_id": a.Request.ID, "decision": "rejected"})
-		st := s.steps[a.StepID]
-		st.Status = domain.StepSkipped
-		reason := "rejected by approver"
-		st.StatusReason = &reason
-		s.saveStep(st)
 		r := s.runs[a.RunID]
-		r.Status = domain.RunFailed
-		r.FailureReason = &reason
-		r.Version++
-		s.saveRun(r)
-		s.appendEvent(r.TenantID, r.ID, a.StepID, "", "plan.rejected", "system", "", map[string]string{"reason": reason})
-		return "", nil
+		return "", s.skipBlockedStepLocked(&r, a.StepID, "rejected by approver")
 	}
 	approvals := 0
 	for _, d := range s.decisions[a.Request.ID] {
@@ -370,7 +453,7 @@ func (s *Store) provideInputLocked(c *domain.Command, req domain.CommandRequest)
 	var p struct {
 		Value json.RawMessage `json:"value"`
 	}
-	if json.Unmarshal(req.Payload, &p) != nil || len(p.Value) == 0 {
+	if json.Unmarshal(req.Payload, &p) != nil || len(p.Value) == 0 || !json.Valid(p.Value) {
 		return "payload.value_required", nil
 	}
 	var target domain.Step
@@ -383,6 +466,9 @@ func (s *Store) provideInputLocked(c *domain.Command, req domain.CommandRequest)
 	}
 	if !found {
 		return "no_pending_input", nil
+	}
+	if _, ok := s.flows[c.RunID]; !ok {
+		return "flow_not_found", nil
 	}
 	s.flowInputs[flowInputKey(c.RunID, target.FlowNodeID)] = flowInput{RunID: c.RunID, NodeID: target.FlowNodeID,
 		StepID: target.ID, ActorID: c.ActorID, Value: p.Value}
@@ -411,6 +497,16 @@ func (s *Store) ListPendingApprovals(ctx context.Context, tenantID string, limit
 		p := pg.PendingApproval{ApprovalRequest: a.Request, RunID: a.RunID, InitiatorID: r.InitiatorID}
 		if r.SessionID != nil {
 			p.SessionID = r.SessionID
+			if sess, ok := s.sessions[*r.SessionID]; ok {
+				p.SessionTitle = sess.Title
+			}
+		} else if r.TurnID != nil {
+			if turn, ok := s.turns[*r.TurnID]; ok {
+				p.SessionID = &turn.SessionID
+				if sess, ok := s.sessions[turn.SessionID]; ok {
+					p.SessionTitle = sess.Title
+				}
+			}
 		}
 		out = append(out, p)
 	}
@@ -473,17 +569,15 @@ func (s *Store) ExpireApprovals(ctx context.Context, limit int) (int, error) {
 		}
 		a.Request.Status = "EXPIRED"
 		s.saveApproval(a)
-		st := s.steps[a.StepID]
-		st.Status = domain.StepSkipped
-		reason := "approval expired"
-		st.StatusReason = &reason
-		s.saveStep(st)
+		s.appendEvent(a.TenantID, a.RunID, a.StepID, "", "approval.expired", "system", "", map[string]string{"approval_request_id": id})
 		r := s.runs[a.RunID]
-		r.Status = domain.RunFailed
-		r.FailureReason = &reason
-		r.Version++
-		s.saveRun(r)
-		s.appendEvent(r.TenantID, r.ID, a.StepID, "", "approval.expired", "system", "", map[string]string{"approval_request_id": id})
+		if st, ok := s.steps[a.StepID]; ok && st.Status == domain.StepWaitingApproval && !r.Status.Terminal() {
+			// The blocked step is skipped and the agent re-plans; a single
+			// unanswered approval must not strand the whole run.
+			if err := s.skipBlockedStepLocked(&r, a.StepID, "approval expired"); err != nil {
+				return n, err
+			}
+		}
 		n++
 		if limit > 0 && n >= limit {
 			break
@@ -492,11 +586,78 @@ func (s *Store) ExpireApprovals(ctx context.Context, limit int) (int, error) {
 	return n, nil
 }
 
-func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error) { return 0, nil }
+func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, r := range s.runs {
+		if r.Status != domain.RunRunning || r.LeaseUntil == nil || r.LeaseUntil.After(now()) {
+			continue
+		}
+		s.recoverExpiredLocked(&r)
+		cur := s.runs[id]
+		switch cur.DesiredState {
+		case domain.DesiredCancelled:
+			if !cur.Status.Terminal() {
+				s.cancelRunLocked(&cur, "system", "", "cancel requested")
+			}
+		case domain.DesiredPaused:
+			if cur.Status == domain.RunQueued {
+				cur.Status = domain.RunPaused
+				cur.Version++
+				s.saveRun(cur)
+				s.appendEvent(cur.TenantID, cur.ID, "", "", "run.paused", "system", "", nil)
+			}
+		}
+		n++
+		if limit > 0 && n >= limit {
+			break
+		}
+	}
+	return n, nil
+}
+
 func (s *Store) RewakeStaleQueued(ctx context.Context, idle time.Duration, limit int) (int, error) {
+	// The local scheduler polls RunnableRuns every 100ms; a queued run is
+	// never waiting on a broker wake-up.
 	return 0, nil
 }
-func (s *Store) ActivateStalledBranches(ctx context.Context, limit int) (int, error) { return 0, nil }
+
+func (s *Store) ActivateStalledBranches(ctx context.Context, limit int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, br := range s.branches {
+		if br.ActiveTurnID != nil {
+			continue
+		}
+		var next *domain.Turn
+		for _, t := range s.turns {
+			if t.BranchID != id || t.Status != domain.TurnQueued {
+				continue
+			}
+			if next == nil || t.Seq < next.Seq {
+				cp := t
+				next = &cp
+			}
+		}
+		if next == nil {
+			continue
+		}
+		sess, ok := s.sessions[next.SessionID]
+		if !ok {
+			continue
+		}
+		if err := s.activateTurnLocked(sess, id, next.ID, deref(next.RunID)); err != nil {
+			return n, err
+		}
+		n++
+		if limit > 0 && n >= limit {
+			break
+		}
+	}
+	return n, nil
+}
 
 func (s *Store) ClaimOutbox(ctx context.Context, limit int, claimFor time.Duration) ([]domain.OutboxMessage, error) {
 	s.mu.Lock()
@@ -514,15 +675,6 @@ func (s *Store) MarkPublishFailed(ctx context.Context, id string, backoff time.D
 }
 
 func (s *Store) ListStreamSegments(ctx context.Context, tenantID, runID string) ([]pg.SegmentView, error) {
-	return nil, nil
-}
-func (s *Store) ListCheckpoints(ctx context.Context, tenantID, runID string) ([]pg.Checkpoint, error) {
-	return nil, nil
-}
-func (s *Store) ForkRun(ctx context.Context, req pg.ForkRunRequest) (domain.Run, bool, error) {
-	return domain.Run{}, false, fmt.Errorf("fork is not available in local mode")
-}
-func (s *Store) StepOutputRevisions(ctx context.Context, tenantID, stepID string) ([]pg.OutputRevision, error) {
 	return nil, nil
 }
 func (s *Store) EventSinkStatuses(ctx context.Context) ([]pg.EventSinkStatus, error) { return nil, nil }

@@ -26,7 +26,7 @@ func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.
 		return domain.Lease{}, domain.ErrLeaseHeld
 	}
 	if r.Status == domain.RunRunning {
-		s.recoverExpiredLocked(r)
+		s.recoverExpiredLocked(&r)
 		r = s.runs[runID]
 	}
 	if r.Status != domain.RunQueued {
@@ -106,6 +106,8 @@ func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.
 	}
 
 	attemptID := newID()
+	snapshotID := newID()
+	s.snapshots[snapshotID] = r.ID
 	r.FenceToken++
 	until := now().Add(ttl)
 	r.LeaseOwner, r.LeaseUntil, r.NotBefore = &workerID, &until, nil
@@ -116,7 +118,7 @@ func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.
 	target.UpdatedAt = now()
 	att := attempt{ID: attemptID, RunID: r.ID, StepID: target.ID, AttemptNo: target.CurrentAttempt,
 		WorkerID: workerID, FenceToken: r.FenceToken, Status: "RUNNING", IdempotencyKey: target.InputHash,
-		StartedAt: now()}
+		SnapshotID: snapshotID, StartedAt: now()}
 	s.saveRun(r)
 	s.saveStep(*target)
 	s.attempts[attemptID] = att
@@ -127,28 +129,70 @@ func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.
 		AttemptID: attemptID, AttemptNo: target.CurrentAttempt, WorkerID: workerID, FenceToken: r.FenceToken,
 		Kind: target.Kind, ExecutorName: target.ExecutorName, FlowNodeID: target.FlowNodeID,
 		InputRef: target.InputRef, InputHash: target.InputHash, GoalRef: r.GoalRef,
-		ContextSnapshotID: newID(), IdempotencyKey: att.IdempotencyKey, Deadline: until,
+		ContextSnapshotID: snapshotID, IdempotencyKey: att.IdempotencyKey, Deadline: until,
 		Intent: intent, ProfileID: r.ProfileID, ProfileVersion: r.ProfileVersion,
 		ParentRunID: deref(r.ParentRunID), ParentStepID: deref(r.ParentStepID), FlowDepth: r.FlowDepth}, nil
 }
 
-func (s *Store) recoverExpiredLocked(r domain.Run) {
+func (s *Store) recoverExpiredLocked(r *domain.Run) {
+	var lost *attempt
 	for id, a := range s.attempts {
 		if a.RunID == r.ID && a.Status == "RUNNING" {
 			a.Status = "LOST"
 			end := now()
 			a.EndedAt = &end
+			a.ErrorCode = "LEASE_EXPIRED"
 			s.attempts[id] = a
 			s.put("attempt", id, r.ID, int64(a.AttemptNo), a)
-			st := s.steps[a.StepID]
-			st.Status = domain.StepPending
-			s.saveStep(st)
+			if a.SnapshotID != "" {
+				delete(s.snapshots, a.SnapshotID)
+			}
+			cp := a
+			lost = &cp
 		}
 	}
 	r.LeaseOwner, r.LeaseUntil = nil, nil
+	if lost == nil {
+		r.Status = domain.RunQueued
+		r.Version++
+		s.saveRun(*r)
+		s.appendEvent(r.TenantID, r.ID, "", "", "lease.expired", "system", "", nil)
+		return
+	}
+	s.appendEvent(r.TenantID, r.ID, lost.StepID, lost.ID, "attempt.lost", "system", "",
+		map[string]any{"attempt_no": lost.AttemptNo})
+	st := s.steps[lost.StepID]
+	// A worker that vanished after dispatching a side-effecting call may or
+	// may not have applied it. Never retry silently: park the run for a human
+	// resolution.
+	if st.Kind == domain.StepTool {
+		e, ok := s.effects[lost.IdempotencyKey]
+		if ok && (e.State == "DISPATCHED" || e.State == "UNKNOWN") {
+			e.State = "UNKNOWN"
+			e.LastCheckAt = now()
+			s.saveEffect(e)
+			st.Status = domain.StepUnknown
+			st.StatusReason = strptr("worker lost after dispatching a side-effecting tool")
+			s.saveStep(st)
+			r.Status = domain.RunNeedsHuman
+			r.Version++
+			s.saveRun(*r)
+			s.appendEvent(r.TenantID, r.ID, st.ID, lost.ID, "step.unknown", "system", "",
+				map[string]string{"reason": "worker lost after dispatching a side-effecting tool"})
+			return
+		}
+	}
+	if lost.AttemptNo >= 3 {
+		st.Status = domain.StepFailed
+		s.saveStep(st)
+		s.failRunLocked(r, "attempts exhausted after lost leases")
+		return
+	}
+	st.Status = domain.StepPending
+	s.saveStep(st)
 	r.Status = domain.RunQueued
 	r.Version++
-	s.saveRun(r)
+	s.saveRun(*r)
 }
 
 func (s *Store) consumeGrantLocked(st domain.Step, in domain.ActionIntent) (bool, error) {
@@ -209,9 +253,10 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domai
 		return domain.ErrLeaseLost
 	}
 	att, ok := s.attempts[lease.AttemptID]
-	if !ok || att.Status != "RUNNING" {
+	if !ok || att.Status != "RUNNING" || att.FenceToken != lease.FenceToken {
 		return domain.ErrLeaseLost
 	}
+	delete(s.snapshots, lease.ContextSnapshotID)
 	end := now()
 	att.Status, att.EndedAt = "SUCCEEDED", &end
 	s.attempts[att.ID] = att
@@ -262,6 +307,21 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domai
 		s.caps[st.ID] = append(s.caps[st.ID], cap)
 		s.put("capability", newID(), st.ID, int64(len(s.caps[st.ID])), map[string]any{"step_id": st.ID, "ref": cap})
 	}
+	for _, h := range res.MemoryHits {
+		rec := memoryHitRec{MemoryID: h.MemoryID, Version: h.Version, Score: h.Score, Rank: h.Rank, StepSeq: st.Seq}
+		s.memHits[st.ID] = append(s.memHits[st.ID], rec)
+		s.put("memhit", newID(), st.ID, int64(len(s.memHits[st.ID])),
+			map[string]any{"step_id": st.ID, "hit": rec})
+	}
+	if res.Compaction != nil {
+		rec := compactRec{StepID: st.ID, RunID: r.ID, Seq: st.Seq, Compaction: *res.Compaction, CreatedAt: now()}
+		s.compactions[st.ID] = rec
+		s.put("compact", st.ID, r.ID, st.Seq, rec)
+		r.CompactionEpoch++
+		s.appendEvent(r.TenantID, r.ID, st.ID, att.ID, "context.compacted", "worker", lease.WorkerID,
+			map[string]any{"compaction_epoch": r.CompactionEpoch,
+				"compacted_before": res.Compaction.CompactedBefore, "summary_ref": res.Compaction.SummaryRef})
+	}
 	s.appendEvent(r.TenantID, r.ID, st.ID, att.ID, "step.succeeded", "worker", lease.WorkerID, res.Summary)
 	for _, e := range res.Events {
 		if e.Type != "" {
@@ -275,6 +335,9 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domai
 	}
 	r.LeaseOwner, r.LeaseUntil = nil, nil
 	r.Version++
+	if res.CheckpointRef != "" {
+		s.createCheckpointLocked(r, lease, res)
+	}
 	if res.Complete {
 		r.Status = domain.RunCompleted
 		r.ResultRef = &res.ResultRef
@@ -291,9 +354,41 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domai
 		s.appendEvent(r.TenantID, r.ID, st.ID, "", "flow."+string(res.Wait), "system", "", map[string]string{"flow_node": lease.FlowNodeID})
 	} else {
 		r.Status = domain.RunQueued
+		waitingApproval, waitingChildren, waitingInput := false, false, false
 		for _, p := range res.Plan {
 			if _, err := s.insertStepLocked(&r, p); err != nil {
 				return err
+			}
+			switch p.Status {
+			case domain.StepWaitingApproval:
+				waitingApproval = true
+			case domain.StepWaitingChildren:
+				waitingChildren = true
+			case domain.StepWaitingInput:
+				waitingInput = true
+			}
+		}
+		switch {
+		case waitingApproval:
+			r.Status = domain.RunWaitingApproval
+		case waitingChildren:
+			r.Status = domain.RunWaitingChildren
+		case waitingInput:
+			r.Status = domain.RunWaitingInput
+		}
+	}
+	// Pause/cancel requests made while the step was executing settle now that
+	// the lease is released. A completed run is never retroactively cancelled.
+	if !res.Complete {
+		switch r.DesiredState {
+		case domain.DesiredCancelled:
+			s.cancelRunLocked(&r, "system", "", "cancel requested")
+			return nil
+		case domain.DesiredPaused:
+			if r.Status == domain.RunQueued || r.Status == domain.RunWaitingApproval ||
+				r.Status == domain.RunWaitingInput || r.Status == domain.RunWaitingChildren {
+				r.Status = domain.RunPaused
+				s.appendEvent(r.TenantID, r.ID, "", "", "run.paused", "system", "", nil)
 			}
 		}
 	}
@@ -309,50 +404,63 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f domain.
 		return domain.ErrLeaseLost
 	}
 	att, ok := s.attempts[lease.AttemptID]
-	if !ok || att.Status != "RUNNING" {
+	if !ok || att.Status != "RUNNING" || att.FenceToken != lease.FenceToken {
 		return domain.ErrLeaseLost
+	}
+	delete(s.snapshots, lease.ContextSnapshotID)
+	class := f.Class
+	if class == domain.FailRetryable && lease.AttemptNo >= 3 {
+		class = domain.FailPermanent
+		f.Message = "attempts exhausted: " + f.Message
 	}
 	end := now()
 	att.Status, att.EndedAt, att.ErrorCode, att.ErrorMessage = "FAILED", &end, f.Code, f.Message
+	if f.TimedOut {
+		att.Status = "TIMED_OUT"
+	}
 	s.attempts[att.ID] = att
 	s.put("attempt", att.ID, r.ID, int64(att.AttemptNo), att)
 	st := s.steps[lease.StepID]
 	st.UpdatedAt = now()
 	r.LeaseOwner, r.LeaseUntil = nil, nil
 	r.Version++
-	switch f.Class {
+	switch class {
 	case domain.FailRetryable:
-		if lease.AttemptNo < 3 {
-			st.Status = domain.StepRetryWait
-			next := now().Add(max(f.RetryAfter, 500*time.Millisecond))
-			st.NextAttemptAt = &next
-			r.Status = domain.RunQueued
-			r.NotBefore = &next
-		} else {
-			st.Status = domain.StepFailed
-			r.Status = domain.RunFailed
-			r.FailureReason = &f.Message
-			s.finishParentLocked(r, "FAILED", "", f.Message)
+		st.Status = domain.StepRetryWait
+		next := now().Add(max(f.RetryAfter, 500*time.Millisecond*time.Duration(1<<(lease.AttemptNo-1))))
+		st.NextAttemptAt = &next
+		s.saveStep(st)
+		r.Status = domain.RunQueued
+		r.NotBefore = &next
+		if e, ok := s.effects[lease.IdempotencyKey]; ok && e.State != "CONFIRMED" {
+			e.State, e.LastCheckAt = "PREPARED", now()
+			s.saveEffect(e)
 		}
+		s.appendEvent(r.TenantID, r.ID, st.ID, att.ID, "step.retry_scheduled", "worker", lease.WorkerID,
+			map[string]any{"not_before": next, "error_code": f.Code})
 	case domain.FailCancelled:
 		st.Status = domain.StepCancelled
-		r.Status = domain.RunCancelled
-		s.finishParentLocked(r, "CANCELLED", "", f.Message)
+		s.saveStep(st)
+		s.cancelRunLocked(&r, "worker", lease.WorkerID, "cancelled during execution")
+		return nil
 	case domain.FailUnknownEffect:
 		st.Status = domain.StepUnknown
+		s.saveStep(st)
+		if e, ok := s.effects[lease.IdempotencyKey]; ok && e.State != "CONFIRMED" {
+			e.State, e.LastCheckAt = "UNKNOWN", now()
+			s.saveEffect(e)
+		}
 		r.Status = domain.RunNeedsHuman
 		r.FailureReason = &f.Message
+		s.saveRun(r)
+		s.appendEvent(r.TenantID, r.ID, st.ID, att.ID, "step.unknown", "worker", lease.WorkerID,
+			map[string]string{"error_code": f.Code, "message": f.Message})
+		return nil
 	default:
 		st.Status = domain.StepFailed
-		r.Status = domain.RunFailed
-		r.FailureReason = &f.Message
-		s.finishParentLocked(r, "FAILED", "", f.Message)
-	}
-	s.saveStep(st)
-	s.appendEvent(r.TenantID, r.ID, st.ID, att.ID, "step.failed", "worker", lease.WorkerID, map[string]string{"code": f.Code, "message": f.Message})
-	if r.Status == domain.RunFailed || r.Status == domain.RunCancelled || r.Status == domain.RunNeedsHuman {
-		s.appendEvent(r.TenantID, r.ID, "", "", "run."+string(r.Status), "system", "", map[string]string{"reason": f.Message})
-		s.finalizeTurnLocked(r)
+		s.saveStep(st)
+		s.failRunLocked(&r, f.Code+": "+f.Message)
+		return nil
 	}
 	s.saveRun(r)
 	return nil
@@ -361,34 +469,77 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f domain.
 func (s *Store) PrepareEffect(ctx context.Context, lease domain.Lease, target string) (domain.EffectState, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.effects[lease.IdempotencyKey]
-	if ok && e.State == "CONFIRMED" {
-		return domain.EffectConfirmed, e.ResultRef, nil
+	if r, ok := s.runs[lease.RunID]; !ok || r.FenceToken != lease.FenceToken {
+		return "", "", domain.ErrLeaseLost
 	}
-	s.saveEffect(effectRec{Key: lease.IdempotencyKey, State: "DISPATCHED", LastCheckAt: now()})
-	return domain.EffectDispatched, "", nil
+	e, ok := s.effects[lease.IdempotencyKey]
+	if !ok {
+		e = effectRec{Key: lease.IdempotencyKey, State: "PREPARED", LastCheckAt: now()}
+	}
+	switch e.State {
+	case "PREPARED":
+		e.State = "DISPATCHED"
+		e.LastCheckAt = now()
+		s.saveEffect(e)
+		return domain.EffectDispatched, "", nil
+	case "CONFIRMED":
+		return domain.EffectConfirmed, e.ResultRef, nil
+	case "DISPATCHED", "UNKNOWN":
+		// The previous attempt may have reached the target. The kernel turns
+		// this into UNKNOWN instead of calling the tool twice.
+		return "", "", domain.ErrUnknownEffect
+	default:
+		return "", "", domain.ErrUnknownEffect
+	}
 }
 
 func (s *Store) History(ctx context.Context, tenantID, runID string, beforeSeq int64) ([]domain.Step, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []domain.Step
-	for _, st := range sortedSteps(s.steps, runID) {
-		if beforeSeq == 0 || st.Seq < beforeSeq {
-			out = append(out, st)
+	return s.historyLocked(tenantID, runID, beforeSeq, map[string]bool{})
+}
+
+func (s *Store) historyLocked(tenantID, runID string, beforeSeq int64, seen map[string]bool) ([]domain.Step, error) {
+	if seen[runID] {
+		return nil, nil
+	}
+	seen[runID] = true
+	r, ok := s.runs[runID]
+	if !ok || (tenantID != "" && r.TenantID != tenantID) {
+		return nil, domain.ErrNotFound
+	}
+	var prefix []domain.Step
+	if r.ForkedFrom != nil {
+		if cp, ok := s.checkpoints[*r.ForkedFrom]; ok {
+			var err error
+			prefix, err = s.historyLocked(tenantID, cp.RunID, cp.LastCommittedStepSeq+1, seen)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	return out, nil
+	var own []domain.Step
+	for _, st := range sortedSteps(s.steps, runID) {
+		if beforeSeq == 0 || st.Seq < beforeSeq {
+			own = append(own, st)
+		}
+	}
+	return append(prefix, own...), nil
 }
 
 func (s *Store) SnapshotKVVersions(ctx context.Context, tenantID, snapshotID string) (map[string]int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := map[string]int64{}
+	runID := s.snapshots[snapshotID]
 	for k, v := range s.kv {
-		if v.Key.TenantID == tenantID && v.Key.Scope == "run" {
-			out[k] = v.Version
+		if v.Key.TenantID != tenantID || v.Key.Scope != "run" {
+			continue
 		}
+		if runID != "" && v.Key.OwnerID != runID {
+			continue
+		}
+		out[k] = v.Version
 	}
 	return out, nil
 }
@@ -396,6 +547,17 @@ func (s *Store) SnapshotKVVersions(ctx context.Context, tenantID, snapshotID str
 func (s *Store) KVDataAt(ctx context.Context, key domain.KVKey, version int64) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	id := kvKey(key) + "\x00" + fmt.Sprint(version)
+	var data []byte
+	if err := s.db.QueryRow(`SELECT data FROM objects WHERE kind='kvver' AND id=?`, id).Scan(&data); err == nil {
+		var rec kvRec
+		if json.Unmarshal(data, &rec) == nil {
+			if rec.Deleted {
+				return nil, domain.ErrNotFound
+			}
+			return append([]byte(nil), rec.Data...), nil
+		}
+	}
 	v, ok := s.kv[kvKey(key)]
 	if !ok || v.Deleted || v.Version < version {
 		return nil, domain.ErrNotFound
