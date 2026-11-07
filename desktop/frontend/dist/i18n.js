@@ -266,6 +266,8 @@ const ZH = {
   // plugins
   "Loading…": "加载中…",
   "The plugin inventory needs the admin role.": "查看插件清单需要 admin 角色。",
+  "Plugins are managed by team servers. In local runtime, use Customize to manage models, MCP servers, HTTP tools and skills.":
+    "插件由团队服务管理。本地运行时请在“自定义”中管理模型、MCP 服务、HTTP 工具和技能。",
   "multiple": "可多实例",
   "available": "可用",
   "registered tools": "已注册的工具",
