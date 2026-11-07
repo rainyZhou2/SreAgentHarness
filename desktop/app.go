@@ -212,7 +212,8 @@ func (a *App) ListSessions(limit int) (map[string]any, error) {
 	return a.get(fmt.Sprintf("/v1/sessions?limit=%d", limit))
 }
 
-// CreateSession starts a conversation; an empty profile uses the server default.
+// CreateSession starts a conversation; an empty profile lets the server
+// choose its automatic routing mode.
 func (a *App) CreateSession(title, profileID string) (map[string]any, error) {
 	c, err := a.c()
 	if err != nil {
@@ -323,7 +324,8 @@ func (a *App) SendMessage(sessionID, text string) (map[string]any, error) {
 // steps with inputs and outputs, approvals and cost.
 func (a *App) RunView(runID string) (map[string]any, error) {
 	base := "/v1/runs/" + url.PathEscape(runID)
-	parts := map[string]string{"run": base, "steps": base + "/steps?expand=io", "approvals": base + "/approvals", "cost": base + "/cost"}
+	parts := map[string]string{"run": base, "steps": base + "/steps?expand=io", "approvals": base + "/approvals", "cost": base + "/cost",
+		"flow": base + "/flow"}
 	out := map[string]any{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -382,6 +384,12 @@ func (a *App) Command(runID string, req CommandRequest) (map[string]any, error) 
 		return nil, err
 	}
 	return out, nil
+}
+
+// ProvideInput answers a flow input node.
+func (a *App) ProvideInput(runID string, expectedVersion int64, value any) (map[string]any, error) {
+	return a.Command(runID, CommandRequest{Type: "provide_input", ExpectedVersion: expectedVersion,
+		Payload: map[string]any{"value": value}})
 }
 
 // Plugins returns the server's plugin inventory (admin only).
