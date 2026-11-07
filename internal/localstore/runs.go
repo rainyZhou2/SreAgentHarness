@@ -146,17 +146,7 @@ func (s *Store) ListSteps(ctx context.Context, tenantID, runID string) ([]domain
 func (s *Store) ListEvents(ctx context.Context, tenantID, runID string, afterSeq int64, limit int) ([]domain.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []domain.Event
-	for _, e := range s.events[runID] {
-		if e.Seq > afterSeq {
-			out = append(out, e)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return s.listEventsLocked(runID, afterSeq, limit)
 }
 
 func (s *Store) ListApprovals(ctx context.Context, tenantID, runID string) ([]domain.ApprovalRequest, error) {
