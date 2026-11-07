@@ -56,7 +56,15 @@ The app starts in **Local runtime** mode by default:
 - the desktop process starts the bundled SQLite-backed harness core;
 - the UI talks to it over loopback with a per-launch random token;
 - no Docker, system PostgreSQL, NATS or terminal is needed;
-- data lives under `<user config dir>/sre-harness-desktop/local/`.
+- data lives under `<user config dir>/sre-harness-desktop/local/`:
+  ```text
+  local/
+    harness.db          SQLite state and query indexes
+    events/local/*.jsonl append-only execution log (source of truth)
+    artifacts/
+    logs/
+  ```
+- execution events are written to JSONL first; SQLite only stores byte-range indexes. `RebuildEventIndex` can rebuild the index from the JSONL files.
 
 Switch to **Team server** in Connection to use a shared harness instead. Team mode accepts development headers (local development only) or a bearer token. Settings are saved to `<user config dir>/sre-harness-desktop/settings.json` (mode 0600); tokens are kept in memory only.
 

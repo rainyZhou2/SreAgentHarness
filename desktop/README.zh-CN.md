@@ -56,7 +56,15 @@ Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（se
 - 桌面进程启动自带的 SQLite harness core；
 - UI 通过回环地址和每次启动随机生成的 Token 连接；
 - 不需要 Docker、系统 PostgreSQL、NATS 或命令行；
-- 数据保存在 `<用户配置目录>/sre-harness-desktop/local/`。
+- 数据保存在 `<用户配置目录>/sre-harness-desktop/local/`：
+  ```text
+  local/
+    harness.db          SQLite 状态与查询索引
+    events/local/*.jsonl 追加式执行日志（source of truth）
+    artifacts/
+    logs/
+  ```
+- 执行事件先写 JSONL；SQLite 只保存文件偏移索引，可通过 `RebuildEventIndex` 从 JSONL 重建。
 
 在 Connection 中切换到 **团队服务** 即可连接共享 harness。团队模式支持开发请求头（仅本机调试）或 Bearer Token。设置保存在 `<用户配置目录>/sre-harness-desktop/settings.json`（权限 0600）；Token 只保存在内存中。
 
