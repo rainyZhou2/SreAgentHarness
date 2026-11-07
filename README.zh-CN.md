@@ -137,6 +137,9 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_PLAN_APPROVERS` | 计划审批人数；R3 计划至少 2 人 |
 | `HARNESS_PLANNER_MAX_CHILDREN` / `_TOTAL_RUNS` / `_DEPTH` / `_ITERATIONS` | 生成图的并行、总 Run、嵌套与循环上限 |
 | `HARNESS_PLANNER_MAX_MODEL_CALLS` / `_MAX_ESTIMATED_TOKENS` | 静态模型调用数与输出 Token 上限 |
+| `HARNESS_OUTPUT_OFFLOAD_BYTES` | 超过该大小的工具结果落盘并摘要，模型通过 `harness.artifact_query` 按需查询（默认 24576，负数关闭） |
+| `HARNESS_CONTEXT_PROVIDER_TIMEOUT` / `HARNESS_CONTEXT_MAX_FACTS` | 环境事实 provider 的单个超时与事实条数上限 |
+| `HARNESS_PLANNER_REACT_PATTERNS` / `_FLOW_PATTERNS` | 规划失败时的路由正则，`\|\|` 分隔；`none` 关闭该列表 |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
@@ -144,9 +147,20 @@ docker compose -f deploy/docker-compose.yml up --build
 
 其余配置见 `deploy/harness.example.yaml`。
 
+## 触发器、策略规则与动作闭环
+
+- **触发器**（`triggers:`）：`POST /v1/triggers/{name}` 把 Alertmanager、Grafana、PagerDuty、CI 等 webhook 转成运行。`items` 拆分事件，`filter` 过滤噪声，`resolve` 事件只追加证据。去重窗口内的重复事件以证据形式注入已有运行而不是新建；去重通过数据库共享，多副本结果一致。支持 HMAC 签名（`X-Harness-Signature: sha256=…`）和按触发器限流。`schedule:` 触发器在多个 scheduler 副本间每个周期只创建一次运行。
+- **规则化策略**（`policy: {name: rules}`）：按工具、来源、标签、风险、环境、目标、参数、时间窗、频率和影响面匹配，最严格的命中规则生效，框架底线始终生效。环境按每次调用解析并绑定进 action intent。
+- **时间与环境上下文**：运行固定 `now`、故障时间窗、服务和标签（`POST /v1/runs` 的 `context`，或由触发器渲染）。`context_provider` 插件在每个运行开始时补充拓扑、归属和近期变更，结果固定用于回放，并作为不可信数据渲染。配置了 `time_args` 的工具在模型未给出时间时自动补齐时间窗。
+- **校验与补偿**（`tool_overlays.<tool>.lifecycle`）：副作用执行后内核轮询校验工具直到 `expect` 成立；校验失败时提出补偿动作，补偿始终需要审批。
+- **大输出**：超大的工具结果存为 `tool-output` 制品并生成结构化摘要（日志级别、时间范围、高频模板；JSON 结构与数值统计），模型通过 `harness.artifact_query` 查询其余部分（head、tail、lines、grep、JSON path、时间范围）。
+- **路由**：规划失败时，依次由上下文提示、模型请求的模式、配置的正则以及目标中提到的有副作用工具决定走兜底 flow 还是 ReAct。
+
+桌面端从数据目录下的 `harness.local.json`（或 `HARNESS_LOCAL_CONFIG`）读取同样的 `policy`、`triggers`、`context_providers`、`tool_overlays` 配置。
+
 ## API
 
-`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/healthz`、`/metrics`。
+`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/v1/triggers…`、`/healthz`、`/metrics`。
 
 ## 测试
 

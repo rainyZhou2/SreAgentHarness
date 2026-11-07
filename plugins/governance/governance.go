@@ -42,6 +42,26 @@ func init() {
 			return policy.Engine{Version: cfg.Version, Environment: cfg.Environment, ApprovalTTL: cfg.ApprovalTTL.D(),
 				AllowR1WithoutApproval: cfg.AllowR1WithoutApproval}, nil
 		})
+	plugin.Register(plugin.Policy, "rules", "rule-based policy: matchers over tool, source, labels, target, environment, time window, rate and blast radius; the most restrictive matching rule decides, the framework floor always applies",
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (policy.Gate, error) {
+			var cfg policy.RuleConfig
+			if err := c.Decode(&cfg); err != nil {
+				return nil, err
+			}
+			var counter policy.ActionCounter
+			if h.Store != nil {
+				counter = h.Store
+			}
+			e, err := policy.NewRuleEngine(cfg, counter)
+			if err != nil {
+				return nil, err
+			}
+			if h.Log != nil {
+				h.Log.Info("rule-based policy", "version", e.Base.Version, "rules", e.RuleNames(),
+					"default_environment", e.Base.Environment)
+			}
+			return e, nil
+		})
 	plugin.Register(plugin.Grader, "substring", "root cause hit = answer contains a ground-truth label (case-insensitive)",
 		func(context.Context, *plugin.Host, plugin.Config) (eval.Grader, error) {
 			return eval.SubstringGrader, nil

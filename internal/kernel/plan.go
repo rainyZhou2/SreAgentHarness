@@ -97,7 +97,7 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 	}
 	res, err := w.cfg.Planner.Plan(ctx, scope, planner.Input{
 		Goal: g.Goal, History: history, Capabilities: capabilities, Tools: visible,
-		AllowTool: allowTool, MaxSteps: rules.MaxSteps,
+		AllowTool: allowTool, MaxSteps: rules.MaxSteps, ModeHint: modeHint(g.Context),
 	})
 	if err != nil {
 		return domain.StepSuccess{}, err
@@ -328,4 +328,12 @@ func (w *Worker) executePlanReview(ctx context.Context, lease domain.Lease) (dom
 			InputHash: lease.InputHash, Status: domain.StepPending}},
 		Events: []domain.EmittedEvent{{Type: "plan.approved", Payload: summary}},
 	}, nil
+}
+
+// modeHint returns the routing hint pinned in the goal context.
+func modeHint(gc *domain.GoalContext) string {
+	if gc == nil {
+		return ""
+	}
+	return gc.Mode
 }

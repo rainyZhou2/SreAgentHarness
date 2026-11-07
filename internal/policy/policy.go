@@ -26,6 +26,11 @@ type Decision struct {
 	Risk              domain.RiskClass `json:"risk"`
 	RequiredApprovals int              `json:"required_approvals"`
 	PolicyVersion     string           `json:"policy_version"`
+	// Environment is the environment the call was evaluated for (rule-based
+	// policies resolve it per call).
+	Environment string `json:"environment,omitempty"`
+	// MatchedRules lists the policy rules that matched the call.
+	MatchedRules []string `json:"matched_rules,omitempty"`
 }
 
 type Engine struct {

@@ -1,6 +1,9 @@
 package policy
 
 import (
+	"context"
+	"encoding/json"
+
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/tools"
 )
@@ -29,7 +32,26 @@ func Guarded(g Gate) Gate {
 type guarded struct{ inner Gate }
 
 func (g guarded) Evaluate(desc *tools.Descriptor, target string) Decision {
-	d := g.inner.Evaluate(desc, target)
+	return floor(g.inner.Evaluate(desc, target), desc, target)
+}
+
+// EvaluateRequest forwards the full request to gates that understand it and
+// applies the same framework floor.
+func (g guarded) EvaluateRequest(ctx context.Context, req Request) Decision {
+	req = req.withTarget()
+	return floor(EvaluateRequest(ctx, g.inner, req), req.Tool, req.Target)
+}
+
+// EnvironmentFor delegates to the inner gate when it resolves environments.
+func (g guarded) EnvironmentFor(desc tools.Descriptor, args json.RawMessage) string {
+	if er, ok := g.inner.(EnvironmentResolver); ok {
+		return er.EnvironmentFor(desc, args)
+	}
+	return ""
+}
+
+// floor applies the invariants no gate can relax.
+func floor(d Decision, desc *tools.Descriptor, target string) Decision {
 	switch {
 	case desc == nil:
 		return Decision{Verdict: Deny, Reason: "tool is not registered", PolicyVersion: d.PolicyVersion}
@@ -48,6 +70,12 @@ func (g guarded) Evaluate(desc *tools.Descriptor, target string) Decision {
 		}
 	default:
 		d.Verdict, d.Reason = Deny, "framework floor: destructive (R3) or unclassified actions are disabled"
+	}
+	switch d.Verdict {
+	case Allow, RequireApproval, Deny:
+	default:
+		// An unknown verdict from a plugin is not an allow.
+		d.Verdict, d.Reason = Deny, "policy returned no valid verdict"
 	}
 	if d.Verdict == RequireApproval && d.RequiredApprovals < 1 {
 		d.RequiredApprovals = 1

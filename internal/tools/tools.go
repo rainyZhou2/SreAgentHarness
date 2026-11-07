@@ -36,6 +36,21 @@ type Descriptor struct {
 	Trust string `json:"trust,omitempty"`
 	// Source names where the tool comes from (native, mcp:<server>, remote:<name>).
 	Source string `json:"source,omitempty"`
+
+	// The fields below are operator metadata attached through tool overlays
+	// (see Overlay). They never change the risk class, trust or schema.
+
+	// Labels are free-form operator labels matched by policy rules.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Lifecycle declares how a side-effecting call is verified and, when the
+	// verification is refuted, compensated.
+	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+	// TimeArgs names time-range arguments the kernel fills from the run's
+	// pinned time context when the model omits them.
+	TimeArgs *TimeArgs `json:"time_args,omitempty"`
+	// MaxInlineBytes overrides the size above which a result is offloaded to
+	// an artifact (0 = worker default, <0 = never offload).
+	MaxInlineBytes int `json:"max_inline_bytes,omitempty"`
 }
 
 // CapabilityRef is the stable graph reference for a tool descriptor.
@@ -79,9 +94,35 @@ type Tool interface {
 }
 
 type Registry struct {
-	mu     sync.RWMutex
-	tools  map[string]Tool
-	tenant TenantSource
+	mu       sync.RWMutex
+	tools    map[string]Tool
+	tenant   TenantSource
+	overlays map[string]Overlay
+}
+
+// SetOverlays attaches operator metadata to tools by name. Overlays apply to
+// process-wide and tenant tools alike; they are validated by the caller.
+func (r *Registry) SetOverlays(o map[string]Overlay) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.overlays = o
+}
+
+// Overlays returns the configured overlays.
+func (r *Registry) Overlays() map[string]Overlay {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.overlays
+}
+
+func (r *Registry) wrap(t Tool) Tool {
+	r.mu.RLock()
+	ov, ok := r.overlays[t.Descriptor().Name]
+	r.mu.RUnlock()
+	if !ok {
+		return t
+	}
+	return overlaid{Tool: t, ov: ov}
 }
 
 // TenantSource supplies tools that exist for one tenant only (MCP servers
@@ -112,7 +153,7 @@ func (r *Registry) LookupFor(tenantID, name string) (Tool, bool) {
 	}
 	for _, t := range src.TenantTools(tenantID) {
 		if t.Descriptor().Name == name {
-			return t, true
+			return r.wrap(t), true
 		}
 	}
 	return nil, false
@@ -132,7 +173,7 @@ func (r *Registry) DescriptorsFor(tenantID string) []Descriptor {
 		seen[d.Name] = true
 	}
 	for _, t := range src.TenantTools(tenantID) {
-		if d := t.Descriptor(); !seen[d.Name] {
+		if d := r.wrap(t).Descriptor(); !seen[d.Name] {
 			seen[d.Name] = true
 			out = append(out, d)
 		}
@@ -157,17 +198,24 @@ func (r *Registry) Register(t Tool) {
 
 func (r *Registry) Lookup(name string) (Tool, bool) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
-	return t, ok
+	r.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return r.wrap(t), true
 }
 
 func (r *Registry) Descriptors() []Descriptor {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]Descriptor, 0, len(r.tools))
+	list := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
-		out = append(out, t.Descriptor())
+		list = append(list, t)
+	}
+	r.mu.RUnlock()
+	out := make([]Descriptor, 0, len(list))
+	for _, t := range list {
+		out = append(out, r.wrap(t).Descriptor())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

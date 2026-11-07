@@ -15,7 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"go-sre-harness/internal/plugin"
+	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/toolconfig"
+	"go-sre-harness/internal/trigger"
 )
 
 // File is the harness configuration file (HARNESS_CONFIG, YAML or JSON).
@@ -30,6 +32,11 @@ type File struct {
 	// A kind present here replaces the environment-derived default for that
 	// kind; kinds left out keep their defaults.
 	Plugins map[string]plugin.Specs `json:"plugins"`
+	// Triggers turn inbound webhooks and schedules into runs.
+	Triggers []trigger.Config `json:"triggers,omitempty"`
+	// ToolOverlays attach operator metadata (labels, lifecycle, time
+	// arguments, offload size) to tools by name, whatever their source.
+	ToolOverlays map[string]tools.Overlay `json:"tool_overlays,omitempty"`
 }
 
 type ModelSettings struct {
@@ -226,6 +233,12 @@ func merge(base, f File) (File, error) {
 	}
 	if f.Strategy.Aliases != nil {
 		out.Strategy.Aliases = f.Strategy.Aliases
+	}
+	if f.Triggers != nil {
+		out.Triggers = f.Triggers
+	}
+	if f.ToolOverlays != nil {
+		out.ToolOverlays = f.ToolOverlays
 	}
 	return out, nil
 }

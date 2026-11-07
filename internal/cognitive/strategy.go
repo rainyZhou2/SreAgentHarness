@@ -49,6 +49,11 @@ type ReasoningInput struct {
 	// CapabilityMap is the optional [E] summary of capabilities related to
 	// the services in the goal. Empty when the profile disables it.
 	CapabilityMap []string
+	// Time is the run context pinned in the goal artifact (received_at,
+	// incident window, services). Nil for runs created before it existed.
+	Time *domain.GoalContext
+	// Facts are environment facts from context providers, pinned per run.
+	Facts []domain.ContextFact
 
 	// v1.1 context (§29, §33): all of it is pinned by the snapshot.
 	Call            CallScope

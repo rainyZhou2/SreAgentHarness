@@ -248,6 +248,40 @@ type createRunBody struct {
 	ProfileID      string  `json:"profile_id"`
 	ProfileVersion int64   `json:"profile_version"`
 	IncidentID     *string `json:"incident_id"`
+	// Context is optional run context pinned in the goal artifact; the
+	// server sets received_at.
+	Context *runContextBody `json:"context,omitempty"`
+}
+
+type runContextBody struct {
+	Window   *domain.TimeWindow `json:"window,omitempty"`
+	Services []string           `json:"services,omitempty"`
+	Incident string             `json:"incident,omitempty"`
+	Labels   map[string]string  `json:"labels,omitempty"`
+	Mode     string             `json:"mode,omitempty"`
+}
+
+// goalContext validates client-supplied run context.
+func (b *runContextBody) goalContext(source string) (domain.GoalContext, string) {
+	gc := domain.GoalContext{Source: source}
+	if b == nil {
+		return gc, ""
+	}
+	switch b.Mode {
+	case "", "react", "flow":
+	default:
+		return gc, "context.mode must be react or flow"
+	}
+	if len(b.Services) > 20 || len(b.Labels) > 50 {
+		return gc, "context has too many services or labels"
+	}
+	if w := b.Window; w != nil {
+		if w.Start.IsZero() || (!w.End.IsZero() && !w.End.After(w.Start)) {
+			return gc, "context.window needs start, and end after start"
+		}
+	}
+	gc.Window, gc.Services, gc.Incident, gc.Labels, gc.Mode = b.Window, b.Services, b.Incident, b.Labels, b.Mode
+	return gc, ""
 }
 
 func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
@@ -265,27 +299,19 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_body", "goal is required")
 		return
 	}
-	var rollout *string
-	if body.ProfileID == "" {
-		body.ProfileID, body.ProfileVersion = s.DefaultProfile, s.DefaultVersion
-	}
-	if body.ProfileVersion == 0 && s.ResolveProfile != nil {
-		body.ProfileVersion, rollout = s.ResolveProfile(r.Context(), id.tenant, body.ProfileID, key)
-	}
-	if body.ProfileVersion == 0 {
-		body.ProfileVersion = s.DefaultVersion
-	}
-	data, _ := json.Marshal(map[string]string{"goal": body.Goal})
-	ref, hash, err := s.Artifacts.Put(r.Context(), id.tenant, "goal", data)
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "artifact_store_unavailable", "retry later")
+	gc, msg := body.Context.goalContext("api")
+	if msg != "" {
+		writeErr(w, http.StatusBadRequest, "invalid_context", msg)
 		return
 	}
-	run, created, err := s.Store.CreateRun(r.Context(), domain.CreateRunRequest{
-		TenantID: id.tenant, IncidentID: body.IncidentID, ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion,
-		GoalRef: ref, GoalHash: hash, IdempotencyKey: key, InitiatorType: "user", InitiatorID: id.actor, RolloutID: rollout,
-	})
+	run, created, err := s.StartRun(r.Context(), StartRunRequest{TenantID: id.tenant, ActorID: id.actor, InitiatorType: "user",
+		Goal: body.Goal, Context: gc, ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion,
+		IncidentID: body.IncidentID, IdempotencyKey: key})
 	if err != nil {
+		if errors.Is(err, ErrArtifactUnavailable) {
+			writeErr(w, http.StatusServiceUnavailable, "artifact_store_unavailable", "retry later")
+			return
+		}
 		if strings.Contains(err.Error(), "foreign key") {
 			writeErr(w, http.StatusUnprocessableEntity, "unknown_profile_or_incident", err.Error())
 			return

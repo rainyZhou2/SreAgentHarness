@@ -98,13 +98,39 @@ func (s *Service) Sync(ctx context.Context, tenantID string) error {
 	}
 
 	if s.Tools != nil {
-		for _, d := range s.Tools.DescriptorsFor(tenantID) {
+		descs := s.Tools.DescriptorsFor(tenantID)
+		toolRefs := make(map[string]string, len(descs))
+		for _, d := range descs {
+			toolRefs[d.Name] = ToolRef(d)
+		}
+		for _, d := range descs {
 			ref := ToolRef(d)
+			labels := map[string]any{"description": truncateRunes(d.Description, 200)}
+			for k, v := range d.Labels {
+				if k != "description" {
+					labels[k] = v
+				}
+			}
 			nodes = append(nodes, domain.CapabilityNode{
 				TenantID: tenantID, Ref: ref, Kind: "tool", Name: d.Name, Version: d.Version,
-				Source: d.Source, Risk: string(d.Risk), Trust: d.Trust,
-				Labels: map[string]any{"description": truncateRunes(d.Description, 200)},
+				Source: d.Source, Risk: string(d.Risk), Trust: d.Trust, Labels: labels,
 			})
+			// Operator lifecycle: an action precedes its verification and is
+			// related to its compensation.
+			if lc := d.Lifecycle; lc != nil {
+				if lc.Verify != nil && toolRefs[lc.Verify.Tool] != "" {
+					relations = append(relations, domain.CapabilityRelation{
+						TenantID: tenantID, SrcRef: ref, DstRef: toolRefs[lc.Verify.Tool], Relation: "precedes",
+						Source: "derived", Weight: 1, Attrs: map[string]any{"role": "verifies"},
+					})
+				}
+				if lc.Compensate != nil && toolRefs[lc.Compensate.Tool] != "" {
+					relations = append(relations, domain.CapabilityRelation{
+						TenantID: tenantID, SrcRef: ref, DstRef: toolRefs[lc.Compensate.Tool], Relation: "related_to",
+						Source: "derived", Weight: 1, Attrs: map[string]any{"role": "compensates"},
+					})
+				}
+			}
 			if name, ok := strings.CutPrefix(d.Source, "mcp:"); ok {
 				serverRef := servers[name]
 				if serverRef == "" {

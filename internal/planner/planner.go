@@ -61,6 +61,9 @@ type Config struct {
 	FallbackProfileID string
 	FallbackVersion   int64
 	FallbackReact     bool
+	// Router decides between the fallback flow and ReAct when no valid plan
+	// was produced (default: DefaultRouter()).
+	Router *Router
 }
 
 // Observer receives low-cardinality planning metrics.
@@ -85,6 +88,9 @@ type Input struct {
 	AllowTool    func(string) bool
 	MaxNodes     int
 	MaxSteps     int
+	// ModeHint is an optional routing hint pinned in the goal context by a
+	// trigger or API caller: "react" or "flow".
+	ModeHint string
 }
 
 // Result is a validated plan. Mode is "react" or "flow"; Flow is set only for
@@ -149,6 +155,7 @@ func (s *Service) Plan(ctx context.Context, scope gw.Scope, in Input) (Result, e
 		Type: gw.PartText, Text: userPrompt(in, maxNodes, budget),
 	}}}}
 	var validation []string
+	requested := ""
 	for attempt := 0; attempt <= cfg.MaxRepairs; attempt++ {
 		req := s.request(messages, in, cfg)
 		raw, _ := json.Marshal(req)
@@ -162,7 +169,7 @@ func (s *Service) Plan(ctx context.Context, scope gw.Scope, in Input) (Result, e
 			if ge, ok := gw.AsError(err); ok && !ge.Retryable() &&
 				ge.Code != gw.ErrBudgetExceeded && ge.Code != gw.ErrFenceLost && ge.Code != gw.ErrCancelled {
 				validation = append(validation, err.Error())
-				return s.fallback(ctx, scope, in, validation, budget, start)
+				return s.fallback(ctx, scope, in, validation, budget, start, requested)
 			}
 			s.observeResult(Result{}, time.Since(start), "error", "")
 			return Result{}, mapGatewayError(err)
@@ -180,6 +187,9 @@ func (s *Service) Plan(ctx context.Context, scope gw.Scope, in Input) (Result, e
 			return res, nil
 		}
 		validation = append(validation, err.Error())
+		if m := requestedMode(resp); m != "" {
+			requested = m
+		}
 		s.ObservePlanValidation(classifyPlanError(err))
 		if attempt == cfg.MaxRepairs {
 			break
@@ -195,7 +205,27 @@ func (s *Service) Plan(ctx context.Context, scope gw.Scope, in Input) (Result, e
 			gw.Message{Role: gw.RoleUser, Parts: []gw.Part{{Type: gw.PartText, Text: "[validation failed]\n" + err.Error() +
 				"\nCall submit_flow again with a corrected plan. Keep the same goal and only use listed tools."}}})
 	}
-	return s.fallback(ctx, scope, in, validation, budget, start)
+	return s.fallback(ctx, scope, in, validation, budget, start, requested)
+}
+
+// requestedMode is the mode the model asked for in a plan that failed
+// validation ("" when unknown).
+func requestedMode(resp gw.Response) string {
+	call := findSubmitFlow(resp)
+	if call == nil {
+		return ""
+	}
+	var p struct {
+		Mode string `json:"mode"`
+	}
+	if json.Unmarshal(call.Args, &p) != nil {
+		return ""
+	}
+	switch p.Mode {
+	case "react", "flow":
+		return p.Mode
+	}
+	return ""
 }
 
 func (s *Service) request(messages []gw.Message, in Input, cfg Config) gw.Request {
@@ -281,9 +311,17 @@ func (s *Service) parseAndValidate(ctx context.Context, scope gw.Scope, in Input
 	}
 }
 
-func (s *Service) fallback(ctx context.Context, scope gw.Scope, in Input, validation []string, budget Budget, start time.Time) (Result, error) {
+func (s *Service) fallback(ctx context.Context, scope gw.Scope, in Input, validation []string, budget Budget, start time.Time, requested string) (Result, error) {
 	cfg := s.Config
-	if cfg.FallbackProfileID != "" && cfg.FallbackVersion > 0 && looksLikeRunbook(in.Goal) && s.Profiles != nil {
+	router := cfg.Router
+	if router == nil {
+		router = DefaultRouter()
+	}
+	mode, why := router.Route(in, requested)
+	if s.Log != nil {
+		s.Log.Info("planner fallback route", "mode", mode, "signal", why)
+	}
+	if cfg.FallbackProfileID != "" && cfg.FallbackVersion > 0 && mode == "flow" && s.Profiles != nil {
 		raw, err := s.Profiles.ProfileSpec(ctx, scope.TenantID, cfg.FallbackProfileID, cfg.FallbackVersion)
 		if err == nil {
 			var spec struct {
@@ -296,8 +334,8 @@ func (s *Service) fallback(ctx context.Context, scope gw.Scope, in Input, valida
 					analysis := Analyze(fs, AnalysisOptions{Tools: in.Tools, Budget: budget, MaxSteps: in.MaxSteps})
 					res := Result{Mode: "flow", Flow: &fs, Canonical: canon, Hash: hash,
 						PlanHash: PlanHash("flow", hash, nil), Fallback: true,
-						Rationale: fmt.Sprintf("planner could not produce a valid plan; using the deterministic fallback %s@%d",
-							cfg.FallbackProfileID, cfg.FallbackVersion),
+						Rationale: fmt.Sprintf("planner could not produce a valid plan; using the deterministic fallback %s@%d (%s)",
+							cfg.FallbackProfileID, cfg.FallbackVersion, why),
 						Analysis: &analysis, ValidationErrors: validation}
 					s.observeResult(res, time.Since(start), "fallback_flow", analysis.ReviewRisk())
 					s.ObservePlanFallback("flow")
@@ -553,29 +591,4 @@ func truncate(s string, n int) string {
 		return string(r)
 	}
 	return string(r[:n]) + "…"
-}
-
-// looksLikeRunbook is the deterministic fallback router. It deliberately
-// favors ReAct for question-shaped requests.
-func looksLikeRunbook(text string) bool {
-	t := strings.TrimSpace(strings.ToLower(text))
-	for _, q := range []string{
-		"why", "how", "what", "when", "where", "which", "who",
-		"is ", "are ", "can ", "could ", "should ", "does ", "do ",
-		"为什么", "怎么", "如何", "是否", "能否", "什么是",
-	} {
-		if strings.HasPrefix(t, q) {
-			return false
-		}
-	}
-	for _, v := range []string{
-		"restart", "rollback", "redeploy", "deploy", "scale", "failover", "remediate", "recover",
-		"drain", "rotate", "patch", "upgrade", "migrate",
-		"重启", "回滚", "发布", "恢复", "修复", "扩容", "缩容", "摘流", "降级", "轮换", "升级", "迁移",
-	} {
-		if strings.Contains(t, v) {
-			return true
-		}
-	}
-	return false
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/tools"
 )
 
 func policyGuard(g policy.Gate) policy.Gate { return policy.Guarded(g) }
@@ -202,4 +204,67 @@ func buildEventSinks(ctx context.Context, h *plugin.Host, specs plugin.Specs, m 
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// applyToolOverlays validates operator overlays and installs them. Overlays
+// may name tenant tools that are loaded later, so an unknown name is only a
+// warning; follow-up tools are resolved when they run.
+func applyToolOverlays(reg *tools.Registry, overlays map[string]tools.Overlay, log *slog.Logger) error {
+	if len(overlays) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(overlays))
+	for name := range overlays {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		o := overlays[name]
+		if err := o.Validate(name); err != nil {
+			return err
+		}
+		if _, ok := reg.Lookup(name); !ok {
+			log.Warn("tool overlay names a tool that is not registered globally (tenant tools are resolved per run)", "tool", name)
+		}
+		if lc := o.Lifecycle; lc != nil {
+			for _, f := range []*tools.FollowUp{lc.Verify, lc.Compensate} {
+				if f == nil {
+					continue
+				}
+				if _, ok := reg.Lookup(f.Tool); !ok {
+					log.Warn("tool overlay follow-up is not registered globally", "tool", name, "follow_up", f.Tool)
+				}
+			}
+		}
+	}
+	reg.SetOverlays(overlays)
+	log.Info("tool overlays", "tools", names)
+	return nil
+}
+
+// triggerClaimPurger deletes expired trigger deduplication claims.
+type triggerClaimPurger interface {
+	PurgeTriggerClaims(ctx context.Context, before time.Time, limit int) (int64, error)
+}
+
+func purgeTriggerClaims(ctx context.Context, s triggerClaimPurger, log *slog.Logger) error {
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			for range 20 {
+				n, err := s.PurgeTriggerClaims(ctx, time.Now(), 1000)
+				if err != nil {
+					log.Warn("purge trigger claims", "err", err)
+					break
+				}
+				if n < 1000 {
+					break
+				}
+			}
+		}
+	}
 }
