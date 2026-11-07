@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"go-sre-harness/internal/flow"
 )
 
 // Definition is one immutable profile version supplied by a profile source.
@@ -48,6 +50,19 @@ func (d Definition) Validate() (Spec, json.RawMessage, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&s); err != nil {
 		return Spec{}, nil, fmt.Errorf("profile %s@%d (%s): spec: %w", d.ID, d.Version, d.Origin, err)
+	}
+	if len(s.Flow) > 0 {
+		// Structural validation at registration; profile.Compile re-checks
+		// the tool allowlist once the rules are known.
+		if _, _, _, err := flow.Compile(s.Flow, flow.CompileOptions{}); err != nil {
+			return Spec{}, nil, fmt.Errorf("profile %s@%d (%s): %w", d.ID, d.Version, d.Origin, err)
+		}
+	}
+	if s.Strategy == "flow" && len(s.Flow) == 0 {
+		return Spec{}, nil, fmt.Errorf("profile %s@%d (%s): strategy flow requires a flow spec", d.ID, d.Version, d.Origin)
+	}
+	if s.Strategy != "flow" && len(s.Flow) > 0 {
+		return Spec{}, nil, fmt.Errorf("profile %s@%d (%s): flow is only valid with strategy \"flow\"", d.ID, d.Version, d.Origin)
 	}
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, d.Spec); err != nil {

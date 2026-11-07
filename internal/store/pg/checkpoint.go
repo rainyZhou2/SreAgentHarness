@@ -78,6 +78,16 @@ func (s *Store) ForkRun(ctx context.Context, req ForkRunRequest) (domain.Run, bo
 	if err != nil {
 		return domain.Run{}, false, err
 	}
+	var hasFlow bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM flow_runs WHERE tenant_id=$1 AND run_id=$2)`,
+		req.TenantID, src.ID).Scan(&hasFlow); err != nil {
+		return domain.Run{}, false, err
+	}
+	if hasFlow {
+		// A flow fork would need a copy of the compiled graph and node
+		// attempts; starting a fresh run from the same goal is not a fork.
+		return domain.Run{}, false, &domain.RejectedError{Reason: "flow_fork_not_supported"}
+	}
 	var cp Checkpoint
 	if req.CheckpointID == "" {
 		cp, err = scanCheckpoint(s.pool.QueryRow(ctx, `SELECT `+checkpointCols+` FROM run_checkpoints

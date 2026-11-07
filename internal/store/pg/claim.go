@@ -69,7 +69,8 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 	}
 
 	step, err := scanStep(r.tx.QueryRow(ctx, `SELECT `+stepCols+` FROM agent_steps
-		WHERE run_id=$1 AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL') ORDER BY seq LIMIT 1`, r.run.ID))
+		WHERE run_id=$1 AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL','WAITING_CHILDREN')
+		ORDER BY seq LIMIT 1`, r.run.ID))
 	if errors.Is(err, domain.ErrNotFound) {
 		return domain.Lease{}, noWork, nil
 	}
@@ -79,6 +80,15 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 	if step.Status == domain.StepWaitingApproval {
 		r.setStatus(domain.RunWaitingApproval)
 		return domain.Lease{}, noWork, nil
+	}
+	if step.Status == domain.StepWaitingChildren {
+		ready, err := s.flowChildrenReady(ctx, r)
+		if err != nil {
+			return domain.Lease{}, nil, err
+		}
+		if !ready {
+			return domain.Lease{}, noWork, nil
+		}
 	}
 	if step.Status == domain.StepRetryWait && step.NextAttemptAt != nil && step.NextAttemptAt.After(r.now) {
 		r.run.NotBefore = step.NextAttemptAt
@@ -104,14 +114,19 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 
 	attemptID := newID()
 	var intent *domain.ActionIntent
-	if step.Kind == domain.StepTool {
+	if step.Kind == domain.StepTool || step.Kind == domain.StepFlow || step.Kind == domain.StepPlanReview {
 		intent, err = loadIntent(ctx, r.tx, r.run.TenantID, step.ID)
 		if err != nil {
 			return domain.Lease{}, nil, err
 		}
-		if intent == nil {
+		if step.Kind == domain.StepTool && intent == nil {
 			return domain.Lease{}, nil, r.fail(ctx, "tool step without action intent")
 		}
+		if step.Kind == domain.StepPlanReview && intent == nil {
+			return domain.Lease{}, nil, r.fail(ctx, "plan review step without action intent")
+		}
+	}
+	if intent != nil {
 		ok, err := s.checkApprovalGrant(ctx, r, step, intent, attemptID)
 		if err != nil {
 			return domain.Lease{}, nil, err
@@ -167,10 +182,23 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 	return domain.Lease{
 		TenantID: r.run.TenantID, RunID: r.run.ID, StepID: step.ID, StepSeq: step.Seq, AttemptID: attemptID,
 		AttemptNo: attemptNo, WorkerID: workerID, FenceToken: r.run.FenceToken, Kind: step.Kind,
-		ExecutorName: step.ExecutorName, InputRef: step.InputRef, InputHash: step.InputHash, GoalRef: r.run.GoalRef,
-		ContextSnapshotID: snapshotID, IdempotencyKey: idemKey, Intent: intent,
+		ExecutorName: step.ExecutorName, FlowNodeID: step.FlowNodeID, InputRef: step.InputRef, InputHash: step.InputHash,
+		GoalRef: r.run.GoalRef, ContextSnapshotID: snapshotID, IdempotencyKey: idemKey, Intent: intent,
 		ProfileID: r.run.ProfileID, ProfileVersion: r.run.ProfileVersion,
+		ParentRunID: deref(r.run.ParentRunID), ParentStepID: deref(r.run.ParentStepID), FlowDepth: r.run.FlowDepth,
 	}, nil, nil
+}
+
+// flowChildrenReady reports whether every child run of the coordinator has
+// reached a terminal flow_node_runs status. Child completion wakes the parent,
+// so a false result only means "do not claim yet".
+func (s *Store) flowChildrenReady(ctx context.Context, r *runTx) (bool, error) {
+	var pending int
+	err := r.tx.QueryRow(ctx, `SELECT count(*) FROM flow_node_runs n
+		JOIN flow_runs f ON f.id = n.flow_run_id AND f.tenant_id = n.tenant_id
+		WHERE f.tenant_id=$1 AND f.run_id=$2 AND n.status IN ('PENDING','RUNNING')`,
+		r.run.TenantID, r.run.ID).Scan(&pending)
+	return pending == 0, err
 }
 
 // checkApprovalGrant enforces one-time approval consumption for tool steps

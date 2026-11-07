@@ -43,6 +43,7 @@ type Session struct {
 	CreatedBy       string    `json:"created_by"`
 	Title           *string   `json:"title,omitempty"`
 	ProfileID       string    `json:"profile_id"`
+	ProfileVersion  int64     `json:"profile_version"`
 	Status          string    `json:"status"`
 	DefaultBranchID string    `json:"default_branch_id"`
 	IncidentID      *string   `json:"incident_id,omitempty"`
@@ -92,6 +93,7 @@ type CreateSessionRequest struct {
 	TenantID       string
 	ActorID        string
 	ProfileID      string
+	ProfileVersion int64
 	Title          string
 	IncidentID     *string
 	IdempotencyKey string
@@ -106,7 +108,8 @@ type SubmitTurnRequest struct {
 	InputRef        string
 	InputHash       string
 	ExpectedVersion *int64
-	// Run creation parameters resolved by the application layer (profile channel, canary).
+	// Run creation parameters resolved by the application layer (profile channel, auto-routing, canary).
+	ProfileID      string
 	ProfileVersion int64
 	RolloutID      *string
 	InitialSteps   []PlannedStep

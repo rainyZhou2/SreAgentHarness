@@ -14,14 +14,33 @@ import (
 	"go-sre-harness/internal/tools"
 )
 
+// FlowNode is the child-run view of one orchestration DSL node.
+type FlowNode struct {
+	ID         string         `json:"id"`
+	Type       string         `json:"type"` // agent | tool | subflow
+	Role       string         `json:"role,omitempty"`
+	Prompt     string         `json:"prompt,omitempty"`
+	Tools      []string       `json:"tools,omitempty"`
+	ModelAlias string         `json:"model_alias,omitempty"`
+	MaxSteps   int            `json:"max_steps,omitempty"`
+	Tool       string         `json:"tool,omitempty"`
+	Args       map[string]any `json:"args,omitempty"`
+	Input      map[string]any `json:"input,omitempty"`
+}
+
 type ReasoningInput struct {
 	Goal              string
 	StepSeq           int64
 	ContextSnapshotID string
-	Observations      []domain.Observation // committed results of earlier steps, in order
-	Evidence          []domain.Evidence    // operator evidence pinned in the snapshot
-	Tools             []tools.Descriptor   // tool schemas visible to the model
-	Skills            []Skill              // tenant skills (operator-installed playbooks)
+	// Instructions, when set, replaces the assembler's default role text for
+	// this run (flow agent nodes). Trust rules are still appended.
+	Instructions string
+	// FlowNode is set for child runs created by the orchestration DSL.
+	FlowNode     *FlowNode
+	Observations []domain.Observation // committed results of earlier steps, in order
+	Evidence     []domain.Evidence    // operator evidence pinned in the snapshot
+	Tools        []tools.Descriptor   // tool schemas visible to the model
+	Skills       []Skill              // tenant skills (operator-installed playbooks)
 	// HasToolSteps reports that this run already executed a tool, so the
 	// request is past the initial intent analysis.
 	HasToolSteps bool
@@ -127,6 +146,12 @@ func (RuleBased) Decide(_ context.Context, in ReasoningInput) (domain.Decision, 
 	}
 
 	if metrics == nil {
+		if !hasTool(in.Tools, "demo.metrics") {
+			d.Kind = domain.DecisionFinal
+			d.ReasonSummary = "No metrics tool is visible to this flow node."
+			d.Answer = "No diagnostic tool is available for this flow node."
+			return d, nil
+		}
 		d.Kind = domain.DecisionTool
 		d.ReasonSummary = "Collect read-only metrics before forming any conclusion."
 		d.Hypotheses = []domain.Hypothesis{
@@ -152,7 +177,7 @@ func (RuleBased) Decide(_ context.Context, in ReasoningInput) (domain.Decision, 
 	}
 
 	wantsRemediation := strings.Contains(strings.ToLower(in.Goal), "remediate")
-	if poolSaturated && wantsRemediation && !restarted && !restartBlocked {
+	if poolSaturated && wantsRemediation && !restarted && !restartBlocked && hasTool(in.Tools, "demo.restart") {
 		d.Kind = domain.DecisionTool
 		d.ReasonSummary = "Pool exhaustion verified; a rolling restart releases leaked connections. Requires approval."
 		args, _ := json.Marshal(map[string]string{"service": service})
@@ -183,6 +208,15 @@ func (RuleBased) Decide(_ context.Context, in ReasoningInput) (domain.Decision, 
 	}
 	d.Answer = strings.TrimSpace(b.String())
 	return d, nil
+}
+
+func hasTool(ds []tools.Descriptor, name string) bool {
+	for _, d := range ds {
+		if d.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func extractService(goal string) string {

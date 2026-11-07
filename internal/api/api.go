@@ -34,6 +34,8 @@ type Store interface {
 	GetRun(ctx context.Context, tenantID, runID string) (domain.Run, error)
 	ListRuns(ctx context.Context, tenantID string, status domain.RunStatus, limit int) ([]domain.Run, error)
 	ListSteps(ctx context.Context, tenantID, runID string) ([]domain.Step, error)
+	LoadFlow(ctx context.Context, tenantID, runID string) (domain.FlowSnapshot, error)
+	ListProfiles(ctx context.Context, tenantID string) ([]domain.ProfileInfo, error)
 	// RunTrace returns the thoughts and capability refs keyed by step id.
 	RunTrace(ctx context.Context, tenantID, runID string) (map[string][]domain.Thought, map[string][]domain.CapabilityRef, error)
 	ListEvents(ctx context.Context, tenantID, runID string, afterSeq int64, limit int) ([]domain.Event, error)
@@ -43,6 +45,7 @@ type Store interface {
 
 	// Conversation (§29).
 	CreateSession(ctx context.Context, req domain.CreateSessionRequest) (domain.Session, bool, error)
+	GetSession(ctx context.Context, tenantID, sessionID string) (domain.Session, error)
 	ListSessions(ctx context.Context, tenantID string, f pg.SessionFilter) ([]pg.SessionSummary, error)
 	UpdateSession(ctx context.Context, tenantID, id string, title, status *string) (domain.Session, error)
 	ListPendingApprovals(ctx context.Context, tenantID string, limit int) ([]pg.PendingApproval, error)
@@ -70,8 +73,12 @@ type Server struct {
 	Artifacts      artifact.Store
 	DefaultProfile string
 	DefaultVersion int64
-	PollInterval   time.Duration // SSE DB polling; events are always read from the DB cursor
-	Log            *slog.Logger
+	// AutoProfileID/Version are used for auto sessions (plan-first runs). The
+	// plan step may choose any tool this profile allows.
+	AutoProfileID      string
+	AutoProfileVersion int64
+	PollInterval       time.Duration // SSE DB polling; events are always read from the DB cursor
+	Log                *slog.Logger
 
 	// Conversation policy (§29.2).
 	BranchPolicy   domain.BranchPolicy
@@ -150,6 +157,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{run_id}", s.getRun)
 	mux.HandleFunc("GET /v1/runs/{run_id}/steps", s.listSteps)
+	mux.HandleFunc("GET /v1/runs/{run_id}/flow", s.getFlow)
+	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
 	mux.HandleFunc("GET /v1/runs/{run_id}/approvals", s.listApprovals)
 	mux.HandleFunc("GET /v1/runs/{run_id}/events", s.listEvents)
 	mux.HandleFunc("GET /v1/runs/{run_id}/events/stream", s.streamEvents)

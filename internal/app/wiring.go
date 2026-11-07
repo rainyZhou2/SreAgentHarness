@@ -47,6 +47,11 @@ func (s *strategySelector) resolve(name string) (plugin.StrategyBuilder, string,
 }
 
 func (s *strategySelector) build(rt plugin.StrategyRuntime, spec profile.Spec) (cognitive.Strategy, error) {
+	if spec.Strategy == "flow" {
+		// Flow runs are executed by the kernel flow step. A reason step on a
+		// flow profile (and flow child agents) uses the deployment default.
+		spec.Strategy = ""
+	}
 	b, _, err := s.resolve(spec.Strategy)
 	if err != nil {
 		return nil, err

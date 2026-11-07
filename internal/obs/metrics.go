@@ -262,28 +262,39 @@ type Metrics struct {
 	streamEvents  Counter
 	relayEvents   Counter
 	relayLag      Gauge
+
+	planTotal      Counter
+	planDuration   Histogram
+	planRepairs    Counter
+	planValidation Counter
+	planFallback   Counter
 }
 
 func NewMetrics() *Metrics {
 	r := NewRegistry()
 	return &Metrics{Reg: r,
-		httpRequests:  r.Counter("harness_http_requests_total", "HTTP requests by route pattern and status code.", "method", "route", "code"),
-		httpDuration:  r.Histogram("harness_http_request_duration_seconds", "HTTP request latency (SSE excluded).", nil, "route"),
-		steps:         r.Counter("harness_steps_total", "Executed steps by kind and outcome.", "kind", "outcome"),
-		stepDuration:  r.Histogram("harness_step_duration_seconds", "Step execution time (claim to commit).", nil, "kind"),
-		claims:        r.Counter("harness_claims_total", "Claim attempts by result.", "result"),
-		modelRequests: r.Counter("harness_model_requests_total", "Model gateway requests by alias, model and outcome.", "alias", "model", "outcome"),
-		modelCost:     r.Counter("harness_model_cost_usd_total", "Estimated model cost in USD.", "model"),
-		modelTokens:   r.Counter("harness_model_tokens_total", "Model tokens by direction.", "model", "direction"),
-		modelTTFT:     r.Histogram("harness_model_ttft_seconds", "Time to first token.", []float64{.1, .25, .5, 1, 2, 4, 8, 16, 32}, "model"),
-		toolCalls:     r.Counter("harness_tool_calls_total", "Tool invocations by tool source, risk and outcome.", "source", "risk", "outcome"),
-		retention:     r.Counter("harness_retention_deleted_total", "Rows/objects removed by retention.", "kind"),
-		sinkEvents:    r.Counter("harness_event_sink_total", "Event sink deliveries by sink and outcome (delivered, retried, skipped).", "sink", "outcome"),
-		streamConns:   r.Gauge("harness_sse_connections", "Open SSE connections."),
-		streamReads:   r.Counter("harness_sse_db_reads_total", "Durable log reads made on behalf of SSE clients.", "reason"),
-		streamEvents:  r.Counter("harness_sse_events_total", "Events written to SSE clients.", "source"),
-		relayEvents:   r.Counter("harness_event_relay_total", "Event relay outcomes.", "outcome"),
-		relayLag:      r.Gauge("harness_event_relay_lag_seconds", "Age of the newest event published by the relay."),
+		httpRequests:   r.Counter("harness_http_requests_total", "HTTP requests by route pattern and status code.", "method", "route", "code"),
+		httpDuration:   r.Histogram("harness_http_request_duration_seconds", "HTTP request latency (SSE excluded).", nil, "route"),
+		steps:          r.Counter("harness_steps_total", "Executed steps by kind and outcome.", "kind", "outcome"),
+		stepDuration:   r.Histogram("harness_step_duration_seconds", "Step execution time (claim to commit).", nil, "kind"),
+		claims:         r.Counter("harness_claims_total", "Claim attempts by result.", "result"),
+		modelRequests:  r.Counter("harness_model_requests_total", "Model gateway requests by alias, model and outcome.", "alias", "model", "outcome"),
+		modelCost:      r.Counter("harness_model_cost_usd_total", "Estimated model cost in USD.", "model"),
+		modelTokens:    r.Counter("harness_model_tokens_total", "Model tokens by direction.", "model", "direction"),
+		modelTTFT:      r.Histogram("harness_model_ttft_seconds", "Time to first token.", []float64{.1, .25, .5, 1, 2, 4, 8, 16, 32}, "model"),
+		toolCalls:      r.Counter("harness_tool_calls_total", "Tool invocations by tool source, risk and outcome.", "source", "risk", "outcome"),
+		retention:      r.Counter("harness_retention_deleted_total", "Rows/objects removed by retention.", "kind"),
+		sinkEvents:     r.Counter("harness_event_sink_total", "Event sink deliveries by sink and outcome (delivered, retried, skipped).", "sink", "outcome"),
+		streamConns:    r.Gauge("harness_sse_connections", "Open SSE connections."),
+		streamReads:    r.Counter("harness_sse_db_reads_total", "Durable log reads made on behalf of SSE clients.", "reason"),
+		streamEvents:   r.Counter("harness_sse_events_total", "Events written to SSE clients.", "source"),
+		relayEvents:    r.Counter("harness_event_relay_total", "Event relay outcomes.", "outcome"),
+		relayLag:       r.Gauge("harness_event_relay_lag_seconds", "Age of the newest event published by the relay."),
+		planTotal:      r.Counter("harness_plan_total", "Plan generation outcomes.", "mode", "outcome", "risk"),
+		planDuration:   r.Histogram("harness_plan_duration_seconds", "Plan generation latency.", nil, "mode", "outcome"),
+		planRepairs:    r.Counter("harness_plan_repairs_total", "Planner repair attempts.", "outcome"),
+		planValidation: r.Counter("harness_plan_validation_failures_total", "Plan validation failures by reason.", "reason"),
+		planFallback:   r.Counter("harness_plan_fallback_total", "Planner fallbacks by destination.", "to"),
 	}
 }
 
@@ -343,3 +354,36 @@ func (m *Metrics) ObserveStreamEvent(source string) { m.streamEvents.Inc(source)
 func (m *Metrics) ObserveRelay(outcome string) { m.relayEvents.Inc(outcome) }
 
 func (m *Metrics) ObserveRelayLag(d time.Duration) { m.relayLag.Set(d.Seconds()) }
+
+// ObservePlan records one planning call. mode/outcome/risk are already
+// low-cardinality enums produced by the planner.
+func (m *Metrics) ObservePlan(mode, outcome, risk string, d time.Duration, repairs int, fallback bool) {
+	if mode == "" {
+		mode = "none"
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	if risk == "" {
+		risk = "none"
+	}
+	m.planTotal.Inc(mode, outcome, risk)
+	m.planDuration.Observe(d.Seconds(), mode, outcome)
+	if repairs > 0 {
+		m.planRepairs.Add(float64(repairs), outcome)
+	}
+}
+
+func (m *Metrics) ObservePlanValidation(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	m.planValidation.Inc(reason)
+}
+
+func (m *Metrics) ObservePlanFallback(to string) {
+	if to == "" {
+		to = "none"
+	}
+	m.planFallback.Inc(to)
+}

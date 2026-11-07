@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/flow"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/tools"
 )
@@ -31,6 +32,10 @@ type Rules struct {
 	CompactEvery  int
 	MemoryTopK    int
 	CapabilityMap bool
+
+	// Flow is the compiled orchestration plan when strategy is "flow".
+	Flow     *flow.Spec
+	FlowHash string
 }
 
 // ApprovalRules is the format of spec.approval_rules. Rules only tighten:
@@ -86,6 +91,19 @@ func Compile(ref string, s Spec) (Rules, error) {
 	}
 	if s.ModelAlias != "" && len(s.AllowedAliases) > 0 && !contains(s.AllowedAliases, s.ModelAlias) {
 		return r, fmt.Errorf("profile %s: model_alias %q is not in allowed_aliases %v", ref, s.ModelAlias, s.AllowedAliases)
+	}
+	if len(s.Flow) > 0 {
+		fs, _, hash, err := flow.Compile(s.Flow, flow.CompileOptions{AllowTool: r.AllowsTool})
+		if err != nil {
+			return r, fmt.Errorf("profile %s: %w", ref, err)
+		}
+		r.Flow, r.FlowHash = &fs, hash
+	}
+	if s.Strategy == "flow" && r.Flow == nil {
+		return r, fmt.Errorf("profile %s: strategy flow requires a flow spec", ref)
+	}
+	if s.Strategy != "flow" && r.Flow != nil {
+		return r, fmt.Errorf("profile %s: flow is only valid with strategy \"flow\"", ref)
 	}
 	return r, nil
 }

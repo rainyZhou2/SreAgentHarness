@@ -116,7 +116,8 @@ func (s *Store) applyCommand(ctx context.Context, r *runTx, cmd *domain.Command,
 	run := &r.run
 	needsVersion := map[domain.CommandType]bool{domain.CmdResume: true, domain.CmdApproveTool: true,
 		domain.CmdRejectTool: true, domain.CmdResolveUnknown: true, domain.CmdOverrideResult: true,
-		domain.CmdReplacePendingInput: true, domain.CmdRetry: true, domain.CmdMigrateProfile: true}
+		domain.CmdReplacePendingInput: true, domain.CmdRetry: true, domain.CmdMigrateProfile: true,
+		domain.CmdProvideInput: true}
 	if needsVersion[req.Type] && req.ExpectedVersion == nil {
 		return "expected_version_required", nil
 	}
@@ -212,6 +213,9 @@ func (s *Store) applyCommand(ctx context.Context, r *runTx, cmd *domain.Command,
 
 	case domain.CmdApproveTool, domain.CmdRejectTool:
 		return s.decideApproval(ctx, r, cmd, req)
+
+	case domain.CmdProvideInput:
+		return s.provideFlowInput(ctx, r, cmd, req)
 
 	case domain.CmdResolveUnknown:
 		return s.resolveUnknown(ctx, r, cmd, req)
@@ -309,8 +313,88 @@ func (s *Store) decideApproval(ctx context.Context, r *runTx, cmd *domain.Comman
 	return "", nil // e.g. PAUSED: resume will pick the now-pending step
 }
 
+// provideFlowInput answers the run's waiting input node. The value is pinned
+// to the flow node and step, then the step is released for the worker.
+func (s *Store) provideFlowInput(ctx context.Context, r *runTx, cmd *domain.Command, req domain.CommandRequest) (string, error) {
+	var p struct {
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(req.Payload, &p); err != nil || len(p.Value) == 0 || !json.Valid(p.Value) {
+		return "payload.value_required", nil
+	}
+	var stepID, nodeID string
+	err := r.tx.QueryRow(ctx, `SELECT id, flow_node_id FROM agent_steps
+		WHERE run_id=$1 AND status='WAITING_INPUT' ORDER BY seq LIMIT 1`, r.run.ID).Scan(&stepID, &nodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "no_pending_input", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var flowRunID string
+	if err := r.tx.QueryRow(ctx, `SELECT id FROM flow_runs WHERE tenant_id=$1 AND run_id=$2`,
+		r.run.TenantID, r.run.ID).Scan(&flowRunID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "flow_not_found", nil
+		}
+		return "", err
+	}
+	if _, err := r.tx.Exec(ctx, `INSERT INTO flow_inputs
+		(id, tenant_id, flow_run_id, node_id, step_id, actor_id, value)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (tenant_id, flow_run_id, node_id) DO UPDATE SET
+		  value=EXCLUDED.value, step_id=EXCLUDED.step_id, actor_id=EXCLUDED.actor_id`,
+		newID(), r.run.TenantID, flowRunID, nodeID, stepID, req.ActorID, jsonb(p.Value)); err != nil {
+		return "", err
+	}
+	if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='PENDING', updated_at=now() WHERE id=$1`, stepID); err != nil {
+		return "", err
+	}
+	if err := r.event(ctx, "flow.input_provided", "user", req.ActorID, &stepID, nil,
+		map[string]string{"flow_node": nodeID}); err != nil {
+		return "", err
+	}
+	if r.run.Status == domain.RunWaitingInput {
+		r.setStatus(domain.RunQueued)
+		return "", r.settle(ctx)
+	}
+	return "", nil
+}
+
 // skipBlockedStep marks a blocked tool step SKIPPED and lets the agent re-plan.
 func (s *Store) skipBlockedStep(ctx context.Context, r *runTx, stepID, reason string) error {
+	var kind domain.StepKind
+	if err := r.tx.QueryRow(ctx, `SELECT kind FROM agent_steps WHERE id=$1 AND tenant_id=$2`,
+		stepID, r.run.TenantID).Scan(&kind); err != nil {
+		return err
+	}
+	if kind == domain.StepPlanReview {
+		if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='SKIPPED', status_reason=$2, updated_at=now()
+			WHERE id=$1`, stepID, reason); err != nil {
+			return err
+		}
+		if err := r.event(ctx, "step.skipped", "system", "", &stepID, nil, map[string]string{"reason": reason}); err != nil {
+			return err
+		}
+		if err := r.event(ctx, "plan.rejected", "system", "", &stepID, nil, map[string]string{"reason": reason}); err != nil {
+			return err
+		}
+		return r.fail(ctx, "generated plan rejected: "+reason)
+	}
+	if kind == domain.StepFlow {
+		if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='SKIPPED', status_reason=$2, updated_at=now()
+			WHERE id=$1`, stepID, reason); err != nil {
+			return err
+		}
+		if _, err := r.tx.Exec(ctx, `UPDATE flow_runs SET status='FAILED', updated_at=now()
+			WHERE tenant_id=$1 AND run_id=$2`, r.run.TenantID, r.run.ID); err != nil {
+			return err
+		}
+		if err := r.event(ctx, "step.skipped", "system", "", &stepID, nil, map[string]string{"reason": reason}); err != nil {
+			return err
+		}
+		return r.fail(ctx, "flow approval rejected: "+reason)
+	}
 	if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='SKIPPED', status_reason=$2, updated_at=now() WHERE id=$1`,
 		stepID, reason); err != nil {
 		return err

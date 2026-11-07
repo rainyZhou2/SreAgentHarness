@@ -11,6 +11,7 @@ import (
 type PlannedStep struct {
 	Kind              StepKind
 	Executor          string
+	FlowNodeID        string
 	InputRef          string
 	InputHash         string
 	Status            StepStatus // PENDING | WAITING_APPROVAL | SKIPPED
@@ -18,6 +19,47 @@ type PlannedStep struct {
 	Intent            *ActionIntent
 	RequiredApprovals int
 	PolicyDecision    json.RawMessage
+}
+
+// WaitState keeps a committed step open without making it terminal.
+type WaitState string
+
+const (
+	WaitNone     WaitState = ""
+	WaitChildren WaitState = "children"
+	WaitInput    WaitState = "input"
+)
+
+// FlowCommit is the atomic flow state update of a flow step.
+type FlowCommit struct {
+	FlowRunID    string
+	CompiledRef  string
+	CompiledHash string
+	State        json.RawMessage
+	Status       string
+	CurrentNode  string
+	ChildRuns    int
+	Children     []ChildRunSpec
+}
+
+// ChildRunSpec creates one child run in the same transaction as the parent
+// flow step. The worker has already uploaded the flow-node goal artifact.
+type ChildRunSpec struct {
+	NodeID         string
+	NodeType       string
+	Attempt        int
+	ProfileID      string
+	ProfileVersion int64
+	GoalRef        string
+	GoalHash       string
+	IdempotencyKey string
+	InitialSteps   []PlannedStep
+}
+
+// EmittedEvent is an additional run event committed atomically with a step.
+type EmittedEvent struct {
+	Type    string
+	Payload any
 }
 
 // StepSuccess is everything a worker commits for a successful attempt. All
@@ -31,6 +73,8 @@ type StepSuccess struct {
 	Plan         []PlannedStep   // steps appended after this one
 	Complete     bool            // run completes with ResultRef
 	ResultRef    string
+	Wait         WaitState
+	Flow         *FlowCommit
 	KVWrites     []KVWrite // run-private only, applied atomically with the step
 	SideEffect   bool      // confirm the external effect ledger entry
 	// Checkpoint manifest uploaded by the worker (§29.4). Empty = none.
@@ -44,6 +88,8 @@ type StepSuccess struct {
 	MemoryHits []MemoryHit
 	// Thoughts is the explicit decision trace produced by this step.
 	Thoughts []Thought
+	// Events are extra plan/lifecycle events committed after step.succeeded.
+	Events []EmittedEvent
 	// Capabilities records which capabilities the step used or considered.
 	Capabilities []CapabilityRef
 }
@@ -125,6 +171,10 @@ type CreateRunRequest struct {
 	SessionID         *string
 	BranchID          *string
 	TurnID            *string
+	ParentRunID       *string
+	ParentStepID      *string
+	FlowNodeID        string
+	FlowDepth         int
 	PendingActivation bool    // queued conversation turn: not schedulable until activated (§29.3)
 	ForkedFrom        *string // run_checkpoints.id
 	RolloutID         *string

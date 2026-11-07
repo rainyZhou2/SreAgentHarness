@@ -135,6 +135,7 @@ func (s *Store) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 const runCols = `id, tenant_id, incident_id, profile_id, profile_version, status, desired_state, version,
 	last_event_seq, next_step_seq, not_before, context_snapshot_id, lease_owner, lease_until, fence_token,
 	goal_ref, result_ref, failure_reason, initiator_type, initiator_id, session_id, branch_id, turn_id,
+	parent_run_id, parent_step_id, flow_node_id, flow_depth,
 	forked_from_checkpoint_id, compaction_epoch, rollout_id, created_at, updated_at`
 
 func scanRun(row pgx.Row, extra ...any) (domain.Run, error) {
@@ -142,7 +143,8 @@ func scanRun(row pgx.Row, extra ...any) (domain.Run, error) {
 	dest := []any{&r.ID, &r.TenantID, &r.IncidentID, &r.ProfileID, &r.ProfileVersion, &r.Status, &r.DesiredState,
 		&r.Version, &r.LastEventSeq, &r.NextStepSeq, &r.NotBefore, &r.ContextSnapshotID, &r.LeaseOwner,
 		&r.LeaseUntil, &r.FenceToken, &r.GoalRef, &r.ResultRef, &r.FailureReason, &r.InitiatorType, &r.InitiatorID,
-		&r.SessionID, &r.BranchID, &r.TurnID, &r.ForkedFrom, &r.CompactionEpoch, &r.RolloutID, &r.CreatedAt, &r.UpdatedAt}
+		&r.SessionID, &r.BranchID, &r.TurnID, &r.ParentRunID, &r.ParentStepID, &r.FlowNodeID, &r.FlowDepth,
+		&r.ForkedFrom, &r.CompactionEpoch, &r.RolloutID, &r.CreatedAt, &r.UpdatedAt}
 	err := row.Scan(append(dest, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, domain.ErrNotFound
@@ -257,8 +259,16 @@ func (r *runTx) settle(ctx context.Context) error {
 }
 
 func (r *runTx) cancel(ctx context.Context, actorType, actorID, reason string) error {
+	if err := r.cancelChildren(ctx); err != nil {
+		return err
+	}
+	if _, err := r.tx.Exec(ctx, `UPDATE flow_runs SET status='CANCELLED', updated_at=now()
+		WHERE tenant_id=$1 AND run_id=$2 AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+		r.run.TenantID, r.run.ID); err != nil {
+		return err
+	}
 	if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='CANCELLED', updated_at=now()
-		WHERE run_id=$1 AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL')`, r.run.ID); err != nil {
+		WHERE run_id=$1 AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL','WAITING_CHILDREN','WAITING_INPUT')`, r.run.ID); err != nil {
 		return err
 	}
 	if err := r.supersedeApprovals(ctx); err != nil {
@@ -268,12 +278,23 @@ func (r *runTx) cancel(ctx context.Context, actorType, actorID, reason string) e
 	r.run.NotBefore = nil
 	r.releaseLease()
 	r.setStatus(domain.RunCancelled)
+	if err := r.notifyParent(ctx, "CANCELLED", reason); err != nil {
+		return err
+	}
 	return r.event(ctx, "run.cancelled", actorType, actorID, nil, nil, map[string]string{"reason": reason})
 }
 
 func (r *runTx) fail(ctx context.Context, reason string) error {
+	if err := r.cancelChildren(ctx); err != nil {
+		return err
+	}
+	if _, err := r.tx.Exec(ctx, `UPDATE flow_runs SET status='FAILED', updated_at=now()
+		WHERE tenant_id=$1 AND run_id=$2 AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+		r.run.TenantID, r.run.ID); err != nil {
+		return err
+	}
 	if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='CANCELLED', updated_at=now()
-		WHERE run_id=$1 AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL')`, r.run.ID); err != nil {
+		WHERE run_id=$1 AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL','WAITING_CHILDREN','WAITING_INPUT')`, r.run.ID); err != nil {
 		return err
 	}
 	if err := r.supersedeApprovals(ctx); err != nil {
@@ -283,12 +304,86 @@ func (r *runTx) fail(ctx context.Context, reason string) error {
 	r.run.NotBefore = nil
 	r.releaseLease()
 	r.setStatus(domain.RunFailed)
+	if err := r.notifyParent(ctx, "FAILED", reason); err != nil {
+		return err
+	}
 	return r.event(ctx, "run.failed", "system", "", nil, nil, map[string]string{"reason": reason})
+}
+
+// notifyParent tells a flow coordinator that this child run reached a
+// terminal state outside the normal step-commit path (command cancel, policy
+// rejection, step budget, ...).
+func (r *runTx) notifyParent(ctx context.Context, status, reason string) error {
+	if r.run.ParentRunID == nil {
+		return nil
+	}
+	lease := domain.Lease{TenantID: r.run.TenantID, RunID: r.run.ID, ParentRunID: *r.run.ParentRunID}
+	return r.s.flowChildFinished(ctx, r, lease, status, "", reason)
 }
 
 func (r *runTx) supersedeApprovals(ctx context.Context) error {
 	_, err := r.tx.Exec(ctx, `UPDATE approval_requests a SET status='SUPERSEDED', decided_at=now()
 		FROM action_intents i WHERE a.action_intent_id = i.id AND i.run_id=$1 AND a.status='PENDING'`, r.run.ID)
+	return err
+}
+
+// cancelChildren cancels every descendant run of this coordinator and their
+// open steps. The recursive CTE keeps deep subflows consistent.
+func (r *runTx) cancelChildren(ctx context.Context) error {
+	if _, err := r.tx.Exec(ctx, `WITH RECURSIVE tree AS (
+		SELECT id FROM agent_runs WHERE tenant_id=$1 AND parent_run_id=$2
+		UNION ALL
+		SELECT c.id FROM agent_runs c JOIN tree t ON c.parent_run_id = t.id WHERE c.tenant_id=$1
+	)
+	UPDATE agent_runs SET status='CANCELLED', desired_state='CANCELLED',
+	  failure_reason='parent cancelled', lease_owner=NULL, lease_until=NULL, updated_at=now()
+	WHERE id IN (SELECT id FROM tree) AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+		r.run.TenantID, r.run.ID); err != nil {
+		return err
+	}
+	_, err := r.tx.Exec(ctx, `WITH RECURSIVE tree AS (
+		SELECT id FROM agent_runs WHERE tenant_id=$1 AND parent_run_id=$2
+		UNION ALL
+		SELECT c.id FROM agent_runs c JOIN tree t ON c.parent_run_id = t.id WHERE c.tenant_id=$1
+	)
+	UPDATE agent_steps SET status='CANCELLED', updated_at=now()
+	WHERE run_id IN (SELECT id FROM tree)
+	  AND status IN ('PENDING','RETRY_WAIT','WAITING_APPROVAL','WAITING_CHILDREN','WAITING_INPUT')`,
+		r.run.TenantID, r.run.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := r.tx.Exec(ctx, `WITH RECURSIVE tree AS (
+		SELECT id FROM agent_runs WHERE tenant_id=$1 AND parent_run_id=$2
+		UNION ALL
+		SELECT c.id FROM agent_runs c JOIN tree t ON c.parent_run_id = t.id WHERE c.tenant_id=$1
+	)
+	UPDATE flow_runs SET status='CANCELLED', updated_at=now()
+	WHERE run_id IN (SELECT id FROM tree) AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+		r.run.TenantID, r.run.ID); err != nil {
+		return err
+	}
+	_, err = r.tx.Exec(ctx, `WITH RECURSIVE tree AS (
+		SELECT id FROM agent_runs WHERE tenant_id=$1 AND parent_run_id=$2
+		UNION ALL
+		SELECT c.id FROM agent_runs c JOIN tree t ON c.parent_run_id = t.id WHERE c.tenant_id=$1
+	)
+	UPDATE flow_node_runs SET status='CANCELLED', updated_at=now()
+	WHERE flow_run_id IN (SELECT f.id FROM flow_runs f JOIN tree t ON f.run_id = t.id)
+	  AND status IN ('PENDING','RUNNING')`,
+		r.run.TenantID, r.run.ID)
+	if err != nil {
+		return err
+	}
+	_, err = r.tx.Exec(ctx, `WITH RECURSIVE tree AS (
+		SELECT id FROM agent_runs WHERE tenant_id=$1 AND parent_run_id=$2
+		UNION ALL
+		SELECT c.id FROM agent_runs c JOIN tree t ON c.parent_run_id = t.id WHERE c.tenant_id=$1
+	)
+	UPDATE approval_requests a SET status='SUPERSEDED', decided_at=now()
+	FROM action_intents i JOIN tree t ON i.run_id = t.id
+	WHERE a.action_intent_id = i.id AND a.tenant_id=$1 AND a.status='PENDING'`,
+		r.run.TenantID, r.run.ID)
 	return err
 }
 
@@ -303,9 +398,9 @@ func (r *runTx) insertStep(ctx context.Context, p PlannedStep) (string, error) {
 		reason = &p.StatusReason
 	}
 	if _, err := r.tx.Exec(ctx, `INSERT INTO agent_steps
-		(id, tenant_id, run_id, seq, kind, executor_name, status, input_ref, input_hash, status_reason)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		id, r.run.TenantID, r.run.ID, seq, p.Kind, p.Executor, p.Status, p.InputRef, p.InputHash, reason); err != nil {
+		(id, tenant_id, run_id, seq, kind, executor_name, flow_node_id, status, input_ref, input_hash, status_reason)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		id, r.run.TenantID, r.run.ID, seq, p.Kind, p.Executor, p.FlowNodeID, p.Status, p.InputRef, p.InputHash, reason); err != nil {
 		return "", err
 	}
 	payload := map[string]any{"seq": seq, "kind": p.Kind, "status": p.Status}
@@ -400,16 +495,23 @@ func (r *runTx) appendPlan(ctx context.Context, plan []PlannedStep) error {
 	if int(r.run.NextStepSeq-1)+len(plan) > r.stepBudget(ctx) {
 		return r.fail(ctx, "step budget exhausted")
 	}
-	waiting := false
+	waitingApproval := false
+	waitingChildren := false
+	waitingInput := false
 	for _, p := range plan {
 		if _, err := r.insertStep(ctx, p); err != nil {
 			return err
 		}
-		if p.Status == domain.StepWaitingApproval {
-			waiting = true
+		switch p.Status {
+		case domain.StepWaitingApproval:
+			waitingApproval = true
+		case domain.StepWaitingChildren:
+			waitingChildren = true
+		case domain.StepWaitingInput:
+			waitingInput = true
 		}
 	}
-	if waiting {
+	if waitingApproval {
 		if r.run.DesiredState == domain.DesiredCancelled {
 			return r.cancel(ctx, "system", "", "cancel requested")
 		}
@@ -419,6 +521,20 @@ func (r *runTx) appendPlan(ctx context.Context, plan []PlannedStep) error {
 		}
 		r.setStatus(domain.RunWaitingApproval)
 		return r.event(ctx, "run.waiting_approval", "system", "", nil, nil, nil)
+	}
+	if waitingInput {
+		if r.run.DesiredState == domain.DesiredCancelled {
+			return r.cancel(ctx, "system", "", "cancel requested")
+		}
+		r.setStatus(domain.RunWaitingInput)
+		return r.event(ctx, "run.waiting_input", "system", "", nil, nil, nil)
+	}
+	if waitingChildren {
+		if r.run.DesiredState == domain.DesiredCancelled {
+			return r.cancel(ctx, "system", "", "cancel requested")
+		}
+		r.setStatus(domain.RunWaitingChildren)
+		return r.event(ctx, "run.waiting_children", "system", "", nil, nil, nil)
 	}
 	r.setStatus(domain.RunQueued)
 	return r.settle(ctx)

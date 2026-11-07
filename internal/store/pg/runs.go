@@ -118,18 +118,23 @@ func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest
 	if req.PendingActivation {
 		status = domain.RunPendingActivation
 	}
-	if err := s.checkRunQuota(ctx, tx, req.TenantID); err != nil {
-		return nil, false, err
+	if req.ParentRunID == nil {
+		// Child runs are bounded by the flow's max_children / max_total_runs.
+		// Counting them against the tenant's active-run quota would let a
+		// coordinator block its own fan-out.
+		if err := s.checkRunQuota(ctx, tx, req.TenantID); err != nil {
+			return nil, false, err
+		}
 	}
 	var inserted string
 	err := tx.QueryRow(ctx, `INSERT INTO agent_runs (id, tenant_id, incident_id, profile_id, profile_version,
 		status, create_idempotency_key, goal_ref, initiator_type, initiator_id, session_id, branch_id, turn_id,
-		forked_from_checkpoint_id, rollout_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		parent_run_id, parent_step_id, flow_node_id, flow_depth, forked_from_checkpoint_id, rollout_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT (tenant_id, create_idempotency_key) DO NOTHING RETURNING id`,
 		id, req.TenantID, req.IncidentID, req.ProfileID, req.ProfileVersion, status, req.IdempotencyKey,
 		req.GoalRef, req.InitiatorType, nullable(req.InitiatorID), req.SessionID, req.BranchID, req.TurnID,
-		req.ForkedFrom, req.RolloutID).Scan(&inserted)
+		req.ParentRunID, req.ParentStepID, req.FlowNodeID, req.FlowDepth, req.ForkedFrom, req.RolloutID).Scan(&inserted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runCols+` FROM agent_runs
 			WHERE tenant_id=$1 AND create_idempotency_key=$2`, req.TenantID, req.IdempotencyKey))
@@ -152,16 +157,27 @@ func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest
 		"profile_id": req.ProfileID, "profile_version": req.ProfileVersion, "incident_id": req.IncidentID,
 		"session_id": req.SessionID, "turn_id": req.TurnID, "forked_from_checkpoint_id": req.ForkedFrom,
 		"rollout_id": req.RolloutID, "pending_activation": req.PendingActivation,
+		"parent_run_id": req.ParentRunID, "parent_step_id": req.ParentStepID,
+		"flow_node_id": req.FlowNodeID, "flow_depth": req.FlowDepth,
 	}); err != nil {
 		return nil, false, err
 	}
 	steps := req.InitialSteps
 	if len(steps) == 0 {
-		steps = []PlannedStep{{Kind: domain.StepReason, Executor: "reasoner", InputRef: req.GoalRef,
-			InputHash: req.GoalHash, Status: domain.StepPending}}
-		if s.cfg.MemoryRetrieval {
-			steps = append([]PlannedStep{{Kind: domain.StepRetrieve, Executor: "memory", InputRef: req.GoalRef,
-				InputHash: req.GoalHash, Status: domain.StepPending}}, steps...)
+		var strategy string
+		_ = tx.QueryRow(ctx, `SELECT spec->>'strategy' FROM agent_profiles
+			WHERE tenant_id=$1 AND profile_id=$2 AND version=$3`,
+			req.TenantID, req.ProfileID, req.ProfileVersion).Scan(&strategy)
+		if req.FlowNodeID == "" && strategy == "flow" {
+			steps = []PlannedStep{{Kind: domain.StepFlow, Executor: "flow", InputRef: req.GoalRef,
+				InputHash: req.GoalHash, Status: domain.StepPending}}
+		} else {
+			steps = []PlannedStep{{Kind: domain.StepReason, Executor: "reasoner", InputRef: req.GoalRef,
+				InputHash: req.GoalHash, Status: domain.StepPending}}
+			if s.cfg.MemoryRetrieval {
+				steps = append([]PlannedStep{{Kind: domain.StepRetrieve, Executor: "memory", InputRef: req.GoalRef,
+					InputHash: req.GoalHash, Status: domain.StepPending}}, steps...)
+			}
 		}
 	}
 	for _, p := range steps {
@@ -189,7 +205,7 @@ func (s *Store) checkRunQuota(ctx context.Context, tx pgx.Tx, tenantID string) e
 		return err
 	}
 	var active, queued int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status IN ('RUNNING','WAITING_APPROVAL','PAUSED','NEEDS_HUMAN')),
+	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status IN ('RUNNING','WAITING_APPROVAL','WAITING_CHILDREN','WAITING_INPUT','PAUSED','NEEDS_HUMAN')),
 		count(*) FILTER (WHERE status IN ('QUEUED','PENDING_ACTIVATION'))
 		FROM agent_runs WHERE tenant_id=$1 AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`, tenantID).
 		Scan(&active, &queued); err != nil {
@@ -217,12 +233,12 @@ func (s *Store) GetRun(ctx context.Context, tenantID, runID string) (domain.Run,
 	return scanRun(s.pool.QueryRow(ctx, `SELECT `+runCols+` FROM agent_runs WHERE id=$1 AND tenant_id=$2`, runID, tenantID))
 }
 
-const stepCols = `id, tenant_id, run_id, seq, kind, executor_name, status, input_ref, input_hash, output_ref,
+const stepCols = `id, tenant_id, run_id, seq, kind, executor_name, flow_node_id, status, input_ref, input_hash, output_ref,
 	output_hash, status_reason, context_snapshot_id, current_attempt, next_attempt_at, output_revision, created_at, updated_at`
 
 func scanStep(row pgx.Row) (domain.Step, error) {
 	var st domain.Step
-	err := row.Scan(&st.ID, &st.TenantID, &st.RunID, &st.Seq, &st.Kind, &st.ExecutorName, &st.Status, &st.InputRef,
+	err := row.Scan(&st.ID, &st.TenantID, &st.RunID, &st.Seq, &st.Kind, &st.ExecutorName, &st.FlowNodeID, &st.Status, &st.InputRef,
 		&st.InputHash, &st.OutputRef, &st.OutputHash, &st.StatusReason, &st.ContextSnapshotID, &st.CurrentAttempt,
 		&st.NextAttemptAt, &st.OutputRevision, &st.CreatedAt, &st.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
