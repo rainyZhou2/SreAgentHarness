@@ -44,27 +44,20 @@ Desktop (Wails)
   │  starts and supervises
   ▼
 Local Runtime Manager
-  ├── embedded PostgreSQL process (loopback, random port)
-  ├── harness core process (`harness all`, loopback, random port)
-  │     ├── API + Worker + Scheduler
-  │     ├── local event bus (no NATS)
+  ├── bundled `harness-local` core (loopback, random port)
+  │     ├── API + Worker + in-process scheduler
+  │     ├── internal/localstore (SQLite state + JSONL event log)
   │     ├── filesystem artifacts
-  │     └── local SQL? no — PostgreSQL data directory
-  └── random bearer token passed to both sides
+  │     └── SQLite index (rebuildable from JSONL)
+  └── random bearer token passed to the core
 
 Desktop UI ── HTTP/SSE /v1 ──> local harness core
 Desktop UI ── HTTP/SSE /v1 ──> remote team harness (remote mode)
 ```
 
-The desktop process owns the local core lifecycle. The user sees one application; PostgreSQL and the core are child processes.
+The desktop process owns the local core lifecycle. The user sees one application; the core is a child process and there is no database server.
 
-Why embedded PostgreSQL first:
-
-- Reuses the complete existing store, RLS semantics, flow engine, plan review, eval and migrations.
-- No duplicate storage implementation and no semantic drift.
-- Delivers the local-first experience without a multi-week store rewrite.
-
-Phase 2 introduces a storage abstraction and a SQLite/local store to reduce package size and remove the PostgreSQL child process. The client/core boundary and deployment model do not change.
+Phase 1 embedded PostgreSQL as a bridge to reuse the complete server store. Phase 2 replaced it with the SQLite/local store; the client/core boundary and deployment model did not change.
 
 ## Local data layout
 
@@ -73,16 +66,26 @@ macOS:   ~/Library/Application Support/SRE Harness/
 Linux:   ~/.local/share/sre-harness/
 Windows: %LOCALAPPDATA%\SRE Harness\
 
-  pgdata/          PostgreSQL data directory
+  harness.db       SQLite state and event byte-range indexes
+  events/          append-only JSONL, the execution source of truth
   artifacts/       local artifact store
-  logs/            core and PostgreSQL logs
+  logs/            core logs
   runtime.json     port, pid and shutdown metadata (0600)
   tokens.json      SHA-256 of the random local token (0600)
 ```
 
+## Local command and state semantics
+
+- Commands are applied under one store lock with a private write buffer. A rejected command is persisted for audit, emits `command.rejected`, and leaves no partial state.
+- `resume`, `approve/reject`, `resolve_unknown`, `override_result`, `replace_pending_input`, `retry`, `migrate_profile` and `provide_input` require `expected_version`; a mismatch returns a version conflict.
+- Idempotency keys are persisted (`command` and `run` creation), so retries after a restart return the original result.
+- Cancel cascades to descendant runs, open steps, flow status and pending approvals. If a worker holds the lease, cancel records the intent and the commit path settles it.
+- Compaction summaries, pinned memory hits, checkpoints, step output revisions and every KV version are persisted. `SnapshotContext`, `ListCheckpoints`, `ForkRun` and `StepOutputRevisions` are implemented by the local store.
+- The memory, graph and evaluation APIs are served locally; capability sync feeds both the graph views and the prompt capability map.
+
 ## Local security
 
-- PostgreSQL and the harness core listen on `127.0.0.1` only.
+- The harness core listens on `127.0.0.1` only; there is no database listener.
 - The harness core uses token auth, not dev header auth.
 - A random 32-byte token is generated per launch; only its SHA-256 is written to disk.
 - The data directory is created with mode `0700`; token/settings files use `0600`.
@@ -103,7 +106,7 @@ The UI, run view, flow view, plan review and approvals are identical. Only the t
 
 1. On a clean machine with the packaged app, local mode starts without Docker/PostgreSQL/NATS/CLI.
 2. The app can create a session, run the scripted model, execute a flow, approve a plan and complete a run.
-3. Closing the app stops the core and PostgreSQL cleanly.
+3. Closing the app stops the core cleanly.
 4. A crash/restart reuses the existing data directory and resumes the queue.
 5. No listener is bound outside loopback.
 6. Remote mode still connects to the existing team server with a bearer token; the OIDC PKCE login flow is Phase 3.

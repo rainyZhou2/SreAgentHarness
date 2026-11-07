@@ -66,7 +66,8 @@ Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（se
   ```
 - 执行事件先写 JSONL；SQLite 只保存文件偏移索引，可通过 `RebuildEventIndex` 从 JSONL 重建。
 - **模型**、**MCP**、**HTTP 工具**、**技能** 和 **工具开关** 与团队模式共用同一套 `/v1/extensions` API 和设置界面；配置字段仍是 provider / model / base URL / API key，保存在本地 SQLite。
-- 本地模式支持完整命令：pause/resume/cancel、approve/reject、provide input、retry、resolve unknown、replace pending input、override result、inject evidence、migrate profile。
+- 本地模式支持完整命令：pause/resume/cancel、approve/reject、provide input、retry、resolve unknown、replace pending input、override result、inject evidence、migrate profile。需要版本校验的命令必须携带 `expected_version`；幂等键跨重启保留；被拒绝的命令不会留下部分状态；取消会级联到子 Run 和未决审批。
+- 同样的状态能力离线可用：压缩摘要与 pinned 记忆命中会进入后续步骤，每个已提交步骤都会记录 checkpoint 并可 fork，步骤输出修订可查询，memory / graph / 评测 API 由本地存储直接提供。
 - stdio MCP 默认关闭，需 `HARNESS_MCP_ALLOW_STDIO=true`；默认允许回环地址，额外网络用 `HARNESS_EXTENSIONS_ALLOW_NETWORKS`。
 
 在 Connection 中切换到 **团队服务** 即可连接共享 harness。团队模式支持开发请求头（仅本机调试）或 Bearer Token。设置保存在 `<用户配置目录>/sre-harness-desktop/settings.json`（权限 0600）；Token 只保存在内存中。
