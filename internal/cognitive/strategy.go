@@ -25,6 +25,8 @@ type ReasoningInput struct {
 	// HasToolSteps reports that this run already executed a tool, so the
 	// request is past the initial intent analysis.
 	HasToolSteps bool
+	// MaxSteps is the profile's step budget; 0 means unlimited.
+	MaxSteps int
 
 	// v1.1 context (§29, §33): all of it is pinned by the snapshot.
 	Call            CallScope

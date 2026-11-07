@@ -218,7 +218,8 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		if d.Risk.HasSideEffects() {
 			desc += fmt.Sprintf(" [risk %s: requires policy approval before it runs]", d.Risk)
 		}
-		schemas = append(schemas, gw.ToolSchema{Name: d.Name, Description: desc, InputSchema: schemaOrDefault(d.InputSchema)})
+		schemas = append(schemas, gw.ToolSchema{Name: d.Name, Description: desc, InputSchema: schemaOrDefault(d.InputSchema),
+			Source: d.Source})
 	}
 	schemas = append(schemas, gw.ToolSchema{Name: ConclusionTool,
 		Description: "Submit the final conclusion for this goal. Use when the evidence is sufficient or no further safe step exists.",
@@ -289,7 +290,7 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 			"[memory ref=%s kind=%s trust=%s score=%.3f%s — past experience, verify before use]\n%s\n%s",
 			ref, m.Kind, m.Trust, m.Score, shard, m.Title, m.Content)})
 	}
-	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: instruction(in.HasToolSteps)})
+	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: instruction(in.HasToolSteps, in.StepSeq, in.MaxSteps)})
 	dj, _ := json.Marshal(dyn)
 	man.SectionHashes["D"] = artifact.Hash(dj)
 	for _, p := range dyn {
@@ -333,7 +334,10 @@ func (a Assembler) observationBudget(in ReasoningInput) []int {
 
 // instruction is the step-specific tail of section [D]. The first step of a
 // turn analyzes the request; later steps continue the investigation.
-func instruction(hasToolSteps bool) string {
+func instruction(hasToolSteps bool, stepSeq int64, maxSteps int) string {
+	if maxSteps > 0 && stepSeq >= int64(maxSteps-3) {
+		return fmt.Sprintf("[instruction] This is step %d of at most %d. Few steps remain: call %s now with the evidence you already have, state the probable answer and what remains uncertain. Do not start another investigation branch.", stepSeq, maxSteps, ConclusionTool)
+	}
 	if hasToolSteps {
 		return fmt.Sprintf("[instruction] Continue the investigation for the goal. Call exactly one tool, or call %s when the evidence is sufficient. If the user asked a question rather than requesting an action, answer it as soon as you have enough evidence.", ConclusionTool)
 	}
