@@ -562,7 +562,7 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		visible = withoutDisabled(visible, off)
 	}
 	in := cognitive.ReasoningInput{StepSeq: lease.StepSeq, ContextSnapshotID: lease.ContextSnapshotID,
-		Tools: visible}
+		Tools: visible, MaxSteps: rules.MaxSteps}
 	var g goalDoc
 	if err := w.get(ctx, lease.TenantID, lease.GoalRef, &g); err != nil {
 		return in, err
@@ -748,6 +748,21 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		span.SetStatus(codes.Error, "tool error")
 		span.End()
 		w.cfg.Observer.ObserveTool(desc.Source, string(desc.Risk), "error")
+		if !sideEffect && strings.HasPrefix(desc.Source, "mcp:") {
+			trust := desc.Trust
+			if trust == "" {
+				trust = "T4"
+			}
+			obs := domain.Observation{StepSeq: lease.StepSeq, Tool: call.Name, Outcome: "error",
+				Content: mustJSON(map[string]string{"error": err.Error()}), TrustTag: trust}
+			ref, h, putErr := w.put(ctx, lease.TenantID, "observation", obs)
+			if putErr != nil {
+				return domain.StepSuccess{}, putErr
+			}
+			thoughts, caps := toolTrace(call.Name, desc, false)
+			return domain.StepSuccess{OutputRef: ref, OutputHash: h, ArtifactKind: "observation", Plan: plan,
+				Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(map[string]any{"tool": call.Name, "error": true})}, nil
+		}
 		return domain.StepSuccess{}, err
 	}
 	span.End()

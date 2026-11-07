@@ -172,6 +172,12 @@ func (a *Aggregator) validate(c ToolCall) error {
 		// denies them and the denial becomes an observation (§4.6).
 		return nil
 	}
+	if strings.HasPrefix(schema.Source, "mcp:") {
+		// The MCP server owns its schema; a rejected call comes back as an
+		// observation so the model can correct it instead of retrying the
+		// whole reason step.
+		return nil
+	}
 	return ValidateArgs(schema.InputSchema, args)
 }
 
@@ -193,7 +199,7 @@ func ValidateArgs(schemaJSON json.RawMessage, args map[string]any) error {
 		return nil
 	}
 	for _, r := range s.Required {
-		if v, ok := args[r]; !ok || v == nil || v == "" {
+		if v, ok := args[r]; !ok || v == nil {
 			return errf(ErrInvalidToolCall, true, "missing required argument %q", r)
 		}
 	}

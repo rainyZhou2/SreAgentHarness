@@ -57,6 +57,10 @@ type ToolSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	// Source is routing metadata, not part of the provider request. Remote
+	// MCP servers validate their own arguments, so the client skips the
+	// local subset check for them.
+	Source string `json:"-"`
 }
 
 // Request is the provider-neutral rendered request. Its canonical JSON is the

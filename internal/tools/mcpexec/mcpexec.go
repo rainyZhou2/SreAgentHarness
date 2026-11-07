@@ -263,9 +263,10 @@ func (s *Server) Discover(ctx context.Context) (registered []tools.Tool, skipped
 			trust = "T4"
 		}
 		desc := strings.TrimSpace(t.Description)
-		if len(desc) > 1024 {
-			desc = desc[:1024]
+		if runes := []rune(desc); len(runes) > 900 {
+			desc = string(runes[:900]) + "…"
 		}
+		desc += " Provide every field listed in required; use an empty value when it does not apply."
 		registered = append(registered, &Tool{srv: s, remote: t.Name, desc: tools.Descriptor{
 			Name: "mcp." + s.cfg.Name + "." + t.Name, Version: hash[len(hash)-12:], Risk: pol.Risk, TargetArg: pol.TargetArg,
 			Trust: trust, Source: "mcp:" + s.cfg.Name, InputSchema: schema,

@@ -29,9 +29,17 @@ const ExtensionsSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*"],"m
 // web.fetch is always available; web.search needs a tenant backend.
 const WebSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":12}`
 
-// ThoughtSpec (sre-diagnosis@4, the default) adds the explicit decision trace
-// contract (plan/reflection/verification) on top of WebSpec.
+// ThoughtSpec (sre-diagnosis@4) adds the explicit decision trace contract
+// (plan/reflection/verification) on top of WebSpec.
 const ThoughtSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":12,"prompt_prefix_version":"sre-prefix-v5"}`
+
+// MCPToolSpec (sre-diagnosis@5) keeps the trace contract and gives
+// tool-heavy MCP investigations enough steps to finish.
+const MCPToolSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":20,"prompt_prefix_version":"sre-prefix-v5"}`
+
+// MCPDeepSpec (sre-diagnosis@6, the default) covers topology investigations
+// that need to combine several MCP sources before concluding.
+const MCPDeepSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":30,"prompt_prefix_version":"sre-prefix-v5"}`
 
 // BuiltinConfig configures the builtin source.
 type BuiltinConfig struct {
@@ -66,6 +74,10 @@ func init() {
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 3, Spec: json.RawMessage(WebSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 4, Spec: json.RawMessage(ThoughtSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 5, Spec: json.RawMessage(MCPToolSpec),
+					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
+				defs = append(defs, forTenants(profile.Definition{ID: cfg.ID, Version: 6, Spec: json.RawMessage(MCPDeepSpec),
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 			}
 			return profile.SourceFunc(func(context.Context) ([]profile.Definition, error) { return defs, nil }), nil
