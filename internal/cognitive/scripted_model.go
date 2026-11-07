@@ -11,11 +11,12 @@ import (
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/gateway/scripted"
 	"go-sre-harness/internal/tools"
+	"go-sre-harness/internal/untrusted"
 )
 
 var (
-	obsHeader = regexp.MustCompile(`^\[observation step=(\d+) tool=(\S+) outcome=(\S+) trust=(\S*)\]\n?`)
-	evHeader  = regexp.MustCompile(`^\[evidence ref=kv:(\S+)@(\d+) source=(\S*) actor=(\S*) [^\]]*\]\n?`)
+	obsHeader = regexp.MustCompile(`^\[observation step=(\d+) tool=(\S+) outcome=(\S+) trust=(\S*)[^\n]*\]\n?`)
+	evHeader  = regexp.MustCompile(`^\[evidence ref=kv:(\S+)@(\d+) source=(\S*) actor=(\S*) [^\n]*\]\n?`)
 )
 
 // ParseRequest reconstructs a ReasoningInput from a rendered request. It is
@@ -36,6 +37,9 @@ func ParseRequest(req gw.Request) ReasoningInput {
 				g := obsHeader.FindStringSubmatch(t)
 				seq, _ := strconv.ParseInt(g[1], 10, 64)
 				body := t[len(g[0]):]
+				if inner, _, ok := untrusted.Unwrap(body); ok {
+					body = inner
+				}
 				o := domain.Observation{StepSeq: seq, Tool: g[2], Outcome: g[3], TrustTag: g[4]}
 				if note, ok := cutNote(body); ok {
 					o.Note = note
@@ -48,8 +52,12 @@ func ParseRequest(req gw.Request) ReasoningInput {
 			case evHeader.MatchString(t):
 				g := evHeader.FindStringSubmatch(t)
 				v, _ := strconv.ParseInt(g[2], 10, 64)
+				content := t[len(g[0]):]
+				if inner, _, ok := untrusted.Unwrap(content); ok {
+					content = inner
+				}
 				in.Evidence = append(in.Evidence, domain.Evidence{Key: g[1], Version: v, Source: g[3], ActorID: g[4],
-					Content: t[len(g[0]):]})
+					Content: content})
 			}
 		}
 	}

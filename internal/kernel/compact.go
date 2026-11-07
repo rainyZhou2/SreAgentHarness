@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/tools/artifactq"
+	"go-sre-harness/internal/untrusted"
 )
 
 // needsCompaction counts tool observations since the last compact step.
@@ -88,11 +91,29 @@ func (c DeterministicCompactor) Compact(_ context.Context, in CompactInput) (str
 		b.WriteString("\n")
 	}
 	for _, o := range in.Observations {
-		body := strings.TrimSpace(string(o.Content))
-		if len(body) > max {
-			body = body[:max] + "…"
-		}
 		fmt.Fprintf(&b, "- step %d %s %s → %s", o.StepSeq, o.Tool, compactArgs(o.Args), o.Outcome)
+		// Structured facts first: they must survive the excerpt limit.
+		if v := o.Verification; v != nil {
+			fmt.Fprintf(&b, " [verification %s of %s@step%d after %d attempt(s)", v.Verdict, v.OfTool, v.OfStep, v.Attempts)
+			if v.Compensation != "" {
+				fmt.Fprintf(&b, "; compensation proposed: %s", v.Compensation)
+			}
+			b.WriteString("]")
+		}
+		body := strings.TrimSpace(string(o.Content))
+		if a := o.Artifact; a != nil {
+			fmt.Fprintf(&b, " [offloaded %d bytes, handle=%s — query with %s]", a.Bytes, a.Handle, artifactq.Name)
+			body = offloadDigest(o.Content)
+		}
+		flags := o.Injection
+		if len(flags) == 0 {
+			flags = untrusted.Scan(body)
+		}
+		if len(flags) > 0 {
+			fmt.Fprintf(&b, " [%s; excerpt withheld, see step %d output]", untrusted.FlagNote(flags), o.StepSeq)
+			body = ""
+		}
+		body = clipBytes(body, max)
 		if body != "" {
 			fmt.Fprintf(&b, ": %s", body)
 		}
@@ -217,4 +238,39 @@ func (w *Worker) attachCheckpoint(ctx context.Context, lease domain.Lease, res *
 		return
 	}
 	res.CheckpointRef, res.CheckpointHash = ref, artifact.Hash(data)
+}
+
+// offloadDigest keeps the compact parts of an offload summary (shape, size,
+// levels, time range) and drops samples.
+func offloadDigest(content []byte) string {
+	var env struct {
+		ContentType string         `json:"content_type"`
+		Summary     map[string]any `json:"summary"`
+	}
+	if json.Unmarshal(content, &env) != nil || env.Summary == nil {
+		return ""
+	}
+	keep := map[string]any{}
+	for _, k := range []string{"type", "length", "lines", "levels", "time_range", "numeric", "time_fields", "trimmed"} {
+		if v, ok := env.Summary[k]; ok {
+			keep[k] = v
+		}
+	}
+	if env.ContentType != "" {
+		keep["content_type"] = env.ContentType
+	}
+	b, _ := json.Marshal(keep)
+	return string(b)
+}
+
+// clipBytes cuts s to at most n bytes on a rune boundary.
+func clipBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

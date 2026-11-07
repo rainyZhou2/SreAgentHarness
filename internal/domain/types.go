@@ -299,6 +299,9 @@ type Observation struct {
 	Artifact *ObservationArtifact `json:"artifact,omitempty"`
 	// Verification is set on verify steps.
 	Verification *VerificationResult `json:"verification,omitempty"`
+	// Injection lists instruction-like spans found in the full tool result
+	// (also when it was offloaded and only a summary is shown).
+	Injection []string `json:"injection_suspected,omitempty"`
 }
 
 // Evidence injected by an operator through the inject_evidence command.
