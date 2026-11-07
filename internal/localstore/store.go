@@ -22,6 +22,7 @@ import (
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/extensions"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/store/pg"
 )
 
@@ -30,41 +31,60 @@ const tenantLocal = "local"
 type Store struct {
 	db *sql.DB
 
-	mu sync.Mutex
+	mu  sync.Mutex
+	buf *stateBuf // non-nil while one command is being applied atomically
 
-	runs         map[string]domain.Run
-	runByKey     map[string]string // tenant/idempotency -> run id
-	steps        map[string]domain.Step
-	attempts     map[string]attempt
-	eventDir     string
-	events       map[string][]eventIndex
-	eventCache   map[string]domain.Event
-	eventSeq     map[string]int64
-	legacyEvents []domain.Event
-	sessions     map[string]domain.Session
-	sessionKey   map[string]string
-	branches     map[string]domain.Branch
-	turns        map[string]domain.Turn
-	messages     map[string][]domain.Message
-	profiles     map[string]profileRec
-	flows        map[string]domain.FlowSnapshot
-	flowInputs   map[string]flowInput
-	intents      map[string]domain.ActionIntent
-	intentStep   map[string]string
-	approvals    map[string]approvalRec
-	decisions    map[string][]decisionRec
-	grants       map[string]grantRec
-	kv           map[string]kvRec
-	effects      map[string]effectRec
-	outbox       map[string]domain.OutboxMessage
-	commands     map[string]domain.Command
-	cmdKey       map[string]string
-	thoughts     map[string][]domain.Thought
-	caps         map[string][]domain.CapabilityRef
-	extensions   map[string]extensions.Record
-	toolOff      map[string]map[string]bool
-	outputRevs   map[string][]pg.OutputRevision
-	modelReqs    map[string]modelReqRec
+	runs           map[string]domain.Run
+	runByKey       map[string]string // tenant/idempotency -> run id
+	steps          map[string]domain.Step
+	attempts       map[string]attempt
+	eventDir       string
+	events         map[string][]eventIndex
+	eventCache     map[string]domain.Event
+	eventSeq       map[string]int64
+	legacyEvents   []domain.Event
+	sessions       map[string]domain.Session
+	sessionKey     map[string]string
+	branches       map[string]domain.Branch
+	turns          map[string]domain.Turn
+	messages       map[string][]domain.Message
+	profiles       map[string]profileRec
+	flows          map[string]domain.FlowSnapshot
+	flowInputs     map[string]flowInput
+	intents        map[string]domain.ActionIntent
+	intentStep     map[string]string
+	approvals      map[string]approvalRec
+	decisions      map[string][]decisionRec
+	grants         map[string]grantRec
+	kv             map[string]kvRec
+	effects        map[string]effectRec
+	outbox         map[string]domain.OutboxMessage
+	commands       map[string]domain.Command
+	cmdKey         map[string]string
+	thoughts       map[string][]domain.Thought
+	caps           map[string][]domain.CapabilityRef
+	extensions     map[string]extensions.Record
+	toolOff        map[string]map[string]bool
+	outputRevs     map[string][]pg.OutputRevision
+	modelReqs      map[string]modelReqRec
+	checkpoints    map[string]checkpointRec
+	memories       map[string]memoryRec
+	memHits        map[string][]memoryHitRec
+	compactions    map[string]compactRec
+	shards         map[string][]domain.MemoryShard
+	feedback       map[string][]memory.Feedback
+	experiences    map[string][]pg.ExperienceView
+	incidents      map[string]incidentRec
+	incidentEvents map[string][]pg.IncidentEvent
+	serviceDeps    map[string]map[string]string
+	capNodes       map[string]capNodeRec
+	capRels        map[string]capRelRec
+	datasets       map[string]evalDatasetRec
+	evalCases      map[string]evalCaseRec
+	evalRuns       map[string]evalRunRec
+	candidates     map[string]evalCandidateRec
+	rollouts       map[string]evalRolloutRec
+	snapshots      map[string]string // context snapshot id -> run id
 }
 
 type attempt struct {
@@ -76,6 +96,7 @@ type attempt struct {
 	FenceToken     int64      `json:"fence_token"`
 	Status         string     `json:"status"`
 	IdempotencyKey string     `json:"idempotency_key"`
+	SnapshotID     string     `json:"snapshot_id,omitempty"`
 	StartedAt      time.Time  `json:"started_at"`
 	EndedAt        *time.Time `json:"ended_at,omitempty"`
 	ErrorCode      string     `json:"error_code,omitempty"`
@@ -83,13 +104,14 @@ type attempt struct {
 }
 
 type profileRec struct {
-	TenantID string          `json:"tenant_id"`
-	ID       string          `json:"id"`
-	Version  int64           `json:"version"`
-	Status   string          `json:"status"`
-	Strategy string          `json:"strategy"`
-	Spec     json.RawMessage `json:"spec"`
-	Default  bool            `json:"default"`
+	TenantID  string          `json:"tenant_id"`
+	ID        string          `json:"id"`
+	Version   int64           `json:"version"`
+	Status    string          `json:"status"`
+	Strategy  string          `json:"strategy"`
+	Spec      json.RawMessage `json:"spec"`
+	Default   bool            `json:"default"`
+	CreatedAt time.Time       `json:"created_at,omitempty"`
 }
 
 type flowInput struct {
@@ -196,7 +218,17 @@ func Open(path string) (*Store, error) {
 		cmdKey: map[string]string{}, thoughts: map[string][]domain.Thought{},
 		caps: map[string][]domain.CapabilityRef{}, extensions: map[string]extensions.Record{},
 		toolOff: map[string]map[string]bool{}, outputRevs: map[string][]pg.OutputRevision{},
-		modelReqs: map[string]modelReqRec{},
+		modelReqs: map[string]modelReqRec{}, checkpoints: map[string]checkpointRec{},
+		memories: map[string]memoryRec{}, memHits: map[string][]memoryHitRec{},
+		compactions: map[string]compactRec{},
+		shards:      map[string][]domain.MemoryShard{}, feedback: map[string][]memory.Feedback{},
+		experiences: map[string][]pg.ExperienceView{}, incidents: map[string]incidentRec{},
+		incidentEvents: map[string][]pg.IncidentEvent{}, serviceDeps: map[string]map[string]string{},
+		capNodes: map[string]capNodeRec{}, capRels: map[string]capRelRec{},
+		datasets: map[string]evalDatasetRec{}, evalCases: map[string]evalCaseRec{},
+		evalRuns: map[string]evalRunRec{}, candidates: map[string]evalCandidateRec{},
+		rollouts:  map[string]evalRolloutRec{},
+		snapshots: map[string]string{},
 	}
 	if err := s.load(); err != nil {
 		db.Close()
@@ -417,6 +449,151 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 			return err
 		}
 		s.modelReqs[v.ID] = v
+	case "checkpoint":
+		var v checkpointRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.checkpoints[v.ID] = v
+	case "memory":
+		var v memoryRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.memories[v.Mem.ID] = v
+	case "memhit":
+		var v struct {
+			StepID string       `json:"step_id"`
+			Hit    memoryHitRec `json:"hit"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.memHits[v.StepID] = append(s.memHits[v.StepID], v.Hit)
+	case "compact":
+		var v compactRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.compactions[v.StepID] = v
+	case "shard":
+		var v []domain.MemoryShard
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.shards[id] = v
+	case "feedback":
+		var v memory.Feedback
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		runID := id
+		if i := strings.LastIndexByte(id, '/'); i > 0 {
+			runID = id[:i]
+		}
+		s.feedback[runID] = append(s.feedback[runID], v)
+	case "experience":
+		var v struct {
+			TenantID string            `json:"tenant_id"`
+			View     pg.ExperienceView `json:"view"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.experiences[v.TenantID+"/"+v.View.RunID] = append(s.experiences[v.TenantID+"/"+v.View.RunID], v.View)
+	case "incident":
+		var v incidentRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.incidents[v.ID] = v
+	case "incidentevent":
+		var v pg.IncidentEvent
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		incidentID := id
+		if i := strings.LastIndexByte(id, '/'); i > 0 {
+			incidentID = id[:i]
+		}
+		s.incidentEvents[incidentID] = append(s.incidentEvents[incidentID], v)
+	case "servicedep":
+		var v struct {
+			TenantID  string `json:"tenant_id"`
+			Service   string `json:"service"`
+			DependsOn string `json:"depends_on"`
+			Relation  string `json:"relation"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		key := v.TenantID + "/" + v.Service
+		if s.serviceDeps[key] == nil {
+			s.serviceDeps[key] = map[string]string{}
+		}
+		s.serviceDeps[key][v.DependsOn] = v.Relation
+	case "capnode":
+		var v capNodeRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.capNodes[id] = v
+	case "caprel":
+		var v capRelRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.capRels[id] = v
+	case "evaldataset":
+		var v evalDatasetRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.datasets[v.Dataset.ID] = v
+	case "evalcase":
+		var v evalCaseRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.evalCases[v.Case.ID] = v
+	case "evalrun":
+		var v evalRunRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.evalRuns[v.Run.ID] = v
+	case "evalcandidate":
+		var v evalCandidateRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.candidates[v.Candidate.ID] = v
+	case "evalrollout":
+		var v evalRolloutRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.rollouts[v.Rollout.ID] = v
+	case "cmdkey":
+		var v struct {
+			CommandID string `json:"command_id"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		if v.CommandID != "" {
+			s.cmdKey[id] = v.CommandID
+		}
+	case "runkey":
+		var v struct {
+			RunID string `json:"run_id"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		if v.RunID != "" {
+			s.runByKey[id] = v.RunID
+		}
 	}
 	return nil
 }
@@ -426,12 +603,22 @@ func (s *Store) put(kind, id, parent string, seq int64, v any) {
 	if err != nil {
 		panic(err)
 	}
-	_, _ = s.db.Exec(`INSERT INTO objects(kind,id,parent,seq,data) VALUES(?,?,?,?,?)
-		ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent, seq=excluded.seq, data=excluded.data`,
-		kind, id, parent, seq, data)
+	if s.buf != nil {
+		key := objectKey(kind, id)
+		delete(s.buf.dels, key)
+		s.buf.puts[key] = putOp{kind: kind, id: id, parent: parent, seq: seq, data: data}
+		return
+	}
+	s.execPut(putOp{kind: kind, id: id, parent: parent, seq: seq, data: data})
 }
 
 func (s *Store) del(kind, id string) {
+	if s.buf != nil {
+		key := objectKey(kind, id)
+		delete(s.buf.puts, key)
+		s.buf.dels[key] = struct{}{}
+		return
+	}
 	_, _ = s.db.Exec(`DELETE FROM objects WHERE kind=? AND id=?`, kind, id)
 }
 
@@ -525,6 +712,9 @@ func (s *Store) saveGrant(v grantRec) {
 func (s *Store) saveKV(v kvRec) {
 	s.kv[kvKey(v.Key)] = v
 	s.put("kv", kvKey(v.Key), v.Key.OwnerID, v.Version, v)
+	// Keep every version so a context snapshot can read the value it pinned,
+	// not whatever the key holds later.
+	s.put("kvver", kvKey(v.Key)+"\x00"+fmt.Sprint(v.Version), v.Key.OwnerID, v.Version, v)
 }
 
 func (s *Store) saveEffect(v effectRec) {
@@ -537,6 +727,15 @@ func (s *Store) appendEvent(tenant, runID, stepID, attemptID, typ, actorType, ac
 	if payload != nil {
 		p, _ = json.Marshal(payload)
 	}
+	if s.buf != nil {
+		s.buf.events = append(s.buf.events, pendingEvent{tenant: tenant, runID: runID, stepID: stepID,
+			attemptID: attemptID, typ: typ, actorType: actorType, actorID: actorID, payload: p, at: now()})
+		return
+	}
+	s.appendEventNow(tenant, runID, stepID, attemptID, typ, actorType, actorID, p, now())
+}
+
+func (s *Store) appendEventNow(tenant, runID, stepID, attemptID, typ, actorType, actorID string, p json.RawMessage, at time.Time) {
 	r := s.runs[runID]
 	seq := s.eventSeq[runID] + 1
 	s.eventSeq[runID] = seq
@@ -545,7 +744,7 @@ func (s *Store) appendEvent(tenant, runID, stepID, attemptID, typ, actorType, ac
 	}
 	s.runs[runID] = r
 	ev := domain.Event{TenantID: tenant, RunID: runID, Seq: seq, ID: newID(), Type: typ,
-		ActorType: actorType, Payload: p, OccurredAt: now(), CommittedAt: now()}
+		ActorType: actorType, Payload: p, OccurredAt: at, CommittedAt: now()}
 	if stepID != "" {
 		ev.StepID = &stepID
 	}

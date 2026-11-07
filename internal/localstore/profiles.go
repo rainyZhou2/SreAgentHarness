@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/store/pg"
 )
 
 func (s *Store) RegisterProfile(ctx context.Context, tenantID, profileID string, version int64, spec json.RawMessage) (bool, error) {
@@ -20,7 +22,7 @@ func (s *Store) RegisterProfile(ctx context.Context, tenantID, profileID string,
 	}
 	_ = json.Unmarshal(spec, &parsed)
 	p := profileRec{TenantID: tenantID, ID: profileID, Version: version, Status: "ACTIVE",
-		Strategy: parsed.Strategy, Spec: append(json.RawMessage(nil), spec...)}
+		Strategy: parsed.Strategy, Spec: append(json.RawMessage(nil), spec...), CreatedAt: now()}
 	s.profiles[key] = p
 	s.put("profile", key, tenantID, version, p)
 	return true, nil
@@ -66,7 +68,7 @@ func (s *Store) CreateProfileVersion(ctx context.Context, tenantID, profileID st
 	}
 	_ = json.Unmarshal(spec, &parsed)
 	p := profileRec{TenantID: tenantID, ID: profileID, Version: version, Status: status,
-		Strategy: parsed.Strategy, Spec: append(json.RawMessage(nil), spec...)}
+		Strategy: parsed.Strategy, Spec: append(json.RawMessage(nil), spec...), CreatedAt: now()}
 	key := profileKey(tenantID, profileID, version)
 	s.profiles[key] = p
 	s.put("profile", key, tenantID, version, p)
@@ -122,14 +124,17 @@ func (s *Store) ActiveVersion(ctx context.Context, tenantID, profileID string) (
 	return best, nil
 }
 
-func (s *Store) ListProfileVersions(ctx context.Context, tenantID, profileID string) ([]int64, error) {
+func (s *Store) ListProfileVersions(ctx context.Context, tenantID, profileID string) ([]pg.ProfileVersion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []int64
+	var out []pg.ProfileVersion
 	for _, p := range s.profiles {
-		if p.TenantID == tenantID && p.ID == profileID {
-			out = append(out, p.Version)
+		if p.TenantID != tenantID || p.ID != profileID {
+			continue
 		}
+		out = append(out, pg.ProfileVersion{ProfileID: p.ID, Version: p.Version, Status: p.Status,
+			SpecHash: hashBytes(p.Spec), Spec: p.Spec, CreatedAt: p.CreatedAt})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out, nil
 }

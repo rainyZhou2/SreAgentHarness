@@ -43,13 +43,154 @@ func (s *Store) appendReasonLocked(r *domain.Run) error {
 }
 
 func (s *Store) supersedeApprovalsLocked(runID string) {
-	for id, a := range s.approvals {
+	for _, a := range s.approvals {
 		if a.RunID == runID && a.Request.Status == "PENDING" {
 			a.Request.Status = "SUPERSEDED"
 			s.saveApproval(a)
-			_ = id
 		}
 	}
+}
+
+// openStepStatuses are the states a cancellation must close. RUNNING steps keep
+// running until their lease holder commits; the desired state then settles the
+// run (a step that finishes after a cancel request is still accounted for).
+var openStepStatuses = map[domain.StepStatus]bool{
+	domain.StepPending: true, domain.StepRetryWait: true, domain.StepWaitingApproval: true,
+	domain.StepWaitingChildren: true, domain.StepWaitingInput: true,
+}
+
+func (s *Store) cancelOpenStepsLocked(runID, reason string) {
+	for _, st := range sortedSteps(s.steps, runID) {
+		if openStepStatuses[st.Status] {
+			st.Status = domain.StepCancelled
+			st.StatusReason = &reason
+			st.UpdatedAt = now()
+			s.saveStep(st)
+		}
+	}
+}
+
+// cancelRunLocked cancels a run and every open descendant. A flow coordinator's
+// graph is marked CANCELLED and pending approvals are superseded so nothing can
+// be admitted after the cancellation.
+func (s *Store) cancelRunLocked(r *domain.Run, actorType, actorID, reason string) {
+	s.cancelDescendantsLocked(r.TenantID, r.ID, reason)
+	if fl, ok := s.flows[r.ID]; ok {
+		switch fl.Status {
+		case "COMPLETED", "FAILED", "CANCELLED":
+		default:
+			fl.Status = "CANCELLED"
+			s.saveFlow(fl)
+		}
+	}
+	s.cancelOpenStepsLocked(r.ID, reason)
+	s.supersedeApprovalsLocked(r.ID)
+	r.DesiredState = domain.DesiredCancelled
+	r.NotBefore = nil
+	r.LeaseOwner, r.LeaseUntil = nil, nil
+	r.Status = domain.RunCancelled
+	r.Version++
+	s.saveRun(*r)
+	s.finishParentLocked(*r, "CANCELLED", "", reason)
+	s.finalizeTurnLocked(*r)
+	s.appendEvent(r.TenantID, r.ID, "", "", "run.cancelled", actorType, actorID, map[string]string{"reason": reason})
+}
+
+func (s *Store) cancelDescendantsLocked(tenantID, parentID, reason string) {
+	for id, child := range s.runs {
+		if child.ParentRunID == nil || *child.ParentRunID != parentID || child.Status.Terminal() {
+			continue
+		}
+		s.cancelDescendantsLocked(tenantID, id, reason)
+		child.DesiredState = domain.DesiredCancelled
+		child.NotBefore = nil
+		child.LeaseOwner, child.LeaseUntil = nil, nil
+		child.Status = domain.RunCancelled
+		child.Version++
+		s.saveRun(child)
+		if fl, ok := s.flows[id]; ok {
+			switch fl.Status {
+			case "COMPLETED", "FAILED", "CANCELLED":
+			default:
+				fl.Status = "CANCELLED"
+				s.saveFlow(fl)
+			}
+		}
+		s.cancelOpenStepsLocked(id, "parent cancelled")
+		s.supersedeApprovalsLocked(id)
+		s.finalizeTurnLocked(child)
+		s.appendEvent(tenantID, id, "", "", "run.cancelled", "system", "", map[string]string{"reason": "parent cancelled"})
+	}
+}
+
+// skipBlockedStepLocked marks a blocked step SKIPPED and lets the agent
+// re-plan, matching the server's behaviour for rejected/expired approvals.
+func (s *Store) skipBlockedStepLocked(r *domain.Run, stepID, reason string) error {
+	st, ok := s.findStepLocked(r.ID, stepID)
+	if !ok {
+		return domain.ErrNotFound
+	}
+	st.Status = domain.StepSkipped
+	st.StatusReason = &reason
+	st.UpdatedAt = now()
+	s.saveStep(st)
+	s.appendEvent(r.TenantID, r.ID, st.ID, "", "step.skipped", "system", "", map[string]string{"reason": reason})
+	switch st.Kind {
+	case domain.StepPlanReview:
+		s.appendEvent(r.TenantID, r.ID, st.ID, "", "plan.rejected", "system", "", map[string]string{"reason": reason})
+		s.failRunLocked(r, "generated plan rejected: "+reason)
+		return nil
+	case domain.StepFlow:
+		if fl, ok := s.flows[r.ID]; ok {
+			fl.Status = "FAILED"
+			s.saveFlow(fl)
+		}
+		s.failRunLocked(r, "flow approval rejected: "+reason)
+		return nil
+	}
+	if r.DesiredState == domain.DesiredCancelled {
+		s.cancelRunLocked(r, "system", "", "cancel requested")
+		return nil
+	}
+	if err := s.appendReasonLocked(r); err != nil {
+		return err
+	}
+	if r.DesiredState == domain.DesiredPaused {
+		r.Status = domain.RunPaused
+		r.Version++
+		s.saveRun(*r)
+		return nil
+	}
+	if r.Status == domain.RunWaitingApproval || r.Status == domain.RunPaused {
+		r.Status = domain.RunQueued
+	}
+	r.Version++
+	s.saveRun(*r)
+	return nil
+}
+
+func (s *Store) failRunLocked(r *domain.Run, reason string) {
+	s.cancelDescendantsLocked(r.TenantID, r.ID, reason)
+	if fl, ok := s.flows[r.ID]; ok {
+		switch fl.Status {
+		case "COMPLETED", "FAILED", "CANCELLED":
+		default:
+			fl.Status = "FAILED"
+			s.saveFlow(fl)
+		}
+	}
+	s.cancelOpenStepsLocked(r.ID, reason)
+	s.supersedeApprovalsLocked(r.ID)
+	r.DesiredState = domain.DesiredRunning
+	r.NotBefore = nil
+	r.LeaseOwner, r.LeaseUntil = nil, nil
+	r.Status = domain.RunFailed
+	r.FailureReason = &reason
+	r.Version++
+	s.saveRun(*r)
+	s.finishParentLocked(*r, "FAILED", "", reason)
+	s.finalizeTurnLocked(*r)
+	s.appendEvent(r.TenantID, r.ID, "", "", "run.failed", "system", "", map[string]string{"reason": reason})
 }
 
 func (s *Store) requestApprovalLocked(r *domain.Run, stepID string, in domain.ActionIntent, required int) {
@@ -257,15 +398,7 @@ func (s *Store) replaceInputLocked(c *domain.Command, req domain.CommandRequest)
 		if reason == "" {
 			reason = "replacement input has no valid intent"
 		}
-		st.Status = domain.StepSkipped
-		st.StatusReason = &reason
-		s.saveStep(st)
-		if err := s.appendReasonLocked(&r); err != nil {
-			return "", err
-		}
-		r.Status = domain.RunQueued
-		s.saveRun(r)
-		return "", nil
+		return "", s.skipBlockedStepLocked(&r, st.ID, "denied by policy: "+reason)
 	}
 	if in.RequiredApprovals == 0 {
 		st.Status = domain.StepPending
@@ -277,7 +410,15 @@ func (s *Store) replaceInputLocked(c *domain.Command, req domain.CommandRequest)
 		return "", nil
 	}
 	s.requestApprovalLocked(&r, st.ID, *in.Intent, in.RequiredApprovals)
-	r.Status = domain.RunWaitingApproval
+	if r.DesiredState == domain.DesiredCancelled {
+		s.cancelRunLocked(&r, "system", "", "cancel requested")
+		return "", nil
+	}
+	if r.DesiredState == domain.DesiredPaused {
+		r.Status = domain.RunPaused
+	} else {
+		r.Status = domain.RunWaitingApproval
+	}
 	s.saveRun(r)
 	return "", nil
 }
@@ -321,11 +462,11 @@ func (s *Store) migrateProfileLocked(c *domain.Command, req domain.CommandReques
 	if !ok {
 		return "unknown_profile_version", nil
 	}
-	if prof.Status != "ACTIVE" {
-		return "profile_version_not_runnable", nil
-	}
 	if p.ProfileVersion == r.ProfileVersion {
 		return "", nil
+	}
+	if prof.Status != "ACTIVE" {
+		return "profile_version_not_runnable", nil
 	}
 	from := r.ProfileVersion
 	r.ProfileVersion = p.ProfileVersion
