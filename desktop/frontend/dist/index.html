@@ -56,25 +56,35 @@
         <p class="dlg-sub" data-i18n="Connect to your harness workspace">Connect to your harness workspace</p>
       </div>
     </header>
-    <label class="field"><span data-i18n="Server URL">Server URL</span> <input name="server_url" required autocomplete="off" spellcheck="false"></label>
-    <div class="seg" role="radiogroup" aria-label="Authentication">
-      <label><input type="radio" name="mode" value="dev"> <span data-i18n="Development headers">Development headers</span></label>
-      <label><input type="radio" name="mode" value="bearer"> <span data-i18n="Bearer token">Bearer token</span></label>
+    <div class="seg" role="radiogroup" aria-label="Connection mode">
+      <label><input type="radio" name="connection_mode" value="local"> <span data-i18n="Local runtime">Local runtime</span></label>
+      <label><input type="radio" name="connection_mode" value="remote"> <span data-i18n="Team server">Team server</span></label>
     </div>
-    <div class="grid2" data-mode="dev">
-      <label><span data-i18n="Tenant">Tenant</span> <input name="tenant" autocomplete="off" spellcheck="false"></label>
-      <label><span data-i18n="Actor">Actor</span> <input name="actor" autocomplete="off" spellcheck="false"></label>
-      <label class="span2"><span data-i18n="Roles">Roles</span> <input name="roles" placeholder="viewer, operator, approver, admin" autocomplete="off" spellcheck="false"></label>
+    <div data-connection="local">
+      <p class="conn-hint" data-i18n="Starts a self-contained harness with its own local data. No Docker, PostgreSQL, NATS or terminal is needed.">Starts a self-contained harness with its own local data. No Docker, PostgreSQL, NATS or terminal is needed.</p>
+      <p id="local-status" class="muted small"></p>
     </div>
-    <p class="conn-hint" data-mode="dev" data-i18n="Development mode trusts request headers; use it locally only.">Development mode trusts request headers; use it locally only.</p>
-    <div data-mode="bearer">
-      <label><span data-i18n="Token">Token</span> <input name="token" type="password" autocomplete="off"></label>
-      <p class="muted small" data-i18n="The token stays in memory and is not saved to disk.">The token stays in memory and is not saved to disk.</p>
+    <div data-connection="remote">
+      <label class="field"><span data-i18n="Server URL">Server URL</span> <input name="server_url" autocomplete="off" spellcheck="false"></label>
+      <div class="seg" role="radiogroup" aria-label="Authentication">
+        <label><input type="radio" name="mode" value="dev"> <span data-i18n="Development headers">Development headers</span></label>
+        <label><input type="radio" name="mode" value="bearer"> <span data-i18n="Bearer token">Bearer token</span></label>
+      </div>
+      <div class="grid2" data-mode="dev">
+        <label><span data-i18n="Tenant">Tenant</span> <input name="tenant" autocomplete="off" spellcheck="false"></label>
+        <label><span data-i18n="Actor">Actor</span> <input name="actor" autocomplete="off" spellcheck="false"></label>
+        <label class="span2"><span data-i18n="Roles">Roles</span> <input name="roles" placeholder="viewer, operator, approver, admin" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <p class="conn-hint" data-mode="dev" data-i18n="Development mode trusts request headers; use it locally only.">Development mode trusts request headers; use it locally only.</p>
+      <div data-mode="bearer">
+        <label><span data-i18n="Token">Token</span> <input name="token" type="password" autocomplete="off"></label>
+        <p class="muted small" data-i18n="The token stays in memory and is not saved to disk.">The token stays in memory and is not saved to disk.</p>
+      </div>
     </div>
     <p id="conn-error" class="error" hidden></p>
     <div class="actions">
       <button type="button" class="btn ghost" data-close data-i18n="Cancel">Cancel</button>
-      <button type="submit" class="btn primary" data-i18n="Connect">Connect</button>
+      <button type="submit" class="btn primary" id="conn-submit" data-i18n="Connect">Connect</button>
     </div>
   </form>
 </dialog>

@@ -44,6 +44,7 @@ func (a *App) SetPreferences(p Preferences) error {
 // signing in again only needs Connect.
 func (a *App) Disconnect() error {
 	a.UnwatchRun()
+	a.stopLocal()
 	a.mu.Lock()
 	a.client = nil
 	a.settings.Creds.Token = ""
