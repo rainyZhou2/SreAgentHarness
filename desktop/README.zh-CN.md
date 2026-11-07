@@ -46,14 +46,14 @@ Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（se
 不需要 Node.js，也不需要 Wails CLI。
 
 ```bash
-# 本地模式构建：打包 harness core 与 PostgreSQL。
-HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh
-HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh run
+# 本地模式构建：打包 SQLite harness core。
+./build.sh
+./build.sh run
 ```
 
 应用默认进入 **本地运行** 模式：
 
-- 桌面进程启动自带的 PostgreSQL 和 harness core；
+- 桌面进程启动自带的 SQLite harness core；
 - UI 通过回环地址和每次启动随机生成的 Token 连接；
 - 不需要 Docker、系统 PostgreSQL、NATS 或命令行；
 - 数据保存在 `<用户配置目录>/sre-harness-desktop/local/`。

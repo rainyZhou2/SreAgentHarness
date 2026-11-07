@@ -46,14 +46,14 @@ Requirements: Go 1.26+.
 No Node.js or Wails CLI is needed.
 
 ```bash
-# Local-capable build: bundle the harness core and PostgreSQL.
-HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh
-HARNESS_PG_PREFIX="$(brew --prefix postgresql@16)" ./build.sh run
+# Local-capable build: bundle the SQLite-backed harness core.
+./build.sh
+./build.sh run
 ```
 
 The app starts in **Local runtime** mode by default:
 
-- the desktop process starts a bundled PostgreSQL and the harness core;
+- the desktop process starts the bundled SQLite-backed harness core;
 - the UI talks to it over loopback with a per-launch random token;
 - no Docker, system PostgreSQL, NATS or terminal is needed;
 - data lives under `<user config dir>/sre-harness-desktop/local/`.
