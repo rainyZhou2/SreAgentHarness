@@ -1905,10 +1905,11 @@ function editMCP(x) {
             rt.description || rt.stored
               ? h("div", { class: "mcp-tool-desc" + (open ? " open" : "") }, rt.description || t("(connect to refresh)")) : null),
           h("div", { class: "mcp-tool-controls" },
-            pol ? riskSelect(pol.risk, (v) => (pol.risk = v)) : h("span", { class: "muted small" }, t("not exposed")),
-            pol && props.length ? h("select", { onchange: (e) => {
+            pol ? h("span", { class: "mcp-select" }, riskSelect(pol.risk, (v) => (pol.risk = v)))
+              : h("span", { class: "muted small" }, t("not exposed")),
+            pol && props.length ? h("span", { class: "mcp-select" }, h("select", { onchange: (e) => {
               if (e.target.value) pol.target_arg = e.target.value; else delete pol.target_arg;
-            } }, h("option", { value: "" }, t("no target")), props.map((p) => h("option", { value: p, selected: pol.target_arg === p }, p))) : null));
+            } }, h("option", { value: "" }, t("no target")), props.map((p) => h("option", { value: p, selected: pol.target_arg === p }, p)))) : null));
       };
       const paintTools = () => {
         if (!toolsBox) return;
