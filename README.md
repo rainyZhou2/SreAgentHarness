@@ -14,6 +14,7 @@ A cognitive agent runtime for SRE: every reasoning step and tool call runs as a 
 | **Model gateway** | Alias → hard filters → soft-score routing, circuit breakers, budget and concurrency admission, fallback only while "not yet sent"; Claude, OpenAI-compatible and Gemini |
 | **Context & intent** | Prompt manifest (per-section hashes), deterministic compaction; each message is classified as a question, a task or a clarification |
 | **Long-term memory** | Full-text + vector + dependency-graph recall, RRF fusion, poisoning checks and conflict resolution |
+| **Orchestration DSL** | A profile-embedded flow graph: conditions/loops, parallel child runs, variable interpolation, approvals/human input, subflows and multi-agent |
 | **Web** | `web.fetch` works out of the box; `web.search` supports Brave / Tavily / Bing / a generic backend, with output treated as untrusted |
 | **Evaluation & evolution** | Datasets recorded from real runs, offline replay, non-inferiority gate, canary with automatic rollback |
 | **Event delivery** | Committed event → event log → relay → JetStream → SSE; reconnects resume from the cursor, with no steady-state database reads |
@@ -39,6 +40,33 @@ PostgreSQL (source of truth)  +  NATS JetStream (wake-ups and event delivery)
 - **Gap-free event log + transactional outbox**: state, events and wake-ups commit together; the reconciler recovers anything stuck.
 - **Event plane**: a leased relay tails the event log, JetStream fans events out per run, and the SSE gateway reads the log once before streaming live updates.
 - **The kernel depends only on interfaces**: it never imports PostgreSQL, NATS or a model SDK, so adapters are replaceable and testable.
+
+### Orchestration DSL
+
+A profile can set `strategy: "flow"` and embed a `flow` graph. The DSL compiles to the existing step engine: the parent run only coordinates, while agent / tool / subflow nodes become child runs, so leases, fences, approvals, the effect ledger and checkpoint recovery are reused. Parallelism is carried by child runs and joined by a `join` node; a child inherits the parent profile and can only narrow its tools and permissions.
+
+```yaml
+strategy: flow
+tools: [demo.metrics, demo.restart]
+max_steps: 40
+flow:
+  version: 1
+  entry: triage
+  limits: {max_steps: 20, max_children: 4, max_total_runs: 8, max_depth: 2}
+  nodes:
+    - id: triage
+      type: agent
+      role: triage
+      tools: [demo.metrics]
+      next: [{to: finish}]
+    - id: finish
+      type: end
+      output: "${nodes.triage.output}"
+```
+
+Node types: `agent` / `tool` / `subflow` / `parallel` / `join` / `approval` / `input` / `loop` / `end`. `GET /v1/runs/{id}/flow` returns node and child-run state; the `provide_input` command answers an `input` node. Built-in examples: `sre-diagnosis@8` (parallel diagnosis + approval) and `@9` (human input + subflow).
+
+The desktop client does not ask you to choose a profile. An auto session starts with a durable **plan step**: the planner LLM submits a flow DSL through `submit_flow`; the server compiles it, runs a static safety/budget analysis, repairs malformed plans, and pins the plan as an artifact. A generated plan with side effects (or an R2/R3 tool) gets a **plan review** step whose approval binds the plan hash; changing the graph, inputs or tool set invalidates the approval. Only then is the flow step appended. If the model cannot produce a valid plan, the runtime falls back to the configured runbook (default `sre-diagnosis@8`) or ReAct. Generated plans, flow nodes, child runs, approvals and input gates are rendered in the conversation.
 
 ## What stands out
 
@@ -101,6 +129,18 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_SSE_MODE` | `push` (default) / `poll` |
 | `HARNESS_MODEL_DAILY_BUDGET_USD` | per-tenant daily budget |
 | `HARNESS_REQUIRE_DISTINCT_APPROVER` | the approver cannot be the initiator |
+| `HARNESS_AUTO_PROFILE` / `_VERSION` | run profile for auto sessions; defaults to `sre-diagnosis` / `10` |
+| `HARNESS_PLANNER_MODEL_ALIAS` / `_EFFORT` | model and effort used by the planner |
+| `HARNESS_PLANNER_FALLBACK_PROFILE` / `_VERSION` | runbook used when planning fails; defaults to `sre-diagnosis` / `8` |
+| `HARNESS_PLANNER_MAX_REPAIRS` / `_MAX_NODES` | plan repair attempts and generated node limit |
+| `HARNESS_PLAN_APPROVAL` | `auto` (default), `always` or `never`; `auto` reviews generated plans with writes |
+| `HARNESS_PLAN_APPROVERS` | required plan approvals; R3 plans always require at least two |
+| `HARNESS_PLANNER_MAX_CHILDREN` / `_TOTAL_RUNS` / `_DEPTH` / `_ITERATIONS` | generated-graph fan-out limits |
+| `HARNESS_PLANNER_MAX_MODEL_CALLS` / `_MAX_ESTIMATED_TOKENS` | static model-call and output-token ceilings |
+
+Generated plans emit `plan.generated`, `plan.validation_failed`, `plan.repaired`, `plan.fallback`, `plan.approval_requested`, `plan.approved`, `plan.rejected` and `plan.executed` events. Planner metrics are exposed on `/metrics`: `harness_plan_total`, `harness_plan_duration_seconds`, `harness_plan_repairs_total`, `harness_plan_validation_failures_total` and `harness_plan_fallback_total`.
+
+Plan datasets record the plan artifact, analysis, flow state, approvals, outcome, duration and cost. `POST /v1/eval/datasets/{id}/plan-cases` adds a terminal run, `POST /v1/eval/plan-runs` replays the frozen split offline, and the report groups success, safety, replay completion, steps, duration and cost by variant (`react`, `fallback_flow`, `generated_flow`, `profile_flow`).
 
 See `deploy/harness.example.yaml` for the rest.
 
@@ -114,11 +154,16 @@ See `deploy/harness.example.yaml` for the rest.
 HARNESS_TEST_DATABASE_URL=postgres://localhost/harness_test go test -race ./...
 ```
 
-Database tests are skipped when the variable is unset.
+Database tests are skipped when the variable is unset. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout after approval"
+```
 
 ## Known limitations
 
 - GPU serving (vLLM/SGLang routing, KV offload) is not implemented.
 - Artifacts only have a filesystem store; use an S3/MinIO plugin in production.
 - Offline evaluation uses its own in-memory ledger; its cost is not charged to the tenant budget.
+- Plan replay drives the flow state machine with recorded node results; graphs with bounded loops are compiled and safety-checked but not step-replayed.
 - Plugin config is read at startup; changes need a restart.
