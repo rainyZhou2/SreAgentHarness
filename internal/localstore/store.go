@@ -34,58 +34,60 @@ type Store struct {
 	mu  sync.Mutex
 	buf *stateBuf // non-nil while one command is being applied atomically
 
-	runs           map[string]domain.Run
-	runByKey       map[string]string // tenant/idempotency -> run id
-	steps          map[string]domain.Step
-	attempts       map[string]attempt
-	eventDir       string
-	events         map[string][]eventIndex
-	eventCache     map[string]domain.Event
-	eventSeq       map[string]int64
-	legacyEvents   []domain.Event
-	sessions       map[string]domain.Session
-	sessionKey     map[string]string
-	branches       map[string]domain.Branch
-	turns          map[string]domain.Turn
-	messages       map[string][]domain.Message
-	profiles       map[string]profileRec
-	flows          map[string]domain.FlowSnapshot
-	flowInputs     map[string]flowInput
-	intents        map[string]domain.ActionIntent
-	intentStep     map[string]string
-	approvals      map[string]approvalRec
-	decisions      map[string][]decisionRec
-	grants         map[string]grantRec
-	kv             map[string]kvRec
-	effects        map[string]effectRec
-	outbox         map[string]domain.OutboxMessage
-	commands       map[string]domain.Command
-	cmdKey         map[string]string
-	thoughts       map[string][]domain.Thought
-	caps           map[string][]domain.CapabilityRef
-	extensions     map[string]extensions.Record
-	toolOff        map[string]map[string]bool
-	outputRevs     map[string][]pg.OutputRevision
-	modelReqs      map[string]modelReqRec
-	checkpoints    map[string]checkpointRec
-	memories       map[string]memoryRec
-	memHits        map[string][]memoryHitRec
-	compactions    map[string]compactRec
-	shards         map[string][]domain.MemoryShard
-	feedback       map[string][]memory.Feedback
-	experiences    map[string][]pg.ExperienceView
-	incidents      map[string]incidentRec
-	incidentEvents map[string][]pg.IncidentEvent
-	serviceDeps    map[string]map[string]string
-	capNodes       map[string]capNodeRec
-	capRels        map[string]capRelRec
-	datasets       map[string]evalDatasetRec
-	evalCases      map[string]evalCaseRec
-	evalRuns       map[string]evalRunRec
-	candidates     map[string]evalCandidateRec
-	rollouts       map[string]evalRolloutRec
-	snapshots      map[string]string // context snapshot id -> run id
-	triggerClaims  map[string]triggerClaimRec
+	runs            map[string]domain.Run
+	runByKey        map[string]string // tenant/idempotency -> run id
+	steps           map[string]domain.Step
+	attempts        map[string]attempt
+	eventDir        string
+	events          map[string][]eventIndex
+	eventCache      map[string]domain.Event
+	eventSeq        map[string]int64
+	legacyEvents    []domain.Event
+	sessions        map[string]domain.Session
+	sessionKey      map[string]string
+	branches        map[string]domain.Branch
+	turns           map[string]domain.Turn
+	messages        map[string][]domain.Message
+	profiles        map[string]profileRec
+	flows           map[string]domain.FlowSnapshot
+	flowInputs      map[string]flowInput
+	intents         map[string]domain.ActionIntent
+	intentStep      map[string]string
+	approvals       map[string]approvalRec
+	decisions       map[string][]decisionRec
+	grants          map[string]grantRec
+	kv              map[string]kvRec
+	effects         map[string]effectRec
+	outbox          map[string]domain.OutboxMessage
+	commands        map[string]domain.Command
+	cmdKey          map[string]string
+	thoughts        map[string][]domain.Thought
+	caps            map[string][]domain.CapabilityRef
+	extensions      map[string]extensions.Record
+	toolOff         map[string]map[string]bool
+	outputRevs      map[string][]pg.OutputRevision
+	modelReqs       map[string]modelReqRec
+	checkpoints     map[string]checkpointRec
+	memories        map[string]memoryRec
+	memHits         map[string][]memoryHitRec
+	reasoningScores map[string]reasoningScoreRec
+	consolidation   map[string]consolidationRec
+	compactions     map[string]compactRec
+	shards          map[string][]domain.MemoryShard
+	feedback        map[string][]memory.Feedback
+	experiences     map[string][]pg.ExperienceView
+	incidents       map[string]incidentRec
+	incidentEvents  map[string][]pg.IncidentEvent
+	serviceDeps     map[string]map[string]string
+	capNodes        map[string]capNodeRec
+	capRels         map[string]capRelRec
+	datasets        map[string]evalDatasetRec
+	evalCases       map[string]evalCaseRec
+	evalRuns        map[string]evalRunRec
+	candidates      map[string]evalCandidateRec
+	rollouts        map[string]evalRolloutRec
+	snapshots       map[string]string // context snapshot id -> run id
+	triggerClaims   map[string]triggerClaimRec
 }
 
 type attempt struct {
@@ -220,7 +222,7 @@ func Open(path string) (*Store, error) {
 		caps: map[string][]domain.CapabilityRef{}, extensions: map[string]extensions.Record{},
 		toolOff: map[string]map[string]bool{}, outputRevs: map[string][]pg.OutputRevision{},
 		modelReqs: map[string]modelReqRec{}, checkpoints: map[string]checkpointRec{},
-		memories: map[string]memoryRec{}, memHits: map[string][]memoryHitRec{},
+		memories: map[string]memoryRec{}, memHits: map[string][]memoryHitRec{}, reasoningScores: map[string]reasoningScoreRec{}, consolidation: map[string]consolidationRec{},
 		compactions: map[string]compactRec{},
 		shards:      map[string][]domain.MemoryShard{}, feedback: map[string][]memory.Feedback{},
 		experiences: map[string][]pg.ExperienceView{}, incidents: map[string]incidentRec{},
@@ -601,6 +603,18 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 			return err
 		}
 		s.triggerClaims[id] = v
+	case "reasoningscore":
+		var v reasoningScoreRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.reasoningScores[id] = v
+	case "consolidation":
+		var v consolidationRec
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.consolidation[id] = v
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"go-sre-harness/internal/eval"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
+	"go-sre-harness/internal/reasoning/improve"
 	"go-sre-harness/internal/retention"
 )
 
@@ -22,6 +23,12 @@ type PolicyConfig struct {
 
 type IntervalConfig struct {
 	Interval plugin.Duration `json:"interval,omitempty"`
+}
+
+type ImproverConfig struct {
+	improve.Config
+	Interval plugin.Duration `json:"interval,omitempty"`
+	Window   plugin.Duration `json:"window,omitempty"`
 }
 
 type RetentionConfig struct {
@@ -77,6 +84,24 @@ func init() {
 			}
 			svc, every := h.Eval, cfg.Interval.D()
 			return plugin.RunnerFunc(func(ctx context.Context) error { return svc.Run(ctx, every) }), nil
+		})
+	plugin.Register(plugin.Job, "reasoning_improver", "proposes reasoning-layer profile candidates from measured reasoning quality; never approves or promotes",
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {
+			cfg := ImproverConfig{Interval: plugin.Duration(6 * time.Hour), Window: plugin.Duration(7 * 24 * time.Hour)}
+			if err := c.Decode(&cfg); err != nil {
+				return nil, err
+			}
+			if h.Eval == nil {
+				return nil, errors.New("evaluation service unavailable")
+			}
+			ic := cfg.Config
+			ic.Window = cfg.Window.D()
+			if err := ic.Validate(); err != nil {
+				return nil, err
+			}
+			im := &improve.Improver{Config: ic, Store: h.Store, Evolution: h.Eval, Log: h.Log.With("job", "reasoning_improver")}
+			every := cfg.Interval.D()
+			return plugin.RunnerFunc(func(ctx context.Context) error { return im.Run(ctx, every) }), nil
 		})
 	plugin.Register(plugin.Job, "retention", "deletes published outbox rows, expired segments/memories and old audit entries",
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {

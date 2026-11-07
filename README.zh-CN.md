@@ -159,9 +159,18 @@ docker compose -f deploy/docker-compose.yml up --build
 
 桌面端从数据目录下的 `harness.local.json`（或 `HARNESS_LOCAL_CONFIG`）读取同样的 `policy`、`triggers`、`context_providers`、`tool_overlays` 配置。
 
+## 可量化、可复用、可自我改进的推理
+
+对 agent 显式的决策轨迹（计划、带置信度的假设、校验）做打分、复用和改进；从不读取模型提供方隐藏的推理。设计文档：`docs/superpowers/specs/2026-11-07-reasoning-quality-and-self-improvement-design.md`。
+
+- **量化**：每个结束的 run 由 consolidator 打分，收到反馈后重新打分。指标包括：校准度（以 VERIFIED/REFUTED 结束的假设的 Brier 分数）、证据支撑率、重复工具调用、到首个结论的步数、最终校验结论和综合质量分。离线回放用同一套打分；若候选版本在 holdout 上的校准度、证据支撑率、冗余率或质量分退化，发布门禁直接不通过。
+- **复用**：已完成、未被反馈否定且校验结论为 VERIFIED 的 run，会被提炼为*推理模式*，即一条 procedural 记忆。内容是按顺序检验过的假设及各自结论，以及得出首个结论前用到的工具。它走正常的记忆生命周期（CANDIDATE → 审批 → ACTIVE），每条模式都要人工激活。每条记忆的成功率和 Wilson 下界，按检索过它的 run 统计。
+- **改进**：`reasoning_improver` 定时任务（或 `POST /v1/reasoning/improve`）会诊断薄弱维度和表现差的 ACTIVE 模式，并提出一个 profile 候选版本，只改 `reasoning.playbook` 和 `reasoning.patterns_excluded`。playbook 是固定的、与领域无关的指导，≤2000 字符，经过投毒检查，并放在信任规则之前渲染。诊断时会排除 holdout 用例对应的 run。候选版本走现有流程：holdout 门禁 → 由非提议者的人工审批 → 灰度与自动回滚。该循环从不审批、不发起灰度、不晋升，且同一时间只提一个变更。
+- **API**：`GET /v1/reasoning/summary`、`GET /v1/reasoning/runs/{run_id}`、`GET /v1/reasoning/patterns`、`POST /v1/reasoning/improve`（admin）。桌面端同样打分和提炼，但只在手动触发时改进。
+
 ## API
 
-`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/v1/triggers…`、`/healthz`、`/metrics`。
+`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/v1/triggers…`、`/v1/reasoning…`、`/healthz`、`/metrics`。
 
 ## 测试
 

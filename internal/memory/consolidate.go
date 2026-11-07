@@ -145,6 +145,16 @@ type Consolidator struct {
 	SideEffecting func(tool string) bool
 	Interval      time.Duration
 	Log           *slog.Logger
+	// Hooks run after a run is consolidated (and again when feedback
+	// requeues it). Their errors are logged and never fail consolidation.
+	Hooks []RunHook
+}
+
+// RunHook observes consolidated runs (reasoning scores, pattern
+// distillation). quality is VERIFIED, DISPUTED or UNVERIFIED from feedback.
+type RunHook interface {
+	Name() string
+	AfterRun(ctx context.Context, rec RunRecord, quality string) error
 }
 
 func (c *Consolidator) Run(ctx context.Context) error {
@@ -331,7 +341,15 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 	_, err = c.Store.InsertExperience(ctx, Experience{TenantID: j.TenantID, RunID: run.ID, IncidentID: run.IncidentID,
 		Outcome: string(run.Status), OutcomeRef: outcomeRef, LessonsRef: ref, SourceRefs: sourceRefs,
 		QualityState: quality, ExtractorVersion: ExtractorVersion})
-	return err
+	if err != nil {
+		return err
+	}
+	for _, h := range c.Hooks {
+		if herr := h.AfterRun(ctx, rec, quality); herr != nil && c.Log != nil {
+			c.Log.Warn("consolidation hook", "hook", h.Name(), "run_id", run.ID, "err", herr)
+		}
+	}
+	return nil
 }
 
 func firstSentence(s string) string {

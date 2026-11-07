@@ -172,6 +172,9 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 		if m.Trust == "T4" { // untrusted text is never injected as memory
 			continue
 		}
+		if domain.MemoryExcluded(ctx, m.ID) { // retired by the run profile
+			continue
+		}
 		ranked = append(ranked, m)
 	}
 	kept, conflicts := ResolveConflicts(ranked)

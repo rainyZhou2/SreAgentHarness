@@ -33,6 +33,9 @@ type Rules struct {
 	CompactEvery  int
 	MemoryTopK    int
 	CapabilityMap bool
+	// MemoryExclude lists memories hidden from retrieval
+	// (reasoning.patterns_excluded).
+	MemoryExclude []string
 
 	// Flow is the compiled orchestration plan when strategy is "flow".
 	Flow     *flow.Spec
@@ -58,6 +61,9 @@ func Compile(ref string, s Spec) (Rules, error) {
 	r := Rules{Ref: ref, restricted: s.Tools != nil, tools: s.Tools, policyVersion: s.PolicyVersion,
 		MaxSteps: s.MaxSteps, CompactEvery: s.CompactEvery, MemoryTopK: s.MemoryTopK,
 		CapabilityMap: s.CapabilityMap}
+	if s.Reasoning != nil {
+		r.MemoryExclude = s.Reasoning.PatternsExcluded
+	}
 	for _, t := range s.Tools {
 		if t == "" || (strings.Contains(t, "*") && t != "*" && !strings.HasSuffix(t, ".*")) || strings.Count(t, "*") > 1 {
 			return r, fmt.Errorf("profile %s: invalid tool pattern %q (use a name, \"prefix.*\" or \"*\")", ref, t)

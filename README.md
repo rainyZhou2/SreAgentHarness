@@ -159,9 +159,18 @@ See `deploy/harness.example.yaml` for the rest.
 
 The desktop runtime reads the same sections (`policy`, `triggers`, `context_providers`, `tool_overlays`) from `harness.local.json` in its data directory, or from `HARNESS_LOCAL_CONFIG`.
 
+## Measurable, reusable, self-improving reasoning
+
+The agent's explicit decision trace (plan, hypotheses with confidence, verification) is scored, reused and improved. Provider-hidden reasoning is never read. Design: `docs/superpowers/specs/2026-11-07-reasoning-quality-and-self-improvement-design.md`.
+
+- **Measure**: every finished run is scored by the consolidator (and rescored when feedback arrives). The score covers calibration (Brier score of hypotheses that ended VERIFIED/REFUTED), evidence grounding, redundant tool calls, steps to the first verdict, the conclusion verdict and a composite quality. Offline replays are scored the same way, and the release gate fails a candidate whose calibration, grounding, redundancy or quality regresses on the holdout split.
+- **Reuse**: completed, undisputed runs with a VERIFIED conclusion are distilled into *reasoning patterns*: procedural memories listing the hypotheses checked in order, their verdicts and the tools used until the first verdict. They follow the normal memory lifecycle (CANDIDATE → approval → ACTIVE), so an operator activates every pattern. Each memory's success rate and Wilson lower bound are measured from the runs that retrieved it.
+- **Improve**: the `reasoning_improver` job (or `POST /v1/reasoning/improve`) diagnoses weak dimensions and underperforming ACTIVE patterns. It proposes a profile candidate that changes only `reasoning.playbook` (fixed, domain-free guidance; at most 2,000 characters, poison-checked, rendered before the trust rules) and `reasoning.patterns_excluded`. Runs behind holdout cases are excluded from the diagnosis. The candidate goes through the existing pipeline: holdout gate, approval by a human other than the proposer, canary with automatic rollback. The loop never approves, canaries or promotes, and proposes one change at a time.
+- **APIs**: `GET /v1/reasoning/summary`, `GET /v1/reasoning/runs/{run_id}`, `GET /v1/reasoning/patterns`, `POST /v1/reasoning/improve` (admin). The desktop runtime scores and distills the same way and improves only on demand.
+
 ## API
 
-`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/healthz`, `/metrics`.
+`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/v1/reasoning…`, `/healthz`, `/metrics`.
 
 ## Tests
 
