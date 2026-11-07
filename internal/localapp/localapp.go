@@ -20,13 +20,16 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/eval"
 	"go-sre-harness/internal/extensions"
 	"go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/gateway/anthropic"
 	"go-sre-harness/internal/gateway/gemini"
 	"go-sre-harness/internal/gateway/openai"
+	"go-sre-harness/internal/graph"
 	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/localstore"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/policy"
@@ -101,6 +104,19 @@ func Run(ctx context.Context, cfg Config) error {
 		ProfileRef: "sre-diagnosis@7", MaxContextTokens: 120_000,
 		MaxObservationBytes: 16_000, MaxOutputTokens: 8_000}
 	strategy := &cognitive.LLM{Gateway: modelGW, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}
+	embedder := memory.HashingEmbedder{Dims: 256}
+	graphSvc := &graph.Service{Store: store, Tools: reg, Extensions: extRT, Log: cfg.Log.With("component", "graph")}
+	retriever := &memory.Retriever{Store: store, Embedder: embedder, Artifacts: arts, TopK: 5}
+	offlineGW, err := buildGateway(arts, gateway.NewMemLedger(), cfg.Log)
+	if err != nil {
+		return err
+	}
+	evalSvc := &eval.Service{Store: store, Artifacts: arts, Registry: reg, Log: cfg.Log.With("component", "eval"),
+		Factory: func(spec profile.Spec) (cognitive.Strategy, error) {
+			// Offline replay uses its own ledger: evaluation calls belong to no
+			// run and must not be charged to the tenant.
+			return &cognitive.LLM{Gateway: offlineGW, Artifacts: arts, Assembler: assembler, Alias: "sre-reasoning"}, nil
+		}}
 	plannerSvc := &planner.Service{Gateway: modelGW, Artifacts: arts, Profiles: store,
 		Log: cfg.Log.With("component", "planner"), Observer: metrics,
 		Config: planner.Config{ModelAlias: "sre-reasoning", MaxRepairs: 2, MaxNodes: 20,
@@ -109,7 +125,8 @@ func Run(ctx context.Context, cfg Config) error {
 			FallbackProfileID: "sre-diagnosis", FallbackVersion: 8, FallbackReact: true}}
 
 	worker := kernel.NewWorker(kernel.Config{ID: "local-worker", LeaseTTL: 30 * time.Second,
-		StepTimeout: 2 * time.Minute, Checkpoints: false, Rules: rules, Planner: plannerSvc,
+		StepTimeout: 2 * time.Minute, Checkpoints: true, Rules: rules, Planner: plannerSvc,
+		Memory: retriever, CapabilityMap: graphSvc,
 		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics},
 		store, arts, strategy, reg, pol, cfg.Log)
 	pool := kernel.NewPool(worker, cfg.MaxRuns)
@@ -121,6 +138,7 @@ func Run(ctx context.Context, cfg Config) error {
 	server := &api.Server{Store: store, Artifacts: arts, DefaultProfile: "sre-diagnosis", DefaultVersion: 7,
 		AutoProfileID: "sre-diagnosis", AutoProfileVersion: 10, PollInterval: 250 * time.Millisecond,
 		StreamMode: api.StreamPoll, Log: cfg.Log, Rules: rules.Rules, Tools: reg, Policy: pol, Metrics: metrics,
+		Graph:        graphSvc,
 		Auth:         &auth.Chain{Authenticators: []auth.Authenticator{tokens}},
 		BranchPolicy: domain.BranchQueue, MaxPendingTurn: 8}
 
@@ -133,8 +151,13 @@ func Run(ctx context.Context, cfg Config) error {
 			ep, err := modelGW.Resolve(gateway.Request{ModelAlias: "sre-reasoning"}, gateway.Scope{TenantID: tenantID})
 			return ep.ID, ep.ModelID, err
 		}})
+	server.Extend(&api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server})
+	server.Extend(&api.EvalAPI{Service: evalSvc, Store: store, Server: server})
 	if err := extRT.Sync(ctx); err != nil {
 		cfg.Log.Warn("initial extensions sync", "err", err)
+	}
+	if err := graphSvc.Sync(ctx, tenant); err != nil {
+		cfg.Log.Warn("initial graph sync", "err", err)
 	}
 	go func() {
 		if err := extRT.Run(ctx); err != nil && ctx.Err() == nil {
@@ -150,7 +173,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 	go runLoop(ctx, store, pool, cfg.Log)
-	go reconcileLoop(ctx, store, cfg.Log)
+	go reconcileLoop(ctx, store, graphSvc, cfg.Log)
 
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -175,7 +198,7 @@ func runLoop(ctx context.Context, store *localstore.Store, pool *kernel.Pool, lo
 	}
 }
 
-func reconcileLoop(ctx context.Context, store *localstore.Store, log *slog.Logger) {
+func reconcileLoop(ctx context.Context, store *localstore.Store, graphSvc *graph.Service, log *slog.Logger) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
@@ -185,6 +208,12 @@ func reconcileLoop(ctx context.Context, store *localstore.Store, log *slog.Logge
 		case <-t.C:
 			if _, err := store.ExpireApprovals(ctx, 100); err != nil {
 				log.Warn("expire approvals", "err", err)
+			}
+			if _, err := store.RecoverExpiredLeases(ctx, 100); err != nil {
+				log.Warn("recover leases", "err", err)
+			}
+			if err := graphSvc.Sync(ctx, tenant); err != nil {
+				log.Warn("graph sync", "err", err)
 			}
 		}
 	}
@@ -200,6 +229,11 @@ func seedProfiles(ctx context.Context, store *localstore.Store) error {
 		if _, err := store.RegisterProfile(ctx, tenant, "sre-diagnosis", p.version, json.RawMessage(p.spec)); err != nil {
 			return fmt.Errorf("seed profile %d: %w", p.version, err)
 		}
+	}
+	// The auto profile is the default channel version; rollout/canary
+	// resolution reads this flag.
+	if err := store.SetActiveVersion(ctx, tenant, "sre-diagnosis", 10); err != nil {
+		return fmt.Errorf("set active profile: %w", err)
 	}
 	return nil
 }

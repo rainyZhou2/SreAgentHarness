@@ -594,7 +594,10 @@ async function send(text) {
 async function command(runId, type, opts = {}) {
   const v = state.runs.get(runId);
   if (!v) return;
-  const req = { type, expected_version: opts.version ? v.run.run.version : 0, reason: opts.reason || "", payload: opts.payload || {} };
+  const req = { type, reason: opts.reason || "", payload: opts.payload || {} };
+  // Version-guarded commands must send the version the user saw; pause and
+  // cancel are accepted without one.
+  if (opts.version) req.expected_version = v.run.run.version;
   try {
     const cmd = await api().Command(runId, req);
     if (cmd && cmd.status === "REJECTED") toast(t("{cmd} rejected: {reason}", { cmd: type, reason: cmd.reject_reason || t("no reason") }), true);
