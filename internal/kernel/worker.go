@@ -29,6 +29,7 @@ import (
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/tools"
+	"go-sre-harness/internal/untrusted"
 )
 
 // StateStore is the durable state the worker needs (implemented by store/pg).
@@ -937,7 +938,8 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 				trust = "T4"
 			}
 			obs := domain.Observation{StepSeq: lease.StepSeq, Tool: call.Name, Outcome: "error",
-				Content: mustJSON(map[string]string{"error": err.Error()}), TrustTag: trust}
+				Content: mustJSON(map[string]string{"error": err.Error()}), TrustTag: trust,
+				Injection: untrusted.Scan(err.Error())}
 			ref, h, putErr := w.put(ctx, lease.TenantID, "observation", obs)
 			if putErr != nil {
 				return domain.StepSuccess{}, putErr

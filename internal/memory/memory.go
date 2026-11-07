@@ -96,6 +96,25 @@ func PoisonCheck(s string) (bool, string) {
 	return false, ""
 }
 
+// PoisonMatches returns up to max distinct instruction-like spans of s, in
+// pattern order (used to flag untrusted tool output and evidence).
+func PoisonMatches(s string, max int) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, re := range poisonPatterns {
+		for _, m := range re.FindAllString(s, max) {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+				if len(out) >= max {
+					return out
+				}
+			}
+		}
+	}
+	return out
+}
+
 // ---------- embeddings ----------
 
 // Embedder turns text into a fixed-size vector. Model identifies the

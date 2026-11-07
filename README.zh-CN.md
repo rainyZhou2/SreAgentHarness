@@ -154,6 +154,7 @@ docker compose -f deploy/docker-compose.yml up --build
 - **时间与环境上下文**：运行固定 `now`、故障时间窗、服务和标签（`POST /v1/runs` 的 `context`，或由触发器渲染）。`context_provider` 插件在每个运行开始时补充拓扑、归属和近期变更，结果固定用于回放，并作为不可信数据渲染。配置了 `time_args` 的工具在模型未给出时间时自动补齐时间窗。
 - **校验与补偿**（`tool_overlays.<tool>.lifecycle`）：副作用执行后内核轮询校验工具直到 `expect` 成立；校验失败时提出补偿动作，补偿始终需要审批。
 - **大输出**：超大的工具结果存为 `tool-output` 制品并生成结构化摘要（日志级别、时间范围、高频模板；JSON 结构与数值统计），模型通过 `harness.artifact_query` 查询其余部分（head、tail、lines、grep、JSON path、时间范围）。
+- **不可信输出**：所有工具结果、人工证据和压缩摘要都包在由内容哈希生成 id 的 `<<<DATA id=…>>>` 边界里，内容本身无法提前闭合；聊天模板控制符会被转义，像指令的文本（复用记忆投毒规则）在 prompt、observation 和 prompt manifest 中标记为 `injection_suspected`。内容只标记不删除。上下文压缩会在截断之外保留落盘 handle、校验结论和这些标记。
 - **路由**：规划失败时，依次由上下文提示、模型请求的模式、配置的正则以及目标中提到的有副作用工具决定走兜底 flow 还是 ReAct。
 
 桌面端从数据目录下的 `harness.local.json`（或 `HARNESS_LOCAL_CONFIG`）读取同样的 `policy`、`triggers`、`context_providers`、`tool_overlays` 配置。

@@ -12,10 +12,12 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/envctx"
 	"go-sre-harness/internal/flow"
+	"go-sre-harness/internal/outsum"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
+	"go-sre-harness/internal/untrusted"
 )
 
 // ContextGatherer collects environment facts for a run (envctx.Gatherer).
@@ -112,12 +114,29 @@ func formatTime(t time.Time, format string) any {
 	}
 }
 
+// ---------- untrusted output ----------
+
+// maxScanBytes bounds the injection scan of one tool result.
+const maxScanBytes = 1 << 20
+
+// scanOutput flags instruction-like text anywhere in a tool result. The
+// result is kept as is (it may be the evidence that matters); the flag tells
+// the model and auditors not to act on it.
+func scanOutput(out []byte) []string {
+	if len(out) > maxScanBytes {
+		out = out[:maxScanBytes]
+	}
+	_, body := outsum.Detect(out)
+	return untrusted.Scan(string(body))
+}
+
 // ---------- large outputs ----------
 
 // observe builds the observation for a tool result, offloading results
 // above the size threshold to a tool-output artifact.
 func (w *Worker) observe(ctx context.Context, tenantID string, desc tools.Descriptor, obs domain.Observation, out json.RawMessage) (domain.Observation, error) {
 	obs.Content = out
+	obs.Injection = scanOutput(out)
 	limit := w.cfg.OutputOffloadBytes
 	if desc.MaxInlineBytes != 0 {
 		limit = desc.MaxInlineBytes
