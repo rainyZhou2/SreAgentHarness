@@ -8,7 +8,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 const SUGGESTIONS = [
-  "What's the difference between a Deployment and a StatefulSet?",
+  "Investigate the checkout error spike and identify the likely cause",
   "Why did checkout p99 latency rise this week?",
   "Restart the checkout deployment and confirm recovery",
 ];
@@ -270,7 +270,9 @@ async function openConnection() {
   f.connection_mode.value = s.mode || "local";
   f.server_url.value = s.server_url || "http://127.0.0.1:8080";
   const c = s.creds || {};
-  f.mode.value = c.mode || "dev";
+  // Production clients authenticate with a token; header-based developer
+  // access is only preselected when it was already configured.
+  f.mode.value = c.mode || "bearer";
   f.tenant.value = c.tenant || "";
   f.actor.value = c.actor || "";
   f.roles.value = c.roles || "";
@@ -279,7 +281,10 @@ async function openConnection() {
   syncMode();
   try {
     const st = await api().LocalStatus();
-    $("#local-status").textContent = st && st.status ? t("Local runtime status: {status}", { status: st.status }) : "";
+    const status = st && st.status
+      ? ({ running: t("Ready"), starting: t("Starting…"), stopped: t("Stopped"), failed: t("Unavailable") }[st.status] || st.status)
+      : "";
+    $("#local-status").textContent = status ? t("Local service: {status}", { status }) : "";
   } catch { /* status is optional */ }
   $("#dlg-conn").showModal();
   if (f.connection_mode.value === "remote") { f.server_url.focus(); f.server_url.select(); }
@@ -296,7 +301,7 @@ function syncMode() {
   });
   const submit = $("#conn-submit");
   if (submit) {
-    submit.dataset.i18n = connection === "local" ? "Start and connect" : "Connect";
+    submit.dataset.i18n = connection === "local" ? "Open workspace" : "Connect";
     submit.textContent = t(submit.dataset.i18n);
   }
 }
@@ -315,7 +320,7 @@ async function submitConnection(ev) {
   const f = ev.target;
   try {
     if (f.connection_mode.value === "local") {
-      toast(t("Local runtime is starting…"));
+      toast(t("Local service is starting…"));
       await api().ConnectLocal();
       await afterConnected();
       return;
@@ -640,12 +645,12 @@ function render(scrollToEnd) {
   if (!state.turns.length) {
     thread.replaceChildren(h("div", { class: "hero" },
       h("img", { class: "hero-logo", src: "logo.png", alt: "" }),
-      h("h1", {}, t("What can I help with?")),
-      h("div", { class: "muted" }, t("Tell me what's on your mind. I'll work out what you need and help from there.")),
+      h("h1", {}, t("How can I help with your service?")),
+      h("div", { class: "muted" }, t("Describe the symptom, service or change. I'll gather evidence, reason about the cause and propose next steps.")),
       h("div", { class: "chips" }, SUGGESTIONS.map((s) => h("button", { class: "chip", onclick: () => send(t(s)) }, t(s)))),
       state.demoModel ? h("div", { class: "model-hint" },
-        h("span", {}, t("You're on the built-in scripted model. Add a real model for better answers.")),
-        h("button", { class: "link-btn", onclick: () => showSettings("models") }, t("Configure a model"))) : null));
+        h("span", {}, t("No model is configured yet. Add one to enable full reasoning and tool use.")),
+        h("button", { class: "link-btn", onclick: () => showSettings("models") }, t("Add a model"))) : null));
   } else {
     thread.replaceChildren(...state.turns.map(renderTurn));
   }
@@ -1293,7 +1298,7 @@ function renderInbox() {
       a.session_id ? h("button", { class: "link-btn", onclick: () => openSession(a.session_id) }, t("Open chat ›")) : null)));
   $("#thread").replaceChildren(h("div", { class: "customize" },
     h("h1", {}, t("Approvals")),
-    h("p", { class: "muted lead" }, t("Tool calls waiting for a decision in any chat of this tenant. New ones also arrive as system notifications.")),
+    h("p", { class: "muted lead" }, t("Tool calls waiting for a decision in any chat of this workspace. New ones also arrive as system notifications.")),
     list.length ? cards : h("div", { class: "empty-card muted" }, t("Nothing is waiting for approval."))));
 }
 
@@ -1332,7 +1337,7 @@ async function showPlugins() {
   if (state.connectionMode === "local") {
     // The local runtime has no plugin host; extensions are managed in Customize.
     return thread.replaceChildren(h("div", { class: "plugins" }, h("h1", {}, t("Plugins")),
-      h("div", { class: "muted" }, t("Plugins are managed by team servers. In local runtime, use Customize to manage models, MCP servers, HTTP tools and skills."))));
+      h("div", { class: "muted" }, t("Plugins are managed by team workspaces. In local mode, use Customize to manage models, MCP servers, HTTP tools and skills."))));
   }
   let data;
   try {
@@ -2009,7 +2014,7 @@ function renderCustomize(loading) {
       h("div", { class: "cz-mark" }, icon("sliders")),
       h("div", { class: "cz-title" },
         h("h1", {}, t("Customize")),
-        h("p", { class: "muted lead" }, t("Connect MCP servers, add HTTP tools and write skills for every chat in this tenant. Models are under Settings. "),
+        h("p", { class: "muted lead" }, t("Connect MCP servers, add HTTP tools and write skills for every chat in this workspace. Models are managed in Settings."),
           t("Tools still run under the profile allowlist, policy and approvals. Changes need the admin role.")))),
     tabs, body));
 }
@@ -2202,7 +2207,7 @@ function editMCP(x) {
         kvEditor(f.headers, t("Header")),
         h("details", { class: "adv" }, h("summary", {}, t("Advanced")),
           h("div", { class: "grid2" },
-            h("label", {}, t("Local command (stdio; the server must set HARNESS_MCP_ALLOW_STDIO)"), h("input", { value: f.command, placeholder: "npx", oninput: (e) => (f.command = e.target.value) })),
+            h("label", {}, t("Local command (advanced; requires server permission)"), h("input", { value: f.command, placeholder: "npx", oninput: (e) => (f.command = e.target.value) })),
             h("label", {}, t("Arguments"), h("input", { value: f.args, placeholder: "-y @scope/server", oninput: (e) => (f.args = e.target.value) })),
             h("label", {}, t("Call timeout"), h("input", { value: f.callTimeout, placeholder: "30s", oninput: (e) => (f.callTimeout = e.target.value) })))),
         h("div", { class: "probe-bar" },
@@ -2254,7 +2259,7 @@ function editHTTP(x) {
         h("div", { class: "grid2" },
           h("label", {}, t("Target argument (policy scope, optional)"), h("input", { value: f.targetArg, placeholder: "service", oninput: (e) => (f.targetArg = e.target.value) })),
           h("label", {}, t("Timeout"), h("input", { value: f.timeout, placeholder: "15s", oninput: (e) => (f.timeout = e.target.value) }))),
-        h("p", { class: "muted small" }, t("GET tools must be R0. Calls carry Idempotency-Key, X-Harness-Run-ID and X-Harness-Step-ID headers.")),
+        h("p", { class: "muted small" }, t("GET tools must be read-only (R0). Calls include idempotency and run context headers.")),
         h("label", { class: "check" }, h("input", { type: "checkbox", checked: f.enabled, onchange: (e) => (f.enabled = e.target.checked) }), " " + t("Enabled")));
       return editorShell(x ? t("HTTP tool · {name}", { name: x.name }) : t("Add HTTP tool"), fields, [
         x ? h("button", { class: "btn danger", onclick: () => deleteExt("http-tools", x.name) }, t("Delete")) : null,
@@ -2383,13 +2388,14 @@ function modelLine(x) {
 function renderModelTab() {
   const cur = (cz.data && cz.data.current_model) || {};
   const models = listFor("model").slice().sort((a, b) => (b.spec.default ? 1 : 0) - (a.spec.default ? 1 : 0) || a.name.localeCompare(b.name));
+  const modelName = !cur.tenant_configured && cur.model === "rule-based-sre" ? t("Not configured") : (cur.model || "—");
   const curBox = h("div", { class: "current-model" + (cur.tenant_configured ? " on" : "") },
     h("div", { class: "muted small" }, t("New runs use")),
-    h("div", { class: "cm-name" }, cur.model || "—"),
+    h("div", { class: "cm-name" }, modelName),
     h("div", { class: "muted small" }, cur.error ? cur.error :
-      t(cur.tenant_configured ? "configured for this tenant" :
-        cur.model === "rule-based-sre" ? "the built-in scripted demo model — it only calls tools when you write “use <tool> {json}”. Add a model below to let the agent reason and pick tools itself." :
-        "the deployment's default model")));
+      t(cur.tenant_configured ? "configured for this workspace" :
+        cur.model === "rule-based-sre" ? "not configured — add a model below to enable agent reasoning and tool selection" :
+        "the workspace default model")));
   return h("div", {}, curBox,
     h("div", { class: "list-bar" }, h("button", { class: "btn primary", onclick: () => pickPreset() }, t(models.length ? "Add another model" : "Add a model"))),
     models.map((x) => h("div", { class: "ext-card", onclick: () => editModel(x) },
@@ -2402,7 +2408,7 @@ function renderModelTab() {
       h("div", { class: "ext-side" },
         !x.spec.default && x.enabled ? h("button", { class: "btn", onclick: (e) => { e.stopPropagation(); setDefaultModel(x); } }, t("Make default")) : null,
         h("div", { class: "muted small" }, "v" + x.version, " · ", ago(x.updated_at))))),
-    h("p", { class: "muted small" }, t("The key is stored on the server and used only for this tenant's runs; it is never sent back to clients. "),
+    h("p", { class: "muted small" }, t("The key is stored on the server and used only for this workspace's runs; it is never sent back to clients. "),
       t("The default model is tried first; the others are fallbacks.")));
 }
 
@@ -2557,7 +2563,7 @@ function renderToolsTab() {
           h("span", { class: "risk-tag r" + (d.risk || "R0").slice(1) }, d.risk),
           !allowed ? h("span", { class: "badge s-idle" }, t("blocked"))
             : on ? h("span", { class: "badge s-ok" }, t("allowed")) : h("span", { class: "badge s-idle" }, t("disabled")),
-          h("label", { class: "switch", title: allowed ? t("Hide this tool from runs of this tenant") : t("The profile does not allow this tool") },
+          h("label", { class: "switch", title: allowed ? t("Hide this tool from runs in this workspace") : t("This tool is not allowed by the current profile") },
             h("input", { type: "checkbox", checked: on, disabled: !allowed, "aria-label": t("Toggle {name}", { name: d.name }), onchange: (e) => toggleTool(d.name, e.target.checked) }),
             h("span", { class: "track" }))),
         h("p", { class: "tool-desc" }, desc),
@@ -2675,10 +2681,10 @@ function renderConnection() {
       who ? row(t("Roles"), null, h("span", { class: "mono" }, (who.roles || []).join(", ") || "—")) : null,
       who ? row(t("Authentication"), null, h("span", { class: "mono" }, who.method || c.mode || "—")) : null),
     group(t("Server"),
-      row(t("Connection mode"), null, h("span", {}, t(s.mode === "remote" ? "Team server" : "Local runtime"))),
+      row(t("Workspace type"), null, h("span", {}, t(s.mode === "remote" ? "Team workspace" : "On this Mac"))),
       row(t("Server URL"), null, h("span", { class: "mono" }, s.server_url || "—")),
       s.mode !== "remote" ? row(t("Local data directory"), null, h("span", { class: "mono" }, s.local_data_dir || "—")) : null,
-      row(t("Sign-in method"), null, h("span", {}, t(c.mode === "bearer" ? (s.mode === "local" ? "Local token" : "Bearer token") : "Development headers")))),
+      row(t("Sign-in method"), null, h("span", {}, t(c.mode === "bearer" ? (s.mode === "local" ? "This Mac credential" : "Access token") : "Developer access")))),
     h("div", { class: "set-actions" },
       h("button", { class: "btn", onclick: openConnection }, t("Edit connection…")),
       who ? h("button", { class: "btn danger", onclick: signOut }, t("Sign out")) : null));
@@ -2715,15 +2721,15 @@ function renderNotifications() {
 function renderKnowledge() {
   return h("div", {},
     group(t("Capability graph"),
-      row(t("Projection"), t("Capabilities, skills, MCP servers and plugins are synced from the registries."),
+      row(t("Projection"), t("Capabilities, skills and connected services stay in sync automatically."),
         h("button", { class: "btn", onclick: async (e) => {
           e.currentTarget.disabled = true;
           try { await api().Capabilities(30); toast(t("Refreshed")); }
           catch (err) { toast(errText(err), true); }
           e.currentTarget.disabled = false;
         } }, t("Rebuild"))),
-      row(t("Decision trace"), t("New runs record plan, action, observation, verification and reflection. Hidden model reasoning is never stored."), null),
-      row(t("Memory shards"), t("Memories are partitioned by service, incident, run and capability."), null)));
+      row(t("Decision trace"), t("Each run keeps its plan, actions, observations and conclusions. Hidden model reasoning is never stored."), null),
+      row(t("Memory shards"), t("Memories are organized by service, incident, run and capability."), null)));
 }
 
 async function loadAbout() {  st.aboutLoading = true;
@@ -2732,6 +2738,12 @@ async function loadAbout() {  st.aboutLoading = true;
   st.log = await api().RecentLog(30).catch(() => []);
   st.aboutLoading = false;
   renderSettings();
+}
+
+function platformLabel(os, arch) {
+  const platform = os === "darwin" ? "macOS" : os === "windows" ? "Windows" : os === "linux" ? "Linux" : (os || "—");
+  const chip = arch === "arm64" ? (os === "darwin" ? "Apple Silicon" : "ARM64") : arch === "amd64" ? "Intel 64-bit" : (arch || "");
+  return chip ? platform + " · " + chip : platform;
 }
 
 function renderAbout() {
@@ -2748,7 +2760,7 @@ function renderAbout() {
       h("div", {}, h("div", { class: "about-name" }, "SRE Harness"), h("div", { class: "muted small" }, t("Version {v}", { v: a.version || "?" })))),
     group(t("Client"),
       row(t("Version"), null, h("span", { class: "mono" }, a.version || "—")),
-      row(t("Platform"), null, h("span", { class: "mono" }, `${a.os || "?"}/${a.arch || "?"} · ${a.go || ""}`)),
+      row(t("Platform"), null, h("span", { class: "mono" }, platformLabel(a.os, a.arch))),
       row(t("Settings file"), null, h("span", { class: "mono small path" }, a.settings_path || "—"))),
     group(t("Server"),
       row(t("Server URL"), null, h("span", { class: "mono" }, a.server_url || "—")),
@@ -2931,7 +2943,7 @@ async function boot() {
   bind();
   render();
   if (saved.mode === "local" && !saved.signed_out) {
-    toast(t("Local runtime is starting…"));
+    toast(t("Local service is starting…"));
     try {
       await api().ConnectLocal();
       showWho(await api().Whoami());
@@ -2940,7 +2952,7 @@ async function boot() {
       loadModelHint();
       return;
     } catch (e) {
-      toast(t("Local runtime failed: {err}", { err: errText(e) }), true);
+      toast(t("Could not start the local workspace: {err}", { err: errText(e) }), true);
     }
   }
   if (await api().Connected()) {

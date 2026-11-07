@@ -36,7 +36,7 @@
     <div class="composer-wrap" id="composer-wrap">
       <form id="composer" class="composer">
         <div id="slash" class="slash" hidden></div>
-        <textarea id="input" rows="1" data-i18n-placeholder="Type your question or idea…" placeholder="Type your question or idea…" spellcheck="false"></textarea>
+        <textarea id="input" rows="1" data-i18n-placeholder="Describe the issue, service or task…" placeholder="Describe the issue, service or task…" spellcheck="false"></textarea>
         <div class="composer-bar">
           <button type="button" id="btn-slash" class="composer-tool" data-i18n-title="Skills & tools" title="Skills & tools"><span class="slash-key">/</span> <span data-i18n="Skills & tools">Skills & tools</span></button>
           <span class="hint" id="hint"></span>
@@ -53,32 +53,33 @@
       <img class="dlg-mark" src="logo.png" alt="">
       <div>
         <h2 data-i18n="Connection">Connection</h2>
-        <p class="dlg-sub" data-i18n="Connect to your harness workspace">Connect to your harness workspace</p>
+        <p class="dlg-sub" data-i18n="Choose how you want to work">Choose how you want to work</p>
       </div>
     </header>
     <div class="seg" role="radiogroup" aria-label="Connection mode">
-      <label><input type="radio" name="connection_mode" value="local"> <span data-i18n="Local runtime">Local runtime</span></label>
-      <label><input type="radio" name="connection_mode" value="remote"> <span data-i18n="Team server">Team server</span></label>
+      <label><input type="radio" name="connection_mode" value="local"> <span data-i18n="On this Mac">On this Mac</span></label>
+      <label><input type="radio" name="connection_mode" value="remote"> <span data-i18n="Team workspace">Team workspace</span></label>
     </div>
     <div data-connection="local">
-      <p class="conn-hint" data-i18n="Starts a self-contained harness with its own local data. No Docker, PostgreSQL, NATS or terminal is needed.">Starts a self-contained harness with its own local data. No Docker, PostgreSQL, NATS or terminal is needed.</p>
+      <p class="conn-hint" data-i18n="Your data stays on this Mac with no extra setup — built for personal diagnosis and offline work.">Your data stays on this Mac with no extra setup — built for personal diagnosis and offline work.</p>
       <p id="local-status" class="muted small"></p>
     </div>
     <div data-connection="remote">
+      <p class="conn-hint" data-i18n="Connect to your team's shared workspace to share sessions, approvals and run history.">Connect to your team's shared workspace to share sessions, approvals and run history.</p>
       <label class="field"><span data-i18n="Server URL">Server URL</span> <input name="server_url" autocomplete="off" spellcheck="false"></label>
       <div class="seg" role="radiogroup" aria-label="Authentication">
-        <label><input type="radio" name="mode" value="dev"> <span data-i18n="Development headers">Development headers</span></label>
-        <label><input type="radio" name="mode" value="bearer"> <span data-i18n="Bearer token">Bearer token</span></label>
+        <label><input type="radio" name="mode" value="dev"> <span data-i18n="Developer access">Developer access</span></label>
+        <label><input type="radio" name="mode" value="bearer"> <span data-i18n="Access token">Access token</span></label>
       </div>
       <div class="grid2" data-mode="dev">
         <label><span data-i18n="Tenant">Tenant</span> <input name="tenant" autocomplete="off" spellcheck="false"></label>
         <label><span data-i18n="Actor">Actor</span> <input name="actor" autocomplete="off" spellcheck="false"></label>
         <label class="span2"><span data-i18n="Roles">Roles</span> <input name="roles" placeholder="viewer, operator, approver, admin" autocomplete="off" spellcheck="false"></label>
       </div>
-      <p class="conn-hint" data-mode="dev" data-i18n="Development mode trusts request headers; use it locally only.">Development mode trusts request headers; use it locally only.</p>
+      <p class="conn-hint" data-mode="dev" data-i18n="For local development only; identity comes from request headers.">For local development only; identity comes from request headers.</p>
       <div data-mode="bearer">
-        <label><span data-i18n="Token">Token</span> <input name="token" type="password" autocomplete="off"></label>
-        <p class="muted small" data-i18n="The token stays in memory and is not saved to disk.">The token stays in memory and is not saved to disk.</p>
+        <label><span data-i18n="Access token">Access token</span> <input name="token" type="password" autocomplete="off"></label>
+        <p class="muted small" data-i18n="The token is kept in memory and never written to disk.">The token is kept in memory and never written to disk.</p>
       </div>
     </div>
     <p id="conn-error" class="error" hidden></p>
