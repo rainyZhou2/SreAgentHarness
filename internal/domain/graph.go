@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type ThoughtKind string
 
@@ -65,6 +68,13 @@ type ThoughtRef struct {
 	Ref      string `json:"ref"`
 	Relation string `json:"relation"`
 }
+
+// UnresolvedRefPrefix marks a citation that named nothing the model was
+// shown. It is kept for audit and never counts as grounding.
+const UnresolvedRefPrefix = "unresolved:"
+
+// Resolved reports whether the ref names a real item.
+func (r ThoughtRef) Resolved() bool { return !strings.HasPrefix(r.Ref, UnresolvedRefPrefix) }
 
 // CapabilityRef records that a step used or considered a capability.
 type CapabilityRef struct {

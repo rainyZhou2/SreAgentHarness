@@ -586,9 +586,13 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	if factsWrite != nil {
 		res.KVWrites = append(res.KVWrites, *factsWrite)
 	}
-	res.Thoughts, res.Capabilities = reasonTrace(decision, in, lease.TenantID)
+	var unresolvedRefs int
+	res.Thoughts, res.Capabilities, unresolvedRefs = reasonTrace(decision, in, lease.TenantID)
 	summary := map[string]any{"decision_kind": decision.Kind, "intent": decision.Intent, "reason_summary": truncate(decision.ReasonSummary, 500),
 		"hypotheses": len(decision.Hypotheses), "thoughts": len(res.Thoughts), "capabilities": len(res.Capabilities)}
+	if unresolvedRefs > 0 {
+		summary["unresolved_refs"] = unresolvedRefs
+	}
 	if decision.ModelRequestID != "" {
 		summary["model_request_id"], summary["model"], summary["manifest_ref"] = decision.ModelRequestID, decision.Model, decision.ManifestRef
 	}
@@ -1042,10 +1046,20 @@ func (w *Worker) messageText(ctx context.Context, tenantID string, m domain.Mess
 	return string(data)
 }
 
-func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string) ([]domain.Thought, []domain.CapabilityRef) {
+// reasonTrace renders a decision as stored thoughts. Citations are resolved
+// against what the request showed the model; unresolved ones are kept,
+// marked, and counted in the returned total.
+func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string) ([]domain.Thought, []domain.CapabilityRef, int) {
 	var out []domain.Thought
 	var caps []domain.CapabilityRef
 	seq := 0
+	refSet := cognitive.NewRefSet(in)
+	unresolved := 0
+	resolve := func(raws []string, relation string) []domain.ThoughtRef {
+		refs, n := refSet.ResolveRefs(raws, relation)
+		unresolved += n
+		return refs
+	}
 	next := func(kind domain.ThoughtKind, summary string, status domain.ThoughtStatus, confidence float64, refs []domain.ThoughtRef) {
 		if strings.TrimSpace(summary) == "" {
 			return
@@ -1058,10 +1072,7 @@ func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string
 	for _, m := range in.Memories {
 		memoryRefs = append(memoryRefs, domain.ThoughtRef{Ref: fmt.Sprintf("memory:%s@%d", m.ID, m.Version), Relation: "based_on"})
 	}
-	var evidenceRefs []domain.ThoughtRef
-	for _, ref := range d.EvidenceRefs {
-		evidenceRefs = append(evidenceRefs, domain.ThoughtRef{Ref: ref, Relation: "supports"})
-	}
+	evidenceRefs := resolve(d.EvidenceRefs, "supports")
 	if d.Thought != nil {
 		next(domain.ThoughtPlan, d.Thought.Plan, domain.ThoughtUnknown, d.Thought.Confidence, memoryRefs)
 	}
@@ -1074,13 +1085,7 @@ func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string
 		case string(domain.ThoughtRefuted):
 			status = domain.ThoughtRefuted
 		}
-		var refs []domain.ThoughtRef
-		for _, ref := range h.Supports {
-			refs = append(refs, domain.ThoughtRef{Ref: ref, Relation: "supports"})
-		}
-		for _, ref := range h.Refutes {
-			refs = append(refs, domain.ThoughtRef{Ref: ref, Relation: "refutes"})
-		}
+		refs := append(resolve(h.Supports, "supports"), resolve(h.Refutes, "refutes")...)
 		n := len(out)
 		next(domain.ThoughtHypothesis, h.Statement, status, h.ConfidenceEstimate, refs)
 		if id := strings.TrimSpace(h.ID); id != "" && len(out) > n {
@@ -1120,7 +1125,7 @@ func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string
 	for _, s := range in.Skills {
 		caps = append(caps, domain.CapabilityRef{Ref: cognitive.SkillRef(tenantID, s), Role: "considered"})
 	}
-	return out, caps
+	return out, caps, unresolved
 }
 
 func toolTrace(name string, d tools.Descriptor, ok bool) ([]domain.Thought, []domain.CapabilityRef) {

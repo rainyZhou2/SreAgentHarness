@@ -29,6 +29,14 @@ type Summary struct {
 	// the share of them that carried a confidence (pooled).
 	Settled             int     `json:"settled_hypotheses"`
 	CalibrationCoverage float64 `json:"calibration_coverage"`
+	// Citations pools the citations of all runs; CitationValidity is the
+	// resolved share. UnsupportedVerdictRate is the share of settled
+	// hypotheses without a resolved citation; UnsupportedConclusionRate
+	// the share of runs whose VERIFIED conclusion cited nothing resolved.
+	Citations                 int     `json:"citations"`
+	CitationValidity          float64 `json:"citation_validity"`
+	UnsupportedVerdictRate    float64 `json:"unsupported_verdict_rate"`
+	UnsupportedConclusionRate float64 `json:"unsupported_conclusion_rate"`
 	// Plan aggregates the planned runs (nil: none was planned).
 	Plan *PlanSummary `json:"plan,omitempty"`
 }
@@ -42,8 +50,14 @@ func Summarize(ms []Metrics) Summary {
 	}
 	var quality, brier, stepsV, structured float64
 	var claims, grounded, calls, redundant, verified, unverified, verdictRuns, noVerdict, success, correct int
-	var calibrated int
+	var calibrated, unresolved, unsupportedVerdicts, unsupportedConclusions int
 	for _, m := range ms {
+		s.Citations += m.Citations
+		unresolved += m.Unresolved
+		unsupportedVerdicts += m.UnsupportedVerdicts
+		if m.UnsupportedConclusion {
+			unsupportedConclusions++
+		}
 		quality += m.Quality
 		structured += m.Structured
 		s.Settled += m.Verified + m.Refuted
@@ -56,10 +70,12 @@ func Summarize(ms []Metrics) Summary {
 		grounded += m.Grounded
 		calls += m.ToolCalls
 		redundant += m.RedundantCalls
-		switch m.Conclusion {
-		case "VERIFIED":
+		switch {
+		case m.VerifiedConclusion():
 			verified++
-		case "UNVERIFIED":
+		case m.Conclusion == "VERIFIED":
+			unverified++ // self-declared, counted as unverified
+		case m.Conclusion == "UNVERIFIED":
 			unverified++
 		}
 		if m.StepsToVerdict > 0 {
@@ -105,6 +121,14 @@ func Summarize(ms []Metrics) Summary {
 	if s.Settled > 0 {
 		s.CalibrationCoverage = round(float64(calibrated) / float64(s.Settled))
 	}
+	s.CitationValidity = 1
+	if s.Citations > 0 {
+		s.CitationValidity = round(float64(s.Citations-unresolved) / float64(s.Citations))
+	}
+	if s.Settled > 0 {
+		s.UnsupportedVerdictRate = round(float64(unsupportedVerdicts) / float64(s.Settled))
+	}
+	s.UnsupportedConclusionRate = round(float64(unsupportedConclusions) / n)
 	s.Plan = SummarizePlans(ms)
 	return s
 }
@@ -136,6 +160,11 @@ type GateConfig struct {
 	// other checks depend on (0 = default 0.10).
 	MaxStructuredDrop float64 `json:"max_structured_drop,omitempty"`
 	MaxCoverageDrop   float64 `json:"max_coverage_drop,omitempty"`
+	// MaxCitationValidityDrop and MaxUnsupportedIncrease guard citation
+	// checks (0 = default 0.10): the resolved share of citations, and the
+	// share of settled hypotheses and conclusions without one.
+	MaxCitationValidityDrop float64 `json:"max_citation_validity_drop,omitempty"`
+	MaxUnsupportedIncrease  float64 `json:"max_unsupported_increase,omitempty"`
 	// Plan bounds planning regressions (zero values: DefaultPlanGate).
 	Plan PlanGateConfig `json:"plan,omitempty"`
 }
@@ -177,6 +206,22 @@ func Gate(base, cand Summary, cfg GateConfig) []string {
 	// Coverage is only comparable when both sides settled hypotheses.
 	if base.Settled > 0 && cand.Settled > 0 && base.CalibrationCoverage-cand.CalibrationCoverage > cd {
 		f = append(f, fmt.Sprintf("confidence coverage dropped: %.3f → %.3f", base.CalibrationCoverage, cand.CalibrationCoverage))
+	}
+	vd, ui := cfg.MaxCitationValidityDrop, cfg.MaxUnsupportedIncrease
+	if vd <= 0 {
+		vd = 0.10
+	}
+	if ui <= 0 {
+		ui = 0.10
+	}
+	if base.Citations > 0 && cand.Citations > 0 && base.CitationValidity-cand.CitationValidity > vd {
+		f = append(f, fmt.Sprintf("citation validity dropped: %.3f → %.3f", base.CitationValidity, cand.CitationValidity))
+	}
+	if base.Settled > 0 && cand.Settled > 0 && cand.UnsupportedVerdictRate-base.UnsupportedVerdictRate > ui {
+		f = append(f, fmt.Sprintf("unsupported verdicts rose: %.3f → %.3f", base.UnsupportedVerdictRate, cand.UnsupportedVerdictRate))
+	}
+	if cand.UnsupportedConclusionRate-base.UnsupportedConclusionRate > ui {
+		f = append(f, fmt.Sprintf("unsupported conclusions rose: %.3f → %.3f", base.UnsupportedConclusionRate, cand.UnsupportedConclusionRate))
 	}
 	return append(f, PlanGate(base.Plan, cand.Plan, cfg.Plan)...)
 }

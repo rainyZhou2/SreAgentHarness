@@ -145,7 +145,7 @@ func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) 
 			res.Error = err.Error()
 			return res
 		}
-		trace.Steps = append(trace.Steps, reasoning.Step{Seq: int64(step * 2), Reason: true, Thoughts: reasoning.DecisionThoughts(d)})
+		trace.Steps = append(trace.Steps, reasoning.Step{Seq: int64(step * 2), Reason: true, Thoughts: reasoning.ResolvedDecisionThoughts(d, cognitive.NewRefSet(in).Resolve)})
 		if d.Kind == domain.DecisionFinal {
 			res.Completed, res.Answer = true, d.Answer
 			g := r.Grader

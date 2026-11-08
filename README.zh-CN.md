@@ -175,6 +175,7 @@ docker compose -f deploy/docker-compose.yml up --build
 对 agent 显式的决策轨迹（计划、带置信度的假设、校验）做打分、复用和改进；从不读取模型提供方隐藏的推理。设计文档：`docs/superpowers/specs/2026-11-07-reasoning-quality-and-self-improvement-design.md`。
 
 - **量化**：每个结束的 run 由 consolidator 打分，收到反馈后重新打分。指标包括：校准度（以 VERIFIED/REFUTED 结束的假设的 Brier 分数）、证据支撑率、重复工具调用、到首个结论的步数、最终校验结论和综合质量分。离线回放用同一套打分；若候选版本在 holdout 上的校准度、证据支撑率、冗余率或质量分退化，发布门禁直接不通过。
+- **引用校验**：每条 observation 头都带有自己的引用 `obs:step<N>`，证据为 `kv:<key>@<v>`，记忆为 `memory:<id>@<v>`。kernel 会把 `supports`、`refutes`、`evidence_refs` 中的每条引用与本次请求实际给模型看的内容对照解析（`obs:4`、`obs:<tool>`、offload handle 等别名会归一为标准形式）。指向不存在内容的引用存为 `unresolved:<原文>`，不计入证据支撑。没有有效引用就被判为 VERIFIED/REFUTED 的假设记为无据结论；VERIFIED 结论如果 verification 和已证实的假设都没有有效引用，视为模型自封：打分和统计按未验证处理，不算成功，也不会被提炼成模式。引用有效率、无据假设率和无据结论率会汇总进 summary，纳入发布门禁和金丝雀门禁，并在改进循环中触发 `citation` playbook 提示。
 - **复用**：已完成、未被反馈否定且校验结论为 VERIFIED 的 run，会被提炼为*推理模式*，即一条 procedural 记忆。内容是按顺序检验过的假设及各自结论，以及得出首个结论前用到的工具。它走正常的记忆生命周期（CANDIDATE → 审批 → ACTIVE），每条模式都要人工激活。每条记忆的成功率和 Wilson 下界，按检索过它的 run 统计。
 - **模式效果**：按同一服务中没用到该模式的 run 的成功率作为基线来比较，而不是用绝对成功率。模型显式引用（evidence 或假设 refs 里的 `memory:<id>`）的样本足够时，以引用为准。比基线显著且明显更差的模式会被排除。被排除的模式仍按 `reasoning.pattern_probe_rate`（上限 0.2）确定性地放给一小部分 run，这些 run 达到基线就恢复。已失效的条目会被清掉；列表到 500 条上限时，只保留证据最强的。运维人员也可以手动提议排除或恢复。
 - **轨迹结构**：假设带稳定 `id`，换个说法也按同一个算。置信度覆盖率和结构化比例纳入度量、门禁和诊断；已定论但没给置信度的假设按 0.5 预测计。
