@@ -162,6 +162,7 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 	} else if snapshotID, err = s.pinSnapshot(ctx, r, step); err != nil {
 		return domain.Lease{}, nil, err
 	}
+	readyAt := domain.StepReadyAt(step)
 	if _, err := r.tx.Exec(ctx, `UPDATE agent_steps SET status='RUNNING', current_attempt=$2, context_snapshot_id=$3,
 		next_attempt_at=NULL, updated_at=now() WHERE id=$1`, step.ID, attemptNo, snapshotID); err != nil {
 		return domain.Lease{}, nil, err
@@ -186,6 +187,7 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 		GoalRef: r.run.GoalRef, ContextSnapshotID: snapshotID, IdempotencyKey: idemKey, Intent: intent,
 		ProfileID: r.run.ProfileID, ProfileVersion: r.run.ProfileVersion,
 		ParentRunID: deref(r.run.ParentRunID), ParentStepID: deref(r.run.ParentStepID), FlowDepth: r.run.FlowDepth,
+		ReadyAt: readyAt,
 	}, nil, nil
 }
 

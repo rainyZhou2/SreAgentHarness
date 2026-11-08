@@ -113,6 +113,7 @@ func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.
 	r.LeaseOwner, r.LeaseUntil, r.NotBefore = &workerID, &until, nil
 	r.Status = domain.RunRunning
 	r.Version++
+	readyAt := domain.StepReadyAt(*target)
 	target.Status = domain.StepRunning
 	target.CurrentAttempt++
 	target.UpdatedAt = now()
@@ -131,7 +132,8 @@ func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.
 		InputRef: target.InputRef, InputHash: target.InputHash, GoalRef: r.GoalRef,
 		ContextSnapshotID: snapshotID, IdempotencyKey: att.IdempotencyKey, Deadline: until,
 		Intent: intent, ProfileID: r.ProfileID, ProfileVersion: r.ProfileVersion,
-		ParentRunID: deref(r.ParentRunID), ParentStepID: deref(r.ParentStepID), FlowDepth: r.FlowDepth}, nil
+		ParentRunID: deref(r.ParentRunID), ParentStepID: deref(r.ParentStepID), FlowDepth: r.FlowDepth,
+		ReadyAt: readyAt}, nil
 }
 
 func (s *Store) recoverExpiredLocked(r *domain.Run) {

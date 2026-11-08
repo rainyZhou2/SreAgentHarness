@@ -148,6 +148,9 @@ func (r *RefSet) resolveObs(s string) (string, bool) {
 			return ObsRef(n), true
 		}
 		if part > 0 {
+			if n < r.compacted && tool == "" {
+				return ObsPartRef(n, part), true // summarized by compaction
+			}
 			return "", false
 		}
 		if t, shown := r.obs[n]; shown {

@@ -138,6 +138,26 @@ type Config struct {
 	// MaxParallelTools bounds the read-only calls of one response that run
 	// together (0: DefaultMaxParallelTools, 1: one call per step).
 	MaxParallelTools int
+	// ArtifactCacheBytes bounds the worker's cache of immutable artifacts
+	// (0: DefaultArtifactCacheBytes, < 0: off).
+	ArtifactCacheBytes int64
+	// ToolTopK is how many tool schemas the model sees when more tools are
+	// visible (0: DefaultToolTopK, < 0: all); the rest are listed by name
+	// and loaded with harness.load_tools.
+	ToolTopK int
+	// CompactTokens compacts history when the uncompacted tool results
+	// exceed about this many tokens (0: DefaultCompactTokens, < 0: only
+	// the step count applies).
+	CompactTokens int
+	// RoutineModelAlias / EscalatedModelAlias route reasoning calls: the
+	// escalated alias for the first analysis, likely or forced
+	// conclusions, stalls, backtracks and repairs, the routine alias
+	// otherwise ("" keeps the strategy's alias).
+	RoutineModelAlias   string
+	EscalatedModelAlias string
+	// SpeculativeTools starts read-only calls the policy allows while the
+	// model is still streaming; the tool step reuses the result.
+	SpeculativeTools bool
 	// PlanApprovers is the default number of approvals for a generated plan;
 	// R3 plans always require at least two.
 	PlanApprovers int
@@ -266,6 +286,7 @@ type Worker struct {
 	log       *slog.Logger
 	reasonSem chan struct{}
 	toolSem   chan struct{}
+	spec      speculation
 }
 
 func NewWorker(cfg Config, st StateStore, arts artifact.Store, strat cognitive.Strategy, reg *tools.Registry,
@@ -274,9 +295,11 @@ func NewWorker(cfg Config, st StateStore, arts artifact.Store, strat cognitive.S
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Worker{cfg: cfg, store: st, artifacts: arts, strategy: strat, tools: reg, policy: policy.Guarded(pol),
+	w := &Worker{cfg: cfg, store: st, strategy: strat, tools: reg, policy: policy.Guarded(pol),
 		log: log.With("worker", cfg.ID), reasonSem: make(chan struct{}, cfg.MaxReasonInflight),
 		toolSem: make(chan struct{}, cfg.MaxToolInflight)}
+	w.artifacts = newCachedStore(arts, cfg.ArtifactCacheBytes, w.loopEvent)
+	return w
 }
 
 func (w *Worker) ID() string { return w.cfg.ID }
@@ -319,6 +342,10 @@ func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
 	}
 	w.cfg.Observer.ObserveClaim("leased")
 	started := time.Now()
+	st := &execState{}
+	if !lease.ReadyAt.IsZero() && started.After(lease.ReadyAt) {
+		st.phases.add("queue", started.Sub(lease.ReadyAt))
+	}
 	ctx, span := obsTracer().Start(ctx, "step "+string(lease.Kind), trace.WithAttributes(
 		attribute.String("tenant_id", lease.TenantID), attribute.String("run_id", lease.RunID),
 		attribute.String("step_id", lease.StepID), attribute.Int64("step_seq", lease.StepSeq),
@@ -330,6 +357,7 @@ func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
 			outcome = "error"
 		}
 		w.cfg.Observer.ObserveStep(string(lease.Kind), outcome, time.Since(started))
+		w.observePhases(string(lease.Kind), &st.phases)
 		span.SetAttributes(attribute.String("outcome", outcome))
 		if err != nil {
 			span.RecordError(err)
@@ -344,7 +372,6 @@ func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
 	defer cancel()
 	hb := w.startHeartbeat(lease, cancel)
 
-	st := &execState{}
 	res, execErr := w.execute(execCtx, lease, st)
 	hb.stop()
 
@@ -366,13 +393,30 @@ func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
 		f := classify(execErr, st, hb.cancelRequested.Load(), deadline, shutdown)
 		log.Info("step failed", "class", f.Class, "code", f.Code, "err", execErr)
 		outcome = failureOutcome(f.Class)
+		defer st.phases.since("commit", time.Now())
 		return w.store.CommitFailure(commitCtx, lease, f)
 	}
+	res.Summary = withTimings(res.Summary, st.phases.millis())
+	defer st.phases.since("commit", time.Now())
 	return w.store.CommitSuccess(commitCtx, lease, res)
+}
+
+// withTimings adds the step's phase times (ms) to its summary.
+func withTimings(summary json.RawMessage, ms map[string]int64) json.RawMessage {
+	if len(ms) == 0 {
+		return summary
+	}
+	m := map[string]any{}
+	if len(summary) > 0 && json.Unmarshal(summary, &m) != nil {
+		return summary
+	}
+	m["timings_ms"] = ms
+	return mustJSON(m)
 }
 
 type execState struct {
 	dispatched bool // a side-effecting call may have reached the external system
+	phases     phases
 }
 
 func classify(err error, st *execState, cancelRequested, deadline, shutdown bool) domain.StepFailure {
@@ -468,7 +512,7 @@ func (w *Worker) startHeartbeat(lease domain.Lease, cancel context.CancelFunc) *
 func (w *Worker) execute(ctx context.Context, lease domain.Lease, st *execState) (domain.StepSuccess, error) {
 	switch lease.Kind {
 	case domain.StepReason:
-		return w.executeReason(ctx, lease)
+		return w.executeReason(ctx, lease, st)
 	case domain.StepTool:
 		return w.executeTool(ctx, lease, st)
 	case domain.StepFlow:
@@ -555,7 +599,8 @@ func (w *Worker) get(ctx context.Context, tenantID, ref string, v any) error {
 	return json.Unmarshal(data, v)
 }
 
-func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.StepSuccess, error) {
+func (w *Worker) executeReason(ctx context.Context, lease domain.Lease, st *execState) (domain.StepSuccess, error) {
+	mark := time.Now()
 	in, err := w.renderContext(ctx, lease)
 	if err != nil {
 		return domain.StepSuccess{}, err
@@ -571,6 +616,30 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	loops := newLoopState(in.Calls)
 	bud := w.budget(ctx, lease, limits)
 	kernelStop, mustConclude := w.loopAdvisories(&in, bud, loops, limits)
+	stalled := limits.stall > 0 && loops.stall >= limits.stall
+	leader, converged := convergence(in.Ledger)
+	if converged && !in.ForceConclude {
+		// Adaptive stop: the ledger settled before the step budget did.
+		in.Advisories = append(in.Advisories, fmt.Sprintf("Hypothesis %s is VERIFIED with high confidence and no competing hypothesis is open. Conclude now unless one more check could still change the answer.", leader))
+	}
+	// The model sees a stable subset of the tools when there are many; the
+	// kernel still accepts any visible tool.
+	visible := in.Tools
+	if in.FlowNode == nil || len(in.FlowNode.Tools) == 0 {
+		keep := map[string]bool{}
+		for _, c := range in.Calls {
+			name, _, _ := strings.Cut(c.Key, "\x00")
+			keep[name] = true
+		}
+		for _, n := range in.LoadedTools {
+			keep[n] = true
+		}
+		k := w.cfg.ToolTopK
+		if k == 0 {
+			k = DefaultToolTopK
+		}
+		in.Tools, in.MoreTools = selectTools(visible, requestText(in), keep, k)
+	}
 	canon, _ := json.Marshal(in)
 	contextHash := artifact.Hash(canon)
 	in.Call = cognitive.CallScope{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
@@ -596,13 +665,21 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		}
 		strat = ps
 	}
-	if in.FlowNode != nil && in.FlowNode.ModelAlias != "" {
-		if llm, ok := strat.(*cognitive.LLM); ok {
-			copy := *llm
-			copy.Alias = in.FlowNode.ModelAlias
-			strat = &copy
-		}
+	routed := in.FlowNode != nil && in.FlowNode.ModelAlias != ""
+	if routed {
+		strat = withAlias(strat, in.FlowNode.ModelAlias)
 	}
+	base := strat
+	tier := ""
+	pick := func() {
+		if routed {
+			return
+		}
+		alias, why := w.modelAlias(in, stalled, converged)
+		strat, tier = withAlias(base, alias), why
+	}
+	in.OnToolCall = w.speculator(ctx, lease, rules, in, visible, loops, limits)
+	mark = st.phases.since("context", mark)
 	var decision domain.Decision
 	var repairs []string
 	if kernelStop != "" {
@@ -610,10 +687,11 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		decision = kernelConclusion(in, kernelStop)
 	} else {
 		for {
+			pick()
 			decision, err = strat.Decide(ctx, in)
 			problem := repairProblem(decision, err)
 			if problem == "" && err == nil {
-				problem = unknownToolProblem(decision, in.Tools)
+				problem = unknownToolProblem(decision, visible)
 			}
 			if problem == "" || len(repairs) >= DefaultMaxOutputRepairs || ctx.Err() != nil {
 				break
@@ -621,12 +699,14 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 			// Tell the model what was wrong instead of re-asking blindly.
 			repairs = append(repairs, truncate(problem, 300))
 			in.Repair = problem
+			w.loopEvent("repair")
 		}
 		if err == nil && w.cfg.ConclusionSamples > 1 && cognitive.Validate(decision) == nil {
 			decision = cognitive.SelfConsistency(ctx, strat, in, decision, w.cfg.ConclusionSamples)
 		}
 	}
 	<-w.reasonSem
+	mark = st.phases.since("model", mark)
 	if err != nil {
 		return domain.StepSuccess{}, err
 	}
@@ -675,6 +755,26 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	}
 	if kernelStop != "" {
 		summary["kernel_stop"] = kernelStop
+		w.loopEvent("kernel_stop")
+	}
+	if tier != "" {
+		summary["model_tier"] = tier
+		w.loopEvent("model_" + strings.SplitN(tier, ":", 2)[0])
+	}
+	if converged {
+		summary["converged"] = leader
+		w.loopEvent("converged")
+	}
+	if len(in.MoreTools) > 0 {
+		summary["tools_shown"], summary["tools_more"] = len(in.Tools), len(in.MoreTools)
+	}
+	for _, a := range in.Advisories {
+		switch {
+		case strings.HasPrefix(a, "Run budget"):
+			w.loopEvent("budget_notice")
+		case strings.Contains(a, "brought nothing new"):
+			w.loopEvent("stall_notice")
+		}
 	}
 	if decision.ModelRequestID != "" {
 		summary["model_request_id"], summary["model"], summary["manifest_ref"] = decision.ModelRequestID, decision.Model, decision.ManifestRef
@@ -689,6 +789,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 			// A kernel stop is already marked unverified; reviewing it would
 			// spend what the stop protects.
 			review, err = w.reviewConclusion(ctx, lease, in, decision)
+			st.phases.since("review", mark)
 			if err != nil {
 				return domain.StepSuccess{}, err
 			}
@@ -716,6 +817,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		if kernelStop != "" {
 			result["stopped"] = kernelStop
 		}
+		result["loop"] = map[string]any{"steps": lease.StepSeq, "model_requests": bud.usage.Requests,
+			"input_tokens": bud.usage.InputTokens, "output_tokens": bud.usage.OutputTokens,
+			"cost_usd": float64(bud.usage.CostMicros) / 1e6}
 		if rep := review.report; rep != nil {
 			result["independent_verification"] = rep
 			summary["independent_verdict"] = rep.Verdict
@@ -747,6 +851,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		}
 		res.Plan = []domain.PlannedStep{step, nextReason}
 		summary["tool"], summary["loop_guard"] = call.Name, why
+		w.loopEvent("loop_guard")
 		if n := len(decision.DeferredToolCalls); n > 0 {
 			summary["deferred_not_run"] = n
 		}
@@ -773,7 +878,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	}
 	if pd.Verdict == policy.Allow && len(decision.DeferredToolCalls) > 0 {
 		// Independent read-only calls of the same response run together.
-		calls, notes := w.planBatch(ctx, lease, rules, in, call, desc, decision.DeferredToolCalls, limits, loops)
+		calls, notes := w.planBatch(ctx, lease, rules, in, visible, call, desc, decision.DeferredToolCalls, limits, loops)
 		if bt, ok := w.tools.LookupFor(lease.TenantID, BatchToolName); ok && len(calls) > 1 {
 			bcall := domain.ToolCall{Name: BatchToolName, Args: mustJSON(batchArgs{Calls: calls}),
 				Followup: &domain.ToolFollowup{Role: domain.FollowupBatch, OfTool: call.Name, OfStep: lease.StepSeq}}
@@ -787,6 +892,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 			pd = policy.Decision{Verdict: policy.Allow, Reason: fmt.Sprintf("read-only batch of %d calls, each allowed", len(calls))}
 			call = bcall
 			summary["batch"] = len(calls)
+			w.loopEvent("batch")
 		} else if len(calls) > 1 {
 			notes = deferredNotes(decision.DeferredToolCalls, "parallel batches are not available")
 		}
@@ -930,6 +1036,9 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 			var o domain.Observation
 			if err := w.get(ctx, lease.TenantID, *s.OutputRef, &o); err != nil {
 				return in, err
+			}
+			if call.Name == LoadToolsName && o.Outcome != "error" {
+				in.LoadedTools = append(in.LoadedTools, loadedTools(o.Content)...)
 			}
 			obs.Outcome, obs.Content = "ok", o.Content
 			if o.Outcome != "" {
@@ -1085,7 +1194,10 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	sideEffect := desc.Risk.HasSideEffects()
 
 	if call.Name == BatchToolName {
-		return w.executeBatch(ctx, lease, rules, call, plan)
+		toolStart := time.Now()
+		res, err := w.executeBatch(ctx, lease, rules, call, plan)
+		st.phases.since("tool", toolStart)
+		return res, err
 	}
 
 	if call.Followup != nil && call.Followup.Role == domain.FollowupVerify {
@@ -1142,8 +1254,18 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		InputRef: lease.InputRef, Deadline: lease.Deadline})
 	callCtx, span := obsTracer().Start(callCtx, "tool "+call.Name, trace.WithAttributes(
 		attribute.String("tool", call.Name), attribute.String("risk", string(desc.Risk)), attribute.String("source", desc.Source)))
-	out, err := tool.Invoke(callCtx, lease.IdempotencyKey, call.Args)
+	toolStart := time.Now()
+	var out json.RawMessage
+	specOK := false
+	if call.Followup == nil {
+		// Started while the model was still streaming.
+		out, specOK = w.takeSpeculative(ctx, lease, desc, call.Name, call.Args)
+	}
+	if !specOK {
+		out, err = tool.Invoke(callCtx, lease.IdempotencyKey, call.Args)
+	}
 	<-w.toolSem
+	st.phases.since("tool", toolStart)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "tool error")
@@ -1209,6 +1331,9 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 			summary["lifecycle"] = note
 		}
 		plan = withVerify(plan, vstep)
+	}
+	if !sideEffect {
+		plan = w.withTokenCompaction(ctx, lease, plan, len(obs.Content))
 	}
 	thoughts, caps := toolTrace(call.Name, desc, true)
 	return domain.StepSuccess{OutputRef: ref, OutputHash: h, ArtifactKind: "observation", SideEffect: sideEffect,

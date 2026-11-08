@@ -81,6 +81,21 @@ type ReasoningInput struct {
 	// Calls are the run's earlier tool calls, for the kernel's loop guard
 	// (not rendered).
 	Calls []CallRecord `json:"-"`
+	// LoadedTools are tools the agent loaded with harness.load_tools.
+	LoadedTools []string `json:"-"`
+	// MoreTools are visible tools whose schemas are not sent this step;
+	// the model loads them by name.
+	MoreTools []ToolHint `json:"more_tools,omitempty"`
+	// OnToolCall, when set, is called as each complete tool call arrives in
+	// the model's stream (the kernel starts eligible read-only calls
+	// early). It must not block.
+	OnToolCall func(name string, args json.RawMessage) `json:"-"`
+}
+
+// ToolHint names a tool whose schema is not in the request.
+type ToolHint struct {
+	Name    string `json:"name"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // CallRecord is one earlier tool call of the run.

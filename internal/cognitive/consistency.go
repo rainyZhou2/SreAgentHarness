@@ -143,6 +143,9 @@ func (a conclusionKey) describe() string {
 	return a.verdict + ": " + s
 }
 
+// Tokens is tokenSet for other packages (tool selection).
+func Tokens(s string) map[string]bool { return tokenSet(s) }
+
 // tokenSet splits text into lower-case words; CJK text contributes
 // character bigrams so Chinese statements compare too.
 func tokenSet(s string) map[string]bool {

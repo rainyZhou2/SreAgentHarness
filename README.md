@@ -160,6 +160,11 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_RUN_MAX_COST_USD` / `HARNESS_RUN_MAX_TOKENS` | per-run model spend limit (default 0: off); from 80% the agent is told to conclude, at 100% the kernel concludes for it without another model call. A profile's `run_limits` can only tighten them |
 | `HARNESS_LOOP_MAX_REPEATS` / `HARNESS_LOOP_STALL_STEPS` | how often an identical call may run again (default 1, negative: unlimited) and how many tool results without new content trigger the stall notice (default 4; twice that forces a conclusion; negative: off) |
 | `HARNESS_MAX_PARALLEL_TOOLS` | read-only calls of one model response that run together (default 4; 1: one call per step) |
+| `HARNESS_ARTIFACT_CACHE_BYTES` | worker cache of immutable artifacts used to rebuild the agent context (default 64 MiB; negative: off) |
+| `HARNESS_TOOL_TOP_K` | tool schemas the model sees per run when more tools are visible (default 30; negative: all); the rest are listed by name and loaded with `harness.load_tools` |
+| `HARNESS_COMPACT_TOKENS` | compact history when uncompacted tool results exceed about this many tokens (default 16000; negative: step count only) |
+| `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | model alias for routine investigation steps and for the steps that decide the outcome (default: the strategy's alias) |
+| `HARNESS_SPECULATIVE_TOOLS` | start allowed read-only calls while the model is still streaming and reuse the result in the tool step (default `false`) |
 
 Generated plans emit `plan.generated`, `plan.validation_failed`, `plan.repaired`, `plan.fallback`, `plan.approval_requested`, `plan.approved`, `plan.rejected`, `plan.executed`, `plan.injection_suspected`, `plan.replan_requested` and `plan.replanned` events. Planner metrics are exposed on `/metrics`: `harness_plan_total`, `harness_plan_duration_seconds`, `harness_plan_repairs_total`, `harness_plan_validation_failures_total` and `harness_plan_fallback_total`.
 
@@ -175,6 +180,17 @@ See `deploy/harness.example.yaml` for the rest.
 - **Repair feedback**: an unusable response (no parseable tool call, schema-invalid arguments, an invalid decision, an unknown tool) is sent back to the model as a `[correction]` naming the problem (and the available tools) up to twice per attempt before the step retries; repairs are recorded in the step summary.
 - **Loop and stall guard**: an identical call (tool and canonical arguments) that already ran `max_repeats` times, or that was denied, rejected or expired, is not run again: it is recorded as a skipped step whose reason points to the earlier result. After `stall_steps` tool results without new content (repeats, errors, identical output) the agent is told to change approach; after twice that, a further tool call is replaced by a kernel conclusion.
 - Profiles set these per agent under `run_limits` (`max_cost_usd`, `max_tokens`, `max_repeats`, `stall_steps`, `max_parallel_tools`); they can only tighten the process settings.
+
+## Agent loop performance
+
+- **Context rebuild**: each reasoning step rebuilds its context from the run history, which keeps retries deterministic. Artifacts are immutable, so the worker caches the ones it writes and reads (LRU, `HARNESS_ARTIFACT_CACHE_BYTES`); a step reads only what is new. Steps of a run already chain inside one worker (up to 20 before handing back to the queue).
+- **Prompt cache**: the history section only grows between steps, so the request marks a cache breakpoint at its end (in addition to the system/tool prefix); the ledger, notices and instruction follow it. Providers with automatic prefix caching ignore the marker.
+- **Tool selection**: with more than `HARNESS_TOOL_TOP_K` visible tools the model sees a stable subset per run — tools used or loaded in the run, builtins, tools named in the request, then the best word matches with the request — and a `[more tools]` list of the rest, which it loads with `harness.load_tools`. The choice does not change from step to step, so the cached prefix stays valid; any visible tool is still accepted.
+- **Model routing**: with `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` the first analysis, likely or forced conclusions, stalls, the step after a rejected conclusion and repairs use the escalated alias, the other steps the routine one (`model_tier` in the step summary). A flow node's own alias takes precedence.
+- **Adaptive stop**: when the ledger settles (a VERIFIED hypothesis at ≥ 0.8 and no competing hypothesis open) the agent is advised to conclude, before the step budget or the stall guard would intervene.
+- **Token-budget compaction**: besides every N tool steps, history is compacted when the uncompacted results exceed `HARNESS_COMPACT_TOKENS` (then all but the newest result are folded). The default compactor (`deterministic-v2`) writes one line per result led by its citable ref and renders large JSON objects as their top-level fields; compacted refs, including batch parts, stay citable.
+- **Speculative read-only calls** (`HARNESS_SPECULATIVE_TOOLS`): as each tool call completes in the model's stream, a call that is visible, read-only, allowed without approval and not a repeat starts at once; the tool step that runs the same call (same version, risk and arguments) takes the result. Unused results expire after two minutes; side-effecting calls are never started early.
+- **Observability**: every step summary carries `timings_ms` (queue, context, model, review, tool), exported as `harness_step_phase_seconds{kind,phase}` together with commit time; `harness_agent_loop_events_total{event}` counts repairs, loop guards, notices, batches, convergence, routing, compaction, speculation and artifact-cache hits. The run result carries `loop` (steps, model requests, tokens, cost).
 
 ## Triggers, policy rules and the action loop
 
