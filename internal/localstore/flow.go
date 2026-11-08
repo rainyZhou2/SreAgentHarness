@@ -22,6 +22,14 @@ func (s *Store) applyFlowLocked(parent *domain.Run, lease domain.Lease, fc *doma
 	if !ok {
 		fl = domain.FlowSnapshot{ID: key, RunID: parent.ID}
 	}
+	if fc.Generation < fl.Generation {
+		return fmt.Errorf("flow commit for generation %d is older than the stored flow", fc.Generation)
+	}
+	if fc.Generation > fl.Generation {
+		// A replan: the new graph starts with no node attempts. Child runs
+		// of the replaced generation stay in the run tree for audit.
+		fl.Generation, fl.Nodes = fc.Generation, nil
+	}
 	fl.CompiledRef, fl.CompiledHash = fc.CompiledRef, fc.CompiledHash
 	if len(fc.State) > 0 {
 		fl.State = append(json.RawMessage(nil), fc.State...)

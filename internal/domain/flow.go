@@ -17,7 +17,10 @@ type FlowSnapshot struct {
 	CurrentNode  string          `json:"current_node"`
 	Depth        int             `json:"depth"`
 	ChildRuns    int             `json:"child_runs"`
-	Nodes        []FlowNodeRun   `json:"nodes"`
+	// Generation is the plan generation the state belongs to; Nodes holds
+	// only that generation's attempts.
+	Generation int           `json:"generation,omitempty"`
+	Nodes      []FlowNodeRun `json:"nodes"`
 }
 
 // FlowNodeRun is one execution attempt of a flow node.

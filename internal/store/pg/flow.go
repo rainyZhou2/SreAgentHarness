@@ -21,9 +21,9 @@ func (s *Store) LoadFlow(ctx context.Context, tenantID, runID string) (domain.Fl
 	var v domain.FlowSnapshot
 	var state []byte
 	err := s.pool.QueryRow(ctx, `SELECT id, run_id, compiled_ref, compiled_hash, state, status,
-		current_node, depth, child_runs FROM flow_runs WHERE tenant_id=$1 AND run_id=$2`,
+		current_node, depth, child_runs, generation FROM flow_runs WHERE tenant_id=$1 AND run_id=$2`,
 		tenantID, runID).Scan(&v.ID, &v.RunID, &v.CompiledRef, &v.CompiledHash, &state,
-		&v.Status, &v.CurrentNode, &v.Depth, &v.ChildRuns)
+		&v.Status, &v.CurrentNode, &v.Depth, &v.ChildRuns, &v.Generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return v, domain.ErrNotFound
 	}
@@ -33,8 +33,9 @@ func (s *Store) LoadFlow(ctx context.Context, tenantID, runID string) (domain.Fl
 	v.State = state
 	rows, err := s.pool.Query(ctx, `SELECT node_id, node_type, attempt, COALESCE(child_run_id::text, ''),
 		status, COALESCE(output_ref, ''), COALESCE(output_hash, ''), COALESCE(error, ''), created_at
-		FROM flow_node_runs WHERE tenant_id=$1 AND flow_run_id=$2 ORDER BY created_at, node_id, attempt`,
-		tenantID, v.ID)
+		FROM flow_node_runs WHERE tenant_id=$1 AND flow_run_id=$2 AND generation=$3
+		ORDER BY created_at, node_id, attempt`,
+		tenantID, v.ID, v.Generation)
 	if err != nil {
 		return v, err
 	}

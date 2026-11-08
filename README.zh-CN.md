@@ -68,6 +68,8 @@ flow:
 
 桌面端不需要手动选择 Profile。自动会话以一个持久的 **plan step** 启动：Planner LLM 通过 `submit_flow` 提交 flow DSL，服务端用 `flow.Compile` 校验、做静态安全与预算分析、按错误自动修复，并把计划固定为 artifact。含副作用或 R2/R3 工具的生成计划会先进入 **plan review** 审批步骤，审批绑定 plan hash；图、输入或工具集变化都会让审批失效。审批通过后才追加 flow step 并执行。模型无法生成合法计划时，回退到配置的 runbook（默认 `sre-diagnosis@8`）或 ReAct。运行中展示生成计划、节点和子 Run 状态，并内联处理计划审批、flow 审批与 `input` 输入门。
 
+Planner 把自己的输入也视为不可信：目标、会话历史、capability 描述以及失败尝试的节点输出都包在 `<<<DATA>>>` 边界内，并中和聊天模板控制符；工具描述来自插件和租户 MCP，看起来像注入指令的描述会同时从 prompt 和工具 schema 中移除。只要发现可疑输入，就记录在计划上，并强制生成的 flow 走计划审批，即使 `HARNESS_PLAN_APPROVAL=never`。生成的 flow 失败时不会立刻让 Run 失败：最多 `HARNESS_PLAN_MAX_REPLANS` 次，Planner 会拿到失败原因、已执行节点和已完成的副作用重新规划，新计划作为新的 flow generation 执行（全新状态与子 Run；失败的 generation 保留用于审计；plan hash 绑定 generation，旧审批不能复用）。
+
 ## 设计上比较满意的地方
 
 - **数据库是唯一真相，推送只是加速**：断线、丢消息、副本故障都不会造成状态不一致。
@@ -135,13 +137,14 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_PLANNER_MAX_REPAIRS` / `_MAX_NODES` | 计划修复次数与计划节点上限 |
 | `HARNESS_PLAN_APPROVAL` | `auto`（默认）/ `always` / `never`；`auto` 对含写操作的生成计划要求审批 |
 | `HARNESS_PLAN_APPROVERS` | 计划审批人数；R3 计划至少 2 人 |
+| `HARNESS_PLAN_MAX_REPLANS` | 生成的 flow 失败后在同一 Run 内重新规划的次数（默认 1，负数关闭）；新计划能看到已执行的节点和已完成的副作用，并作为新的 flow generation 执行 |
 | `HARNESS_PLANNER_MAX_CHILDREN` / `_TOTAL_RUNS` / `_DEPTH` / `_ITERATIONS` | 生成图的并行、总 Run、嵌套与循环上限 |
 | `HARNESS_PLANNER_MAX_MODEL_CALLS` / `_MAX_ESTIMATED_TOKENS` | 静态模型调用数与输出 Token 上限 |
 | `HARNESS_OUTPUT_OFFLOAD_BYTES` | 超过该大小的工具结果落盘并摘要，模型通过 `harness.artifact_query` 按需查询（默认 24576，负数关闭） |
 | `HARNESS_CONTEXT_PROVIDER_TIMEOUT` / `HARNESS_CONTEXT_MAX_FACTS` | 环境事实 provider 的单个超时与事实条数上限 |
 | `HARNESS_PLANNER_REACT_PATTERNS` / `_FLOW_PATTERNS` | 规划失败时的路由正则，`\|\|` 分隔；`none` 关闭该列表 |
 
-生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
+生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
 计划数据集会记录 plan artifact、分析结果、flow 状态、审批、结果、耗时与成本。`POST /v1/eval/datasets/{id}/plan-cases` 录入已结束的 Run，`POST /v1/eval/plan-runs` 离线回放冻结的数据集，并按变体（`react`、`fallback_flow`、`generated_flow`、`profile_flow`）汇总成功率、安全性、回放完成率、步数、耗时与成本。
 

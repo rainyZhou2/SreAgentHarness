@@ -31,6 +31,9 @@ type planArtifact struct {
 	Repairs          int               `json:"repairs,omitempty"`
 	ValidationErrors []string          `json:"validation_errors,omitempty"`
 	Fallback         bool              `json:"fallback,omitempty"`
+	// Generation is 0 for the first plan and n for the nth replan.
+	Generation int                     `json:"generation,omitempty"`
+	Injection  []planner.InjectionFlag `json:"injection,omitempty"`
 }
 
 // executePlan turns one goal into either a generated flow step or a normal
@@ -44,6 +47,18 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 	rules, err := w.rules(ctx, lease)
 	if err != nil {
 		return domain.StepSuccess{}, err
+	}
+	// A replan step points at the failed generation's summary; an initial
+	// plan step points at the goal.
+	var replan *planner.Replan
+	if lease.InputRef != "" && lease.InputRef != lease.GoalRef {
+		var d replanDoc
+		if err := w.get(ctx, lease.TenantID, lease.InputRef, &d); err != nil {
+			return domain.StepSuccess{}, err
+		}
+		if d.Kind == replanKind {
+			replan = &d.Replan
+		}
 	}
 
 	var history []planner.Message
@@ -89,7 +104,11 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 	}
 
 	if w.cfg.Planner == nil {
-		return w.commitPlan(ctx, lease, planner.Result{Mode: "react", Rationale: "planner is not configured; using ReAct"})
+		res := planner.Result{Mode: "react", Rationale: "planner is not configured; using ReAct"}
+		if replan != nil {
+			res.Generation = replan.Generation
+		}
+		return w.commitPlan(ctx, lease, res)
 	}
 	scope := gw.Scope{
 		TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID, StepAttemptID: lease.AttemptID,
@@ -97,7 +116,7 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 	}
 	res, err := w.cfg.Planner.Plan(ctx, scope, planner.Input{
 		Goal: g.Goal, History: history, Capabilities: capabilities, Tools: visible,
-		AllowTool: allowTool, MaxSteps: rules.MaxSteps, ModeHint: modeHint(g.Context),
+		AllowTool: allowTool, MaxSteps: rules.MaxSteps, ModeHint: modeHint(g.Context), Replan: replan,
 	})
 	if err != nil {
 		return domain.StepSuccess{}, err
@@ -108,7 +127,7 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner.Result) (domain.StepSuccess, error) {
 	planHash := res.PlanHash
 	if planHash == "" {
-		planHash = planner.PlanHash(res.Mode, res.Hash, res.Inputs)
+		planHash = planner.PlanHash(res.Mode, res.Hash, res.Inputs, res.Generation)
 	}
 	needsReview := res.NeedsReview
 	switch strings.ToLower(w.cfg.PlanApprovalMode) {
@@ -120,6 +139,11 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 		if res.Analysis != nil && res.Analysis.RequiresReview {
 			needsReview = true
 		}
+	}
+	// Suspected injection in the planner's inputs always puts a human in
+	// front of the generated graph, even when plan approval is disabled.
+	if len(res.Injection) > 0 {
+		needsReview = true
 	}
 	if res.Mode != "flow" {
 		needsReview = false
@@ -133,6 +157,12 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 		"model_request_id": res.ModelRequestID, "manifest_ref": res.ManifestRef, "response_ref": res.ResponseRef,
 		"repairs": res.Repairs, "validation_errors": res.ValidationErrors, "fallback": res.Fallback,
 		"plan_hash": planHash, "needs_review": needsReview, "review_risk": reviewRisk,
+	}
+	if res.Generation > 0 {
+		art["generation"] = res.Generation
+	}
+	if len(res.Injection) > 0 {
+		art["injection"] = res.Injection
 	}
 	if res.Analysis != nil {
 		art["analysis"] = res.Analysis
@@ -158,6 +188,9 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 		"repairs": res.Repairs, "fallback": res.Fallback, "plan_hash": planHash,
 		"needs_review": needsReview,
 	}
+	if res.Generation > 0 {
+		summary["generation"] = res.Generation
+	}
 	if res.Analysis != nil {
 		summary["risk"] = res.Analysis.HighestRisk
 		summary["side_effects"] = res.Analysis.SideEffects
@@ -181,7 +214,8 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 	thought := domain.Thought{
 		Kind: domain.ThoughtPlan, Summary: rationale, DetailRef: ref, Status: domain.ThoughtOK, Structured: true,
 		Attrs: map[string]any{"mode": res.Mode, "flow_hash": res.Hash, "plan_hash": planHash,
-			"repairs": res.Repairs, "fallback": res.Fallback, "needs_review": needsReview},
+			"repairs": res.Repairs, "fallback": res.Fallback, "needs_review": needsReview,
+			"generation": res.Generation},
 	}
 	events := []domain.EmittedEvent{{Type: "plan.generated", Payload: summary}}
 	if len(res.ValidationErrors) > 0 {
@@ -195,6 +229,18 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 	if res.Fallback {
 		events = append(events, domain.EmittedEvent{Type: "plan.fallback", Payload: map[string]any{
 			"mode": res.Mode, "flow_hash": res.Hash}})
+	}
+	if res.Generation > 0 {
+		events = append(events, domain.EmittedEvent{Type: "plan.replanned", Payload: map[string]any{
+			"generation": res.Generation, "mode": res.Mode, "plan_hash": planHash}})
+	}
+	if len(res.Injection) > 0 {
+		sources := make([]string, len(res.Injection))
+		for i, f := range res.Injection {
+			sources[i] = f.Source
+		}
+		events = append(events, domain.EmittedEvent{Type: "plan.injection_suspected", Payload: map[string]any{
+			"sources": sources, "mode": res.Mode, "plan_hash": planHash, "needs_review": needsReview}})
 	}
 
 	var plan []domain.PlannedStep
@@ -295,12 +341,12 @@ func (w *Worker) executePlanReview(ctx context.Context, lease domain.Lease) (dom
 	}
 	planHash := plan.PlanHash
 	if planHash == "" {
-		planHash = planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input)
+		planHash = planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input, plan.Generation)
 	}
 	if planHash != lease.InputHash {
 		return domain.StepSuccess{}, fmt.Errorf("plan changed after approval: approved %s, found %s", lease.InputHash, planHash)
 	}
-	if got := planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input); got != planHash {
+	if got := planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input, plan.Generation); got != planHash {
 		return domain.StepSuccess{}, fmt.Errorf("plan artifact content does not match plan hash %s", planHash)
 	}
 	if lease.Intent.InputHash != planHash {

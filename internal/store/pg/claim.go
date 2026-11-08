@@ -195,7 +195,7 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 func (s *Store) flowChildrenReady(ctx context.Context, r *runTx) (bool, error) {
 	var pending int
 	err := r.tx.QueryRow(ctx, `SELECT count(*) FROM flow_node_runs n
-		JOIN flow_runs f ON f.id = n.flow_run_id AND f.tenant_id = n.tenant_id
+		JOIN flow_runs f ON f.id = n.flow_run_id AND f.tenant_id = n.tenant_id AND n.generation = f.generation
 		WHERE f.tenant_id=$1 AND f.run_id=$2 AND n.status IN ('PENDING','RUNNING')`,
 		r.run.TenantID, r.run.ID).Scan(&pending)
 	return pending == 0, err
