@@ -11,9 +11,11 @@ import (
 	"sort"
 
 	"go-sre-harness/internal/envctx"
+	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/trigger"
+	"go-sre-harness/internal/workengine"
 )
 
 // LocalFile is the optional desktop configuration
@@ -38,6 +40,12 @@ type LocalFile struct {
 	// list.
 	PlannerReactPatterns []string `json:"planner_react_patterns,omitempty"`
 	PlannerFlowPatterns  []string `json:"planner_flow_patterns,omitempty"`
+	// Work configures the v2 control plane (HARNESS_WORK_ENGINE_ENABLED):
+	// templates and correlation rules.
+	Work workengine.Config `json:"work,omitempty"`
+	// WorkExtensions enables compiled-in work_extension plugins (action
+	// executors, metric sources, simulators).
+	WorkExtensions plugin.Specs `json:"work_extensions,omitempty"`
 }
 
 // loadLocalFile reads the configuration. A missing default file is not an

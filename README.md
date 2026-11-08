@@ -236,6 +236,10 @@ The agent's explicit decision trace (plan, hypotheses with confidence, verificat
 
 The desktop runtime reads the same sections (`policy`, `triggers`, `context_providers`, `tool_overlays`) from `harness.local.json` in its data directory, or from `HARNESS_LOCAL_CONFIG`.
 
+## Continuous Works (v2 control plane)
+
+Behind `HARNESS_WORK_ENGINE_ENABLED`, a **Work** is a durable goal that spans many runs: events are deduplicated and correlated into Works, durable watches wait for events and timers, actions are planned against a bitemporal world state, held for approval bound to an intent hash, dispatched ledger-first and never replayed blindly, and a Work only succeeds with a verified outcome (metrics, world state, events or a human). `HARNESS_EVENT_SHADOW_MODE` (default on) routes events without creating Works; `HARNESS_ACTION_V2_ENABLED` turns on actions. Templates and correlation rules live under `work:` in the config file (`harness.local.json` on the desktop); `work_extension` plugins add action executors and metric sources. Run `scripts/v2/demo.sh` for an offline end-to-end incident on the built-in simulator. Details: [docs/v2-control-plane.md](docs/v2-control-plane.md).
+
 ## Deployment
 
 ```bash
@@ -305,7 +309,7 @@ See `deploy/harness.example.yaml` for the rest.
 
 ## API
 
-`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/v1/reasoning…`, `GET /v1/runs/{id}/attachments/{index}`, `/healthz`, `/metrics`.
+`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/v1/reasoning…`, `GET /v1/runs/{id}/attachments/{index}`, `/healthz`, `/metrics`. With the work engine: `/v1/works…`, `/v1/work-templates`, `/v1/events…`, `/v1/world…`, `/v1/actions…` (see [docs/v2-control-plane.md](docs/v2-control-plane.md)).
 
 ## Tests
 
@@ -313,7 +317,7 @@ See `deploy/harness.example.yaml` for the rest.
 HARNESS_TEST_DATABASE_URL=postgres://localhost/harness_test go test -race ./...
 ```
 
-Database tests are skipped when the variable is unset. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
+Database tests are skipped when the variable is unset. The PostgreSQL store tests (including the v2 control-plane contract tests, which always run on SQLite too) read `HARNESS_PG_TEST_URL`. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout after approval"

@@ -282,6 +282,18 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 
+	work, err := buildLocalWork(ctx, cfg, local, server, pol, metrics)
+	if err != nil {
+		return err
+	}
+	if work != nil {
+		defer work.close()
+		go func() {
+			if err := work.engine.Run(ctx); err != nil && ctx.Err() == nil {
+				cfg.Log.Error("work engine stopped", "err", err)
+			}
+		}()
+	}
 	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		cfg.Log.Info("local harness listening", "addr", cfg.HTTPAddr, "db", cfg.DBPath)

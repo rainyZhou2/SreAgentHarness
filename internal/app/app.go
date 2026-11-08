@@ -39,12 +39,14 @@ import (
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/scheduler"
+	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/stream"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/trigger"
 	"go-sre-harness/internal/verify"
+	"go-sre-harness/internal/workengine"
 	"go-sre-harness/migrations"
 )
 
@@ -157,6 +159,8 @@ type App struct {
 
 	triggerCfgs []trigger.Config
 	triggers    *trigger.Service
+	// work is the v2 control plane (nil unless HARNESS_WORK_ENGINE_ENABLED).
+	work *workengine.Engine
 }
 
 // Build assembles the core and all enabled plugins without starting anything.
@@ -624,6 +628,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			}
 			srv.Extend(&trigger.API{Service: a.triggers})
 		}
+		if err := a.buildWork(ctx, pool, srv, specs); err != nil {
+			return nil, err
+		}
 		active := h.Active()
 		plugins := make([]graph.PluginInfo, 0, len(active))
 		for _, p := range active {
@@ -641,6 +648,17 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			AutoProfileVersion: autoProfileVersion, Log: log, Tools: h.Tools, Policy: h.Policy, Rules: rules.Rules,
 			ResolveProfile: h.Eval.ResolveProfile}
 		if a.triggers, err = trigger.New(a.triggerCfgs, srv, store, log.With("component", "trigger")); err != nil {
+			return nil, err
+		}
+	}
+	if a.work == nil && mode == "scheduler" {
+		// scheduler-only role: the orchestrator starts runs through an API
+		// core without listeners.
+		srv := &api.Server{Store: store, Artifacts: h.Artifacts, DefaultProfile: h.Settings.DefaultProfile,
+			DefaultVersion: h.Settings.DefaultProfileVersion, AutoProfileID: autoProfileID,
+			AutoProfileVersion: autoProfileVersion, Log: log, Tools: h.Tools, Policy: h.Policy, Rules: rules.Rules,
+			ResolveProfile: h.Eval.ResolveProfile}
+		if err := a.buildWork(ctx, pool, srv, specs); err != nil {
 			return nil, err
 		}
 	}
@@ -687,6 +705,14 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		g.Go(func() error {
 			return (&scheduler.Reconciler{Store: a.Store, Interval: e.dur("HARNESS_RECONCILE_INTERVAL", 10*time.Second), Log: log}).Run(ctx)
+		})
+	}
+	if a.work != nil && (mode == "all" || mode == "scheduler") {
+		g.Go(func() error {
+			if err := a.work.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				return fmt.Errorf("work engine: %w", err)
+			}
+			return nil
 		})
 	}
 	if x := a.Host.Extensions; x != nil {
@@ -742,4 +768,28 @@ func (a *App) Run(ctx context.Context) error {
 		g.Go(func() error { <-ctx.Done(); return msrv.Close() })
 	}
 	return g.Wait()
+}
+
+// buildWork assembles the v2 control plane when HARNESS_WORK_ENGINE_ENABLED
+// is set: it shares the PostgreSQL pool, mounts /v1/works, /v1/events,
+// /v1/world and /v1/actions on srv, and its loops run in the all and
+// scheduler roles.
+func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server, specs map[string]plugin.Specs) error {
+	flags := workengine.FlagsFromEnv(a.env)
+	if !flags.Engine {
+		return nil
+	}
+	exts, err := plugin.BuildAll(ctx, plugin.WorkExt, a.Host, specs["work_extension"])
+	if err != nil {
+		return err
+	}
+	eng, err := workengine.New(workengine.Options{Store: cpsql.OpenPostgres(pool), Server: srv, Policy: a.Host.Policy,
+		Extensions: exts, Config: a.Config.Work, Flags: flags, Metrics: a.metrics.Reg, Log: a.log,
+		Owner: workengine.Owner(a.Mode)})
+	if err != nil {
+		return err
+	}
+	srv.Extend(eng.API)
+	a.work = eng
+	return nil
 }
