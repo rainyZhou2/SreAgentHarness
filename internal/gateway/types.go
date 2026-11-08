@@ -40,6 +40,9 @@ type Part struct {
 	ToolName  string          `json:"tool_name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
+	// CacheBreakpoint marks the end of a cacheable message prefix (the
+	// append-only history); providers without explicit caching ignore it.
+	CacheBreakpoint bool `json:"cache_breakpoint,omitempty"`
 }
 
 type Message struct {

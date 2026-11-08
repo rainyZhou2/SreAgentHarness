@@ -349,6 +349,13 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		push(gw.RoleUser, gw.Part{Type: gw.PartText, Text: header + "]\n" + blk.Text + truncated})
 		man.ObservationCursor = o.StepSeq
 	}
+	// [C] only grows between steps of a run: cache up to its end, so the
+	// next step re-reads only the new observation and the dynamic tail.
+	if n := len(msgs); n > 0 {
+		if k := len(msgs[n-1].Parts); k > 0 {
+			msgs[n-1].Parts[k-1].CacheBreakpoint = true
+		}
+	}
 	cj, _ := json.Marshal(msgs)
 	man.SectionHashes["C"] = artifact.Hash(cj)
 
@@ -400,6 +407,19 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		dyn = append(dyn, gw.Part{Type: gw.PartText, Text: text})
 		man.CapabilityMapRef = artifact.Hash([]byte(text))
 		man.SectionHashes["E"] = man.CapabilityMapRef
+	}
+	if len(in.MoreTools) > 0 {
+		var b strings.Builder
+		b.WriteString("[more tools — not loaded this step; call harness.load_tools with their exact names to use them]")
+		for _, t := range in.MoreTools {
+			b.WriteString("\n- " + t.Name)
+			if t.Summary != "" {
+				b.WriteString(": " + t.Summary)
+			}
+		}
+		text := b.String()
+		dyn = append(dyn, gw.Part{Type: gw.PartText, Text: text})
+		man.SectionHashes["M"] = artifact.Hash([]byte(text))
 	}
 	if len(in.Advisories) > 0 {
 		text := "[kernel notice]\n- " + strings.Join(in.Advisories, "\n- ")

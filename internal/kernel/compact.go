@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go-sre-harness/internal/cognitive"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -71,7 +73,7 @@ type DeterministicCompactor struct {
 	MaxBytes int // per-observation body bytes (default 400)
 }
 
-func (DeterministicCompactor) Name() string { return "deterministic-v1" }
+func (DeterministicCompactor) Name() string { return "deterministic-v2" }
 
 func (c DeterministicCompactor) KeepRecent() int {
 	if c.Keep <= 0 {
@@ -91,7 +93,8 @@ func (c DeterministicCompactor) Compact(_ context.Context, in CompactInput) (str
 		b.WriteString("\n")
 	}
 	for _, o := range in.Observations {
-		fmt.Fprintf(&b, "- step %d %s %s → %s", o.StepSeq, o.Tool, compactArgs(o.Args), o.Outcome)
+		// One line per observation, led by its citable ref.
+		fmt.Fprintf(&b, "- %s %s %s → %s", cognitive.ObsPartRef(o.StepSeq, o.Part), o.Tool, compactArgs(o.Args), o.Outcome)
 		// Structured facts first: they must survive the excerpt limit.
 		if v := o.Verification; v != nil {
 			fmt.Fprintf(&b, " [verification %s of %s@step%d after %d attempt(s)", v.Verdict, v.OfTool, v.OfStep, v.Attempts)
@@ -112,6 +115,9 @@ func (c DeterministicCompactor) Compact(_ context.Context, in CompactInput) (str
 		if len(flags) > 0 {
 			fmt.Fprintf(&b, " [%s; excerpt withheld, see step %d output]", untrusted.FlagNote(flags), o.StepSeq)
 			body = ""
+		}
+		if d := jsonDigest(body, max); d != "" {
+			body = d
 		}
 		body = clipBytes(body, max)
 		if body != "" {
@@ -136,6 +142,15 @@ func (w *Worker) executeCompact(ctx context.Context, lease domain.Lease) (domain
 	}
 	c := w.cfg.Compactor
 	keep := c.KeepRecent()
+	if limit := w.compactTokens(); limit > 0 && keep > 1 {
+		size := 0
+		for _, o := range in.Observations {
+			size += len(o.Content)
+		}
+		if size/3 > limit {
+			keep = 1 // over the token budget: fold all but the newest result
+		}
+	}
 	if keep < 1 {
 		keep = 1
 	}
@@ -156,9 +171,9 @@ func (w *Worker) executeCompact(ctx context.Context, lease domain.Lease) (domain
 	for _, o := range old {
 		switch {
 		case o.Outcome != "ok":
-			safety = append(safety, fmt.Sprintf("step %d: %s was NOT executed successfully (%s) %s", o.StepSeq, o.Tool, o.Outcome, o.Note))
+			safety = append(safety, fmt.Sprintf("%s: %s was NOT executed successfully (%s) %s", cognitive.ObsPartRef(o.StepSeq, o.Part), o.Tool, o.Outcome, o.Note))
 		case w.isSideEffecting(o.Tool):
-			safety = append(safety, fmt.Sprintf("step %d: side-effecting %s WAS executed with %s", o.StepSeq, o.Tool, compactArgs(o.Args)))
+			safety = append(safety, fmt.Sprintf("%s: side-effecting %s WAS executed with %s", cognitive.ObsPartRef(o.StepSeq, o.Part), o.Tool, compactArgs(o.Args)))
 		}
 	}
 	if len(safety) > 0 {
@@ -261,6 +276,51 @@ func offloadDigest(content []byte) string {
 	}
 	b, _ := json.Marshal(keep)
 	return string(b)
+}
+
+// jsonDigest renders a JSON object result as its top-level fields: scalars
+// with their values, arrays as their length, objects as their keys. It
+// keeps every field visible within the excerpt limit, where a byte cut
+// would keep only the first ones. "" when body is not a JSON object.
+func jsonDigest(body string, max int) string {
+	if len(body) <= max || !strings.HasPrefix(body, "{") {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(body), &m) != nil || len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v := strings.TrimSpace(string(m[k]))
+		switch {
+		case strings.HasPrefix(v, "["):
+			var arr []json.RawMessage
+			_ = json.Unmarshal(m[k], &arr)
+			v = fmt.Sprintf("[%d items]", len(arr))
+		case strings.HasPrefix(v, "{"):
+			var obj map[string]json.RawMessage
+			_ = json.Unmarshal(m[k], &obj)
+			sub := make([]string, 0, len(obj))
+			for sk := range obj {
+				sub = append(sub, sk)
+			}
+			sort.Strings(sub)
+			if len(sub) > 6 {
+				sub = append(sub[:6], "…")
+			}
+			v = "{" + strings.Join(sub, ",") + "}"
+		default:
+			v = clipBytes(v, 80)
+		}
+		parts = append(parts, k+"="+v)
+	}
+	return strings.Join(parts, " ")
 }
 
 // clipBytes cuts s to at most n bytes on a rune boundary.

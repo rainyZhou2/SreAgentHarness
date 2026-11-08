@@ -268,6 +268,9 @@ type Metrics struct {
 	planRepairs    Counter
 	planValidation Counter
 	planFallback   Counter
+
+	stepPhase  Histogram
+	loopEvents Counter
 }
 
 func NewMetrics() *Metrics {
@@ -295,6 +298,9 @@ func NewMetrics() *Metrics {
 		planRepairs:    r.Counter("harness_plan_repairs_total", "Planner repair attempts.", "outcome"),
 		planValidation: r.Counter("harness_plan_validation_failures_total", "Plan validation failures by reason.", "reason"),
 		planFallback:   r.Counter("harness_plan_fallback_total", "Planner fallbacks by destination.", "to"),
+		stepPhase: r.Histogram("harness_step_phase_seconds", "Step time by phase (queue, context, model, review, tool, commit).",
+			[]float64{.005, .02, .05, .1, .25, .5, 1, 2, 4, 8, 16, 32, 64}, "kind", "phase"),
+		loopEvents: r.Counter("harness_agent_loop_events_total", "Agent loop events (repair, loop_guard, batch, speculation, routing, cache, …).", "event"),
 	}
 }
 
@@ -317,6 +323,14 @@ func (m *Metrics) ObserveStep(kind, outcome string, d time.Duration) {
 }
 
 func (m *Metrics) ObserveClaim(result string) { m.claims.Inc(result) }
+
+// ObservePhase records the time a step spent in one phase.
+func (m *Metrics) ObservePhase(kind, phase string, d time.Duration) {
+	m.stepPhase.Observe(d.Seconds(), kind, phase)
+}
+
+// ObserveLoop counts an agent loop event.
+func (m *Metrics) ObserveLoop(event string) { m.loopEvents.Inc(event) }
 
 func (m *Metrics) ObserveSink(sink, outcome string) { m.sinkEvents.Inc(sink, outcome) }
 

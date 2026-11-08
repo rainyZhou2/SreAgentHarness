@@ -104,7 +104,11 @@ func (p *Provider) params(ep gw.Endpoint, req gw.Request) (sdk.MessageNewParams,
 			switch part.Type {
 			case gw.PartText:
 				if strings.TrimSpace(part.Text) != "" {
-					blocks = append(blocks, sdk.NewTextBlock(part.Text))
+					b := sdk.NewTextBlock(part.Text)
+					if part.CacheBreakpoint && b.OfText != nil {
+						b.OfText.CacheControl = sdk.NewCacheControlEphemeralParam()
+					}
+					blocks = append(blocks, b)
 				}
 			case gw.PartToolUse:
 				var input any = map[string]any{}

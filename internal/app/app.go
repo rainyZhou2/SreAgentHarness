@@ -240,6 +240,10 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, fmt.Errorf("tool %q is reserved for the harness", kernel.BatchToolName)
 	}
 	h.Tools.Register(kernel.BatchTool{})
+	if _, dup := h.Tools.Lookup(kernel.LoadToolsName); dup {
+		return nil, fmt.Errorf("tool %q is reserved for the harness", kernel.LoadToolsName)
+	}
+	h.Tools.Register(kernel.LoadToolsTool{Registry: h.Tools})
 	if err := applyToolOverlays(h.Tools, cfgFile.ToolOverlays, log); err != nil {
 		return nil, err
 	}
@@ -490,36 +494,42 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if mode == "all" || mode == "worker" {
 		hostname, _ := os.Hostname()
 		a.worker = kernel.NewWorker(kernel.Config{
-			ID:                 e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
-			LeaseTTL:           e.dur("HARNESS_LEASE_TTL", 45*time.Second),
-			StepTimeout:        e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
-			Checkpoints:        e.bool("HARNESS_CHECKPOINTS", true),
-			Memory:             retriever,
-			PlanMemory:         planMemory,
-			Verifier:           verifier,
-			MaxBacktracks:      e.int("HARNESS_REASONING_MAX_BACKTRACKS", kernel.DefaultMaxBacktracks),
-			VerifyTimeout:      e.dur("HARNESS_VERIFIER_TIMEOUT", time.Minute),
-			ConclusionSamples:  e.int("HARNESS_REASONING_SAMPLES", 1),
-			RunMaxCostUSD:      e.float("HARNESS_RUN_MAX_COST_USD", 0),
-			RunMaxTokens:       e.int64("HARNESS_RUN_MAX_TOKENS", 0),
-			MaxRepeats:         e.int("HARNESS_LOOP_MAX_REPEATS", 0),
-			StallSteps:         e.int("HARNESS_LOOP_STALL_STEPS", 0),
-			MaxParallelTools:   e.int("HARNESS_MAX_PARALLEL_TOOLS", 0),
-			MinAgreement:       e.float("HARNESS_REASONING_MIN_AGREEMENT", 0.6),
-			Calibration:        calibration,
-			Compactor:          compactor,
-			Rules:              rules,
-			Skills:             h.Extensions,
-			ToolToggles:        store,
-			CapabilityMap:      graphSvc,
-			Planner:            plannerSvc,
-			PlanApprovers:      e.int("HARNESS_PLAN_APPROVERS", 1),
-			PlanApprovalMode:   e.str("HARNESS_PLAN_APPROVAL", "auto"),
-			PlanMaxReplans:     e.int("HARNESS_PLAN_MAX_REPLANS", kernel.DefaultPlanMaxReplans),
-			Strategies:         &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
-			Observer:           observers,
-			Context:            gatherer,
-			OutputOffloadBytes: e.int("HARNESS_OUTPUT_OFFLOAD_BYTES", kernel.DefaultOffloadBytes),
+			ID:                  e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
+			LeaseTTL:            e.dur("HARNESS_LEASE_TTL", 45*time.Second),
+			StepTimeout:         e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
+			Checkpoints:         e.bool("HARNESS_CHECKPOINTS", true),
+			Memory:              retriever,
+			PlanMemory:          planMemory,
+			Verifier:            verifier,
+			MaxBacktracks:       e.int("HARNESS_REASONING_MAX_BACKTRACKS", kernel.DefaultMaxBacktracks),
+			VerifyTimeout:       e.dur("HARNESS_VERIFIER_TIMEOUT", time.Minute),
+			ConclusionSamples:   e.int("HARNESS_REASONING_SAMPLES", 1),
+			RunMaxCostUSD:       e.float("HARNESS_RUN_MAX_COST_USD", 0),
+			RunMaxTokens:        e.int64("HARNESS_RUN_MAX_TOKENS", 0),
+			MaxRepeats:          e.int("HARNESS_LOOP_MAX_REPEATS", 0),
+			StallSteps:          e.int("HARNESS_LOOP_STALL_STEPS", 0),
+			MaxParallelTools:    e.int("HARNESS_MAX_PARALLEL_TOOLS", 0),
+			ArtifactCacheBytes:  e.int64("HARNESS_ARTIFACT_CACHE_BYTES", 0),
+			ToolTopK:            e.int("HARNESS_TOOL_TOP_K", 0),
+			CompactTokens:       e.int("HARNESS_COMPACT_TOKENS", 0),
+			RoutineModelAlias:   e.str("HARNESS_MODEL_ROUTINE_ALIAS", ""),
+			EscalatedModelAlias: e.str("HARNESS_MODEL_ESCALATED_ALIAS", ""),
+			SpeculativeTools:    e.bool("HARNESS_SPECULATIVE_TOOLS", false),
+			MinAgreement:        e.float("HARNESS_REASONING_MIN_AGREEMENT", 0.6),
+			Calibration:         calibration,
+			Compactor:           compactor,
+			Rules:               rules,
+			Skills:              h.Extensions,
+			ToolToggles:         store,
+			CapabilityMap:       graphSvc,
+			Planner:             plannerSvc,
+			PlanApprovers:       e.int("HARNESS_PLAN_APPROVERS", 1),
+			PlanApprovalMode:    e.str("HARNESS_PLAN_APPROVAL", "auto"),
+			PlanMaxReplans:      e.int("HARNESS_PLAN_MAX_REPLANS", kernel.DefaultPlanMaxReplans),
+			Strategies:          &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
+			Observer:            observers,
+			Context:             gatherer,
+			OutputOffloadBytes:  e.int("HARNESS_OUTPUT_OFFLOAD_BYTES", kernel.DefaultOffloadBytes),
 		}, store, h.Artifacts, defaultStrategy, h.Tools, h.Policy, log)
 	}
 	// triggers: webhooks are served by the API role, schedules fire in the

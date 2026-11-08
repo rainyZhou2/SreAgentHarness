@@ -160,6 +160,11 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_RUN_MAX_COST_USD` / `HARNESS_RUN_MAX_TOKENS` | 单个 Run 的模型花费上限（默认 0：关闭）；用到 80% 时提示 agent 收敛，用满时 kernel 不再调用模型、直接代为结论。profile 的 `run_limits` 只能收紧 |
 | `HARNESS_LOOP_MAX_REPEATS` / `HARNESS_LOOP_STALL_STEPS` | 完全相同的调用（工具+参数）可重复执行的次数（默认 1，负数不限）；连续多少个工具结果没有新内容时提示停滞（默认 4，达到两倍时强制结论，负数关闭） |
 | `HARNESS_MAX_PARALLEL_TOOLS` | 同一次模型响应中可并行执行的只读调用数（默认 4；1 表示每步一个调用） |
+| `HARNESS_ARTIFACT_CACHE_BYTES` | worker 内存中缓存不可变 artifact、用于重建 agent 上下文（默认 64 MiB；负数关闭） |
+| `HARNESS_TOOL_TOP_K` | 可见工具较多时，每个 Run 发送给模型的工具 schema 数（默认 30；负数全部发送）；其余只列名称，可用 `harness.load_tools` 加载 |
+| `HARNESS_COMPACT_TOKENS` | 未压缩的工具结果超过约这么多 token 时压缩历史（默认 16000；负数只按步数） |
+| `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | 常规调查步使用的模型 alias，以及决定结果的步骤使用的 alias（默认沿用策略自身的 alias） |
+| `HARNESS_SPECULATIVE_TOOLS` | 模型仍在流式输出时提前执行允许的只读调用，工具步直接复用结果（默认 `false`） |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
@@ -175,6 +180,17 @@ docker compose -f deploy/docker-compose.yml up --build
 - **修复反馈**：无法使用的响应（无法解析的工具调用、不符合 schema 的参数、无效决策、不存在的工具）以 `[correction]` 的形式把具体问题（及可用工具列表）回传给模型，每次尝试最多两次，之后才重试步骤；修复记录写入步骤摘要。
 - **重复与停滞防护**：完全相同的调用（工具+规范化参数）已执行 `max_repeats` 次，或曾被拒绝、驳回、过期的，不再执行，而是记录为跳过的步骤并指向之前的结果。连续 `stall_steps` 个工具结果没有新内容（重复、错误、相同输出）时提示 agent 换思路；达到两倍时，再请求工具会被 kernel 结论替代。
 - profile 可在 `run_limits` 下按 agent 设置（`max_cost_usd`、`max_tokens`、`max_repeats`、`stall_steps`、`max_parallel_tools`），只能比进程配置更严格。
+
+## Agent 循环性能
+
+- **上下文重建**：每个推理步都从 Run 历史重建上下文，以保证重试时完全确定。artifact 不可变，worker 会缓存自己写入和读取的 artifact（LRU，`HARNESS_ARTIFACT_CACHE_BYTES`），每步只需读取新增内容。同一 Run 的步骤本来就会在一个 worker 内连续执行（最多 20 步后才交回队列）。
+- **Prompt 缓存**：历史区在步骤之间只会追加，因此请求在其末尾额外标记一个缓存断点（系统/工具前缀已有一个）；账本、提示和指令都放在断点之后。提供自动前缀缓存的厂商会忽略该标记。
+- **工具筛选**：可见工具超过 `HARNESS_TOOL_TOP_K` 时，模型看到每个 Run 固定的一组工具：本 Run 用过或加载过的、内置工具、请求中点名的，再按与请求的词重叠排序补足；其余列在 `[more tools]` 中，可用 `harness.load_tools` 加载。选择在步骤之间不变，缓存前缀保持有效；任何可见工具仍会被接受。
+- **模型路由**：配置 `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` 后，首次分析、可能或被要求的结论、停滞、结论被驳回后的那一步以及修复使用升级 alias，其余步骤使用常规 alias（步骤摘要中的 `model_tier`）。flow 节点自带的 alias 优先。
+- **自适应停止**：账本收敛时（有 VERIFIED 且置信度 ≥ 0.8 的假设，且没有其他开放假设），在步数上限或停滞防护介入之前提示 agent 给出结论。
+- **按 token 预算压缩**：除每 N 个工具步压缩一次外，未压缩结果超过 `HARNESS_COMPACT_TOKENS` 时也会压缩（此时只保留最新一个结果原文）。默认压缩器（`deterministic-v2`）每条结果一行、以可引用的 ref 开头，大的 JSON 对象按顶层字段呈现；被压缩的 ref（包括批量步骤的子调用）仍可引用。
+- **只读调用提前执行**（`HARNESS_SPECULATIVE_TOOLS`）：模型流中每个工具调用一完成，若它可见、只读、无需审批且不是重复调用，就立即开始执行；执行同一调用（版本、风险、参数都相同）的工具步直接取用结果。未被使用的结果两分钟后过期；有副作用的调用从不提前执行。
+- **可观测性**：每个步骤摘要带 `timings_ms`（queue、context、model、review、tool），并与提交耗时一起导出为 `harness_step_phase_seconds{kind,phase}`；`harness_agent_loop_events_total{event}` 统计修复、循环防护、提示、批量、收敛、路由、压缩、提前执行和 artifact 缓存命中。Run 结果中带 `loop`（步数、模型请求数、token、花费）。
 
 ## 触发器、策略规则与动作闭环
 

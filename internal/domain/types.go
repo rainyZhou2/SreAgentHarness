@@ -220,6 +220,18 @@ type Lease struct {
 	ParentRunID       string
 	ParentStepID      string
 	FlowDepth         int
+	// ReadyAt is when the step became runnable (queue time = claim − ReadyAt).
+	ReadyAt time.Time
+}
+
+// StepReadyAt is when a step became runnable: its last status change, or
+// its retry time when that is later.
+func StepReadyAt(s Step) time.Time {
+	t := s.UpdatedAt
+	if s.NextAttemptAt != nil && s.NextAttemptAt.After(t) {
+		t = *s.NextAttemptAt
+	}
+	return t
 }
 
 // ToolCall is a complete, schema-validated tool intent produced by a model.

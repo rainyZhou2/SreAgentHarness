@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-sre-harness/internal/artifact"
@@ -45,9 +46,17 @@ func (l *LLM) Decide(ctx context.Context, in ReasoningInput) (domain.Decision, e
 	scope.ManifestRef = manRef
 
 	var sink gw.Sink
-	if l.Deltas != nil {
+	if l.Deltas != nil || in.OnToolCall != nil {
+		calls := map[int]*streamCall{}
 		sink = func(ev gw.Event) {
-			l.Deltas.PublishDelta(in.Call.TenantID, in.Call.RunID, in.Call.StepID, ev.ModelRequestID, ev)
+			if l.Deltas != nil {
+				l.Deltas.PublishDelta(in.Call.TenantID, in.Call.RunID, in.Call.StepID, ev.ModelRequestID, ev)
+			}
+			if in.OnToolCall != nil {
+				if name, args, ok := trackToolCall(calls, ev); ok {
+					in.OnToolCall(name, args)
+				}
+			}
 		}
 	}
 	resp, err := l.Gateway.Generate(ctx, scope, req, sink)
@@ -68,6 +77,49 @@ func (l *LLM) Decide(ctx context.Context, in ReasoningInput) (domain.Decision, e
 	// shown is recorded in the manifest. Filling them in would let an
 	// uncited conclusion pass the citation and verifier checks.
 	return d, nil
+}
+
+// streamCall accumulates one streamed tool call.
+type streamCall struct {
+	name string
+	args []byte
+}
+
+// trackToolCall folds stream events and returns each tool call once it is
+// complete.
+func trackToolCall(calls map[int]*streamCall, ev gw.Event) (string, json.RawMessage, bool) {
+	switch ev.Type {
+	case gw.EvToolCallDelta:
+		c := calls[ev.Index]
+		if c == nil {
+			c = &streamCall{}
+			calls[ev.Index] = c
+		}
+		if ev.ToolName != "" {
+			c.name = ev.ToolName
+		}
+		c.args = append(c.args, ev.ArgsDelta...)
+	case gw.EvToolCallComplete:
+		c := calls[ev.Index]
+		delete(calls, ev.Index)
+		name, args := ev.ToolName, ev.Args
+		if c != nil {
+			if name == "" {
+				name = c.name
+			}
+			if len(args) == 0 {
+				args = c.args
+			}
+		}
+		if name == "" {
+			return "", nil, false
+		}
+		if len(strings.TrimSpace(string(args))) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		return name, append(json.RawMessage(nil), args...), true
+	}
+	return "", nil, false
 }
 
 // InvalidOutputError is a model response the kernel cannot turn into a

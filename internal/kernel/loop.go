@@ -279,7 +279,7 @@ func (BatchTool) Invoke(context.Context, string, json.RawMessage) (json.RawMessa
 // with the first one (which the caller already accepted), and notes for the
 // calls left out. A batch needs at least two calls.
 func (w *Worker) planBatch(ctx context.Context, lease domain.Lease, rules profile.Rules, in cognitive.ReasoningInput,
-	first domain.ToolCall, firstDesc *tools.Descriptor, deferred []domain.ToolCall, l loopLimits, ls loopState) ([]batchCall, []string) {
+	visible []tools.Descriptor, first domain.ToolCall, firstDesc *tools.Descriptor, deferred []domain.ToolCall, l loopLimits, ls loopState) ([]batchCall, []string) {
 	if l.parallel < 2 || len(deferred) == 0 || firstDesc == nil || firstDesc.Risk.HasSideEffects() {
 		return nil, deferredNotes(deferred, "runs only when the first call is a read-only call")
 	}
@@ -295,7 +295,7 @@ func (w *Worker) planBatch(ctx context.Context, lease domain.Lease, rules profil
 			reason = fmt.Sprintf("at most %d calls run together", l.parallel)
 		case !ok || c.Name == BatchToolName || tools.IsBuiltin(c.Name) && c.Name != artifactq.Name:
 			reason = "not a tool that can run in a batch"
-		case !visibleTool(in.Tools, c.Name):
+		case !visibleTool(visible, c.Name):
 			reason = "not visible to this agent"
 		case len(c.Args) == 0 || !json.Valid(c.Args):
 			reason = "arguments are not valid JSON"
@@ -403,6 +403,11 @@ func (w *Worker) executeBatch(ctx context.Context, lease domain.Lease, rules pro
 	if err != nil {
 		return domain.StepSuccess{}, err
 	}
+	size := 0
+	for _, o := range obs {
+		size += len(o.Content)
+	}
+	plan = w.withTokenCompaction(ctx, lease, plan, size)
 	var thoughts []domain.Thought
 	var caps []domain.CapabilityRef
 	summary := map[string]any{"tool": BatchToolName, "calls": len(obs)}
@@ -447,7 +452,11 @@ func (w *Worker) invokeReadOnly(ctx context.Context, lease domain.Lease, t tools
 	if base.Part > 0 {
 		key = fmt.Sprintf("%s#%d", key, base.Part)
 	}
-	out, err := t.Invoke(callCtx, key, args)
+	out, specOK := w.takeSpeculative(ctx, lease, desc, name, args)
+	var err error
+	if !specOK {
+		out, err = t.Invoke(callCtx, key, args)
+	}
 	<-w.toolSem
 	trust := desc.Trust
 	if err != nil {
