@@ -3,6 +3,7 @@ package localstore
 import (
 	"context"
 	"sort"
+	"time"
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/reasoning"
@@ -91,4 +92,22 @@ func (s *Store) RunMemoryIDs(_ context.Context, tenantID, runID string) ([]strin
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// DeleteOldReasoningScores removes scores last computed before cutoff.
+func (s *Store) DeleteOldReasoningScores(_ context.Context, cutoff time.Time, limit int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for id, rec := range s.reasoningScores {
+		if limit > 0 && n >= int64(limit) {
+			break
+		}
+		if rec.Score.ScoredAt.Before(cutoff) {
+			delete(s.reasoningScores, id)
+			s.del("reasoningscore", id)
+			n++
+		}
+	}
+	return n, nil
 }

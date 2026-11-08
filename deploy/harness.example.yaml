@@ -86,7 +86,7 @@ plugins:
     - {name: consolidator, config: {interval: 10s}}
     - {name: rollout_monitor, config: {interval: 1m}}
     - {name: event_relay, config: {interval: 250ms, batch: 1000, lease_ttl: 15s, start_from: latest}}
-    - {name: retention, config: {interval: 5m, outbox_retention: 24h, audit_retention: 2160h}}
+    - {name: retention, config: {interval: 5m, outbox_retention: 24h, audit_retention: 2160h, reasoning_retention: 2160h}}
     # Proposes reasoning-layer profile candidates (playbook, excluded patterns)
     # from measured reasoning quality. Never approves, canaries or promotes.
     - name: reasoning_improver

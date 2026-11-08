@@ -64,6 +64,14 @@ func (s *Store) DeleteOldAudit(ctx context.Context, cutoff time.Time, limit int)
 	return tag.RowsAffected(), err
 }
 
+// DeleteOldReasoningScores removes reasoning scores last computed before
+// cutoff. Scores are derived data: the run, its steps and thoughts remain.
+func (s *Store) DeleteOldReasoningScores(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM reasoning_scores WHERE (tenant_id, run_id) IN (
+		SELECT tenant_id, run_id FROM reasoning_scores WHERE scored_at < $1 LIMIT $2)`, cutoff, limit)
+	return tag.RowsAffected(), err
+}
+
 // RunsByStatus feeds the harness_runs gauge (status label only).
 func (s *Store) RunsByStatus(ctx context.Context) (map[string]int64, error) {
 	rows, err := s.pool.Query(ctx, `SELECT status, COUNT(*) FROM agent_runs

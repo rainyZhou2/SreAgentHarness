@@ -13,6 +13,7 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/tools"
 )
 
@@ -59,6 +60,31 @@ type Guardrails struct {
 	MaxFailureRateDiff float64 `json:"max_failure_rate_diff"` // vs control
 	MaxCostPerRunUSD   float64 `json:"max_cost_per_run_usd"`  // 0 = no limit
 	MinRuns            int     `json:"min_runs"`              // before guardrails are judged
+	// Reasoning compares the canary's reasoning quality with the control
+	// group's (both from scored runs). StartCanary enables it by default.
+	Reasoning *ReasoningGuardrails `json:"reasoning,omitempty"`
+}
+
+// ReasoningGuardrails roll a canary back when its reasoning regresses
+// against the control group by more than the gate margins.
+type ReasoningGuardrails struct {
+	Disabled bool `json:"disabled,omitempty"`
+	// MinScoredRuns is required on both sides before judging (default 20):
+	// reasoning metrics are noisier than the failure rate.
+	MinScoredRuns int `json:"min_scored_runs,omitempty"`
+	reasoning.GateConfig
+}
+
+// DefaultReasoningMinRuns is the default scored-run minimum per side.
+const DefaultReasoningMinRuns = 20
+
+func (g *ReasoningGuardrails) normalize() {
+	if g.MinScoredRuns <= 0 {
+		g.MinScoredRuns = DefaultReasoningMinRuns
+	}
+	if g.GateConfig == (reasoning.GateConfig{}) {
+		g.GateConfig = reasoning.DefaultGate()
+	}
 }
 
 type Rollout struct {
@@ -82,6 +108,8 @@ type RolloutStats struct {
 	CostMicros int64   `json:"cost_micros"`
 	FailRate   float64 `json:"fail_rate"`
 	CostPerRun float64 `json:"cost_per_run_usd"`
+	// Reasoning summarizes the scored runs of the group (nil: none scored).
+	Reasoning *reasoning.Summary `json:"reasoning,omitempty"`
 }
 
 type Store interface {
@@ -405,6 +433,12 @@ func (s *Service) StartCanary(ctx context.Context, tenantID, candidateID string,
 	if g.MaxFailureRateDiff == 0 {
 		g.MaxFailureRateDiff = 0.15
 	}
+	if g.Reasoning == nil {
+		g.Reasoning = &ReasoningGuardrails{}
+	}
+	if !g.Reasoning.Disabled {
+		g.Reasoning.normalize()
+	}
 	from, err := s.Store.ActiveVersion(ctx, tenantID, c.ProfileID)
 	if err != nil {
 		from = c.BaseVersion
@@ -501,6 +535,7 @@ func (s *Service) MonitorTick(ctx context.Context) (int, error) {
 		if r.Guardrails.MaxCostPerRunUSD > 0 && canary.CostPerRun > r.Guardrails.MaxCostPerRunUSD {
 			breach = append(breach, fmt.Sprintf("cost/run $%.4f > $%.4f", canary.CostPerRun, r.Guardrails.MaxCostPerRunUSD))
 		}
+		breach = append(breach, reasoningBreaches(r.Guardrails.Reasoning, canary, control)...)
 		if len(breach) == 0 {
 			continue
 		}
@@ -521,6 +556,24 @@ func (s *Service) MonitorTick(ctx context.Context) (int, error) {
 		rolled++
 	}
 	return rolled, nil
+}
+
+// reasoningBreaches compares canary and control reasoning summaries.
+// Rollouts created before reasoning guardrails existed carry none.
+func reasoningBreaches(g *ReasoningGuardrails, canary, control RolloutStats) []string {
+	if g == nil || g.Disabled || canary.Reasoning == nil || control.Reasoning == nil {
+		return nil
+	}
+	cfg := *g
+	cfg.normalize()
+	if canary.Reasoning.N < cfg.MinScoredRuns || control.Reasoning.N < cfg.MinScoredRuns {
+		return nil
+	}
+	var out []string
+	for _, f := range reasoning.Gate(*control.Reasoning, *canary.Reasoning, cfg.GateConfig) {
+		out = append(out, "reasoning vs control: "+f)
+	}
+	return out
 }
 
 // Run executes MonitorTick periodically.

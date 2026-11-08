@@ -131,6 +131,24 @@ automatic rollback are the existing evolution pipeline.
 * Every change is a new immutable profile version with lineage
   (candidate → evaluation → approval → rollout).
 
+### Canary reasoning guardrails
+
+`RolloutStats` now carries a reasoning `Summary` of each group's scored runs
+(canary: runs pinned to the rollout; control: runs of the profile without a
+rollout since the canary started). `StartCanary` enables
+`guardrails.reasoning` by default with the release-gate margins and
+`min_scored_runs: 20` per side; the monitor rolls the canary back when its
+reasoning regresses against the control group by more than a margin. Pass
+`"reasoning": {"disabled": true}` to opt out; rollouts created earlier carry
+no reasoning guardrails and are judged as before.
+
+### Retention
+
+Reasoning scores are derived data. The `retention` job deletes scores last
+computed more than `reasoning_retention` ago (default 2160h, 90 days); keep
+it longer than the improver's window. The desktop runtime prunes with the
+default on its reconcile loop.
+
 ## APIs
 
 * `GET /v1/reasoning/summary?profile_id=&version=&since=` – aggregate metrics.

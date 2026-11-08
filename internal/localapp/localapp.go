@@ -38,6 +38,7 @@ import (
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/reasoning/improve"
+	"go-sre-harness/internal/retention"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/trigger"
@@ -313,6 +314,9 @@ func reconcileLoop(ctx context.Context, store *localstore.Store, graphSvc *graph
 			}
 			if _, err := store.PurgeTriggerClaims(ctx, time.Now(), 500); err != nil {
 				log.Warn("purge trigger claims", "err", err)
+			}
+			if _, err := store.DeleteOldReasoningScores(ctx, time.Now().Add(-retention.DefaultReasoningRetention), 1000); err != nil {
+				log.Warn("prune reasoning scores", "err", err)
 			}
 		}
 	}
