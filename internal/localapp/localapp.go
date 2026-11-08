@@ -42,6 +42,7 @@ import (
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/trigger"
+	"go-sre-harness/internal/verify"
 	"go-sre-harness/plugins/profiles"
 )
 
@@ -106,6 +107,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	reg := tools.NewRegistry(tools.DemoTools()...)
 	reg.Register(artifactq.New(arts))
+	reg.Register(verify.ReviewTool{})
 	if len(local.ToolOverlays) > 0 {
 		reg.SetOverlays(local.ToolOverlays)
 	}
@@ -198,7 +200,8 @@ func Run(ctx context.Context, cfg Config) error {
 		StepTimeout: 2 * time.Minute, Checkpoints: true, Rules: rules, Planner: plannerSvc,
 		Memory: retriever, PlanMemory: retriever, CapabilityMap: graphSvc,
 		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics,
-		Context: gatherer, OutputOffloadBytes: offload, Strategies: strategies},
+		Context: gatherer, OutputOffloadBytes: offload, Strategies: strategies,
+		Verifier: &verify.Verifier{}, Calibration: &reasoning.CalibrationService{Store: store}},
 		store, arts, strategy, reg, pol, cfg.Log)
 	pool := kernel.NewPool(worker, cfg.MaxRuns)
 

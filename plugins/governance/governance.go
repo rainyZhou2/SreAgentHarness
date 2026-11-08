@@ -29,6 +29,9 @@ type ImproverConfig struct {
 	improve.Config
 	Interval plugin.Duration `json:"interval,omitempty"`
 	Window   plugin.Duration `json:"window,omitempty"`
+	// InducerModelAlias enables playbook induction from failure cases with
+	// this model alias (empty: template guidance only).
+	InducerModelAlias string `json:"inducer_model_alias,omitempty"`
 }
 
 type RetentionConfig struct {
@@ -102,6 +105,12 @@ func init() {
 				return nil, err
 			}
 			im := &improve.Improver{Config: ic, Store: h.Store, Evolution: h.Eval, Log: h.Log.With("job", "reasoning_improver")}
+			if cfg.InducerModelAlias != "" {
+				if h.OfflineGateway == nil {
+					return nil, errors.New("playbook induction needs the offline model gateway")
+				}
+				im.Inducer = &improve.ModelInducer{Gateway: h.OfflineGateway, Alias: cfg.InducerModelAlias}
+			}
 			every := cfg.Interval.D()
 			return plugin.RunnerFunc(func(ctx context.Context) error { return im.Run(ctx, every) }), nil
 		})

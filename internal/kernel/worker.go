@@ -31,6 +31,7 @@ import (
 	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/untrusted"
+	"go-sre-harness/internal/verify"
 )
 
 // StateStore is the durable state the worker needs (implemented by store/pg).
@@ -104,6 +105,23 @@ type Config struct {
 	// PlanMemory supplies plan exemplars and reasoning patterns to the
 	// planner (optional).
 	PlanMemory PlanMemorySource
+	// Verifier independently checks final task conclusions (optional).
+	Verifier *verify.Verifier
+	// MaxBacktracks bounds how often a conclusion the verifier did not
+	// accept is handed back to the agent (0: DefaultMaxBacktracks,
+	// negative: never; the report is still attached).
+	MaxBacktracks int
+	// VerifyTimeout bounds one verification (default 60s).
+	VerifyTimeout time.Duration
+	// MinAgreement is the self-consistency agreement below which a sampled
+	// conclusion is not accepted (default 0.6).
+	MinAgreement float64
+	// Calibration supplies the measured calibration of the model's stated
+	// confidence (optional).
+	Calibration CalibrationSource
+	// ConclusionSamples > 1 samples final task conclusions that many times
+	// and keeps the majority (self-consistency).
+	ConclusionSamples int
 	// PlanApprovers is the default number of approvals for a generated plan;
 	// R3 plans always require at least two.
 	PlanApprovers int
@@ -527,6 +545,8 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		return domain.StepSuccess{}, err
 	}
 	factsWrite := w.gatherFacts(ctx, lease, &in)
+	cal := w.calibrator(ctx, lease)
+	in.CalibrationNote = cal.Note()
 	canon, _ := json.Marshal(in)
 	contextHash := artifact.Hash(canon)
 	in.Call = cognitive.CallScope{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
@@ -560,6 +580,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		}
 	}
 	decision, err := strat.Decide(ctx, in)
+	if err == nil && w.cfg.ConclusionSamples > 1 && cognitive.Validate(decision) == nil {
+		decision = cognitive.SelfConsistency(ctx, strat, in, decision, w.cfg.ConclusionSamples)
+	}
 	<-w.reasonSem
 	if err != nil {
 		return domain.StepSuccess{}, err
@@ -587,7 +610,7 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		res.KVWrites = append(res.KVWrites, *factsWrite)
 	}
 	var unresolvedRefs int
-	res.Thoughts, res.Capabilities, unresolvedRefs = reasonTrace(decision, in, lease.TenantID)
+	res.Thoughts, res.Capabilities, unresolvedRefs = reasonTrace(decision, in, lease.TenantID, cal)
 	summary := map[string]any{"decision_kind": decision.Kind, "intent": decision.Intent, "reason_summary": truncate(decision.ReasonSummary, 500),
 		"hypotheses": len(decision.Hypotheses), "thoughts": len(res.Thoughts), "capabilities": len(res.Capabilities)}
 	if unresolvedRefs > 0 {
@@ -601,11 +624,38 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		InputHash: lease.InputHash, Status: domain.StepPending}
 
 	if decision.Kind == domain.DecisionFinal {
+		review, err := w.reviewConclusion(ctx, lease, in, decision)
+		if err != nil {
+			return domain.StepSuccess{}, err
+		}
+		if review.thought != nil {
+			th := *review.thought
+			th.Seq = len(res.Thoughts) + 1
+			res.Thoughts = append(res.Thoughts, th)
+		}
+		if review.backtrack != nil {
+			summary["conclusion_review"] = review.report.Verdict
+			res.Plan = []domain.PlannedStep{*review.backtrack}
+			res.Summary = mustJSON(summary)
+			res.Events = append(res.Events, domain.EmittedEvent{Type: "reasoning.conclusion_rejected",
+				Payload: mustJSON(map[string]any{"verdict": review.report.Verdict, "issues": capList(review.report.Issues(), 10),
+					"agreement": review.report.Agreement})})
+			return res, nil
+		}
 		result := map[string]any{
 			"answer": decision.Answer, "intent": decision.Intent, "hypotheses": decision.Hypotheses,
 			"thought": decision.Thought, "decision_ref": outRef}
 		if len(decision.Output) > 0 {
 			result["flow_output"] = decision.Output
+		}
+		if rep := review.report; rep != nil {
+			result["independent_verification"] = rep
+			summary["independent_verdict"] = rep.Verdict
+			if rep.Verdict != verify.Supported {
+				// The answer stands, but it is not presented as verified.
+				result["answer"] = strings.TrimSpace(decision.Answer) + "\n\n[Independent check: " + rep.Verdict +
+					" — " + truncate(strings.Join(rep.Issues(), "; "), 600) + "]"
+			}
 		}
 		resultRef, _, err := w.put(ctx, lease.TenantID, "result", result)
 		if err != nil {
@@ -641,6 +691,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	// The model cannot influence the risk class; the profile can only tighten.
 	pd, desc := rules.DecideCall(ctx, w.policy, profile.Call{TenantID: lease.TenantID, RunID: lease.RunID,
 		Name: call.Name, Args: call.Args}, reg)
+	if call.Name == verify.ReviewToolName {
+		pd, desc = policy.Decision{Verdict: policy.Deny, Reason: "kernel-owned tool"}, nil
+	}
 	pdJSON := mustJSON(pd)
 	toolStep := domain.PlannedStep{Kind: domain.StepTool, Executor: "tool", InputRef: callRef, InputHash: callHash,
 		PolicyDecision: pdJSON}
@@ -673,6 +726,7 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		return cognitive.ReasoningInput{}, err
 	}
 	visible := rules.Visible(w.tools.DescriptorsFor(lease.TenantID))
+	visible = withoutKernelTools(visible)
 	if w.cfg.ToolToggles != nil {
 		off, err := w.cfg.ToolToggles.DisabledTools(ctx, lease.TenantID)
 		if err != nil {
@@ -735,7 +789,15 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 	if err != nil {
 		return in, err
 	}
+	ledger := newLedger()
 	for _, s := range history {
+		if s.Kind == domain.StepReason && s.Status == domain.StepSucceeded && s.OutputRef != nil {
+			var d domain.Decision
+			if err := w.get(ctx, lease.TenantID, *s.OutputRef, &d); err == nil {
+				ledger.add(s.Seq, d.Hypotheses)
+			}
+			continue
+		}
 		if s.Kind != domain.StepTool {
 			continue
 		}
@@ -743,6 +805,9 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		var call domain.ToolCall
 		if err := w.get(ctx, lease.TenantID, s.InputRef, &call); err != nil {
 			return in, err
+		}
+		if fu := call.Followup; fu != nil && fu.Role == domain.FollowupReview {
+			ledger.challenge(fu.OfStep)
 		}
 		obs := domain.Observation{StepSeq: s.Seq, Tool: call.Name, Args: call.Args, TrustTag: "T2"}
 		switch {
@@ -764,6 +829,8 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		}
 		in.Observations = append(in.Observations, obs)
 	}
+
+	in.Ledger = ledger.entries()
 
 	if cr, ok := w.store.(ConversationReader); ok {
 		msgs, err := cr.RunConversation(ctx, lease.TenantID, lease.RunID)
@@ -846,6 +913,10 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	tool, ok := w.tools.LookupFor(lease.TenantID, call.Name)
 	if !ok || lease.Intent == nil {
 		return domain.StepSuccess{}, fmt.Errorf("tool %q is not registered", call.Name)
+	}
+	if call.Name == verify.ReviewToolName && (call.Followup == nil || call.Followup.Role != domain.FollowupReview) {
+		// Kernel-owned: a model cannot forge a review result.
+		return domain.StepSuccess{}, fmt.Errorf("tool %q is kernel-owned: %w", call.Name, domain.ErrNotDispatched)
 	}
 	rules, err := w.rules(ctx, lease)
 	if err != nil {
@@ -1049,7 +1120,7 @@ func (w *Worker) messageText(ctx context.Context, tenantID string, m domain.Mess
 // reasonTrace renders a decision as stored thoughts. Citations are resolved
 // against what the request showed the model; unresolved ones are kept,
 // marked, and counted in the returned total.
-func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string) ([]domain.Thought, []domain.CapabilityRef, int) {
+func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string, cal *reasoning.Calibrator) ([]domain.Thought, []domain.CapabilityRef, int) {
 	var out []domain.Thought
 	var caps []domain.CapabilityRef
 	seq := 0
@@ -1088,8 +1159,21 @@ func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string
 		refs := append(resolve(h.Supports, "supports"), resolve(h.Refutes, "refutes")...)
 		n := len(out)
 		next(domain.ThoughtHypothesis, h.Statement, status, h.ConfidenceEstimate, refs)
-		if id := strings.TrimSpace(h.ID); id != "" && len(out) > n {
-			out[n].Attrs = map[string]any{reasoning.HypothesisIDAttr: truncate(id, 64)}
+		if len(out) > n {
+			attrs := map[string]any{}
+			if id := strings.TrimSpace(h.ID); id != "" {
+				attrs[reasoning.HypothesisIDAttr] = truncate(id, 64)
+			}
+			if d.Kind == domain.DecisionTool {
+				// Listed while investigating: tracked, not a claim.
+				attrs[reasoning.TrackingAttr] = true
+			}
+			if cal != nil && h.ConfidenceEstimate > 0 && h.ConfidenceEstimate <= 1 {
+				attrs[reasoning.CalibratedAttr] = cal.Apply(h.ConfidenceEstimate)
+			}
+			if len(attrs) > 0 {
+				out[n].Attrs = attrs
+			}
 		}
 	}
 	if d.Kind == domain.DecisionTool && d.Tool != nil {
@@ -1138,6 +1222,17 @@ func toolTrace(name string, d tools.Descriptor, ok bool) ([]domain.Thought, []do
 	return []domain.Thought{{Seq: 1, Kind: domain.ThoughtObservation, Summary: name + " → " + word, Status: status,
 			Refs: []domain.ThoughtRef{{Ref: ref, Relation: "uses"}}}},
 		[]domain.CapabilityRef{{Ref: ref, Role: "used"}}
+}
+
+// withoutKernelTools hides kernel-owned tools from the model.
+func withoutKernelTools(ds []tools.Descriptor) []tools.Descriptor {
+	out := ds[:0:0]
+	for _, d := range ds {
+		if d.Name != verify.ReviewToolName {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // withoutDisabled removes tools the tenant switched off.

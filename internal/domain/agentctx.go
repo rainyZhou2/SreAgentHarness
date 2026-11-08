@@ -124,6 +124,9 @@ type VerificationResult struct {
 const (
 	FollowupVerify     = "verify"
 	FollowupCompensate = "compensate"
+	// FollowupReview hands a conclusion the independent verifier did not
+	// accept back to the agent.
+	FollowupReview = "conclusion_review"
 )
 
 // ToolFollowup marks a tool step the kernel planned after an action. The

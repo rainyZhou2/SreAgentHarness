@@ -62,6 +62,23 @@ type ReasoningInput struct {
 	Summary         string                // compaction summary replacing observations before CompactedBefore
 	CompactedBefore int64
 	CompactionEpoch int64
+
+	// Ledger is the hypotheses the agent stated in earlier steps of this
+	// run, merged by id, rebuilt from the stored decisions.
+	Ledger []LedgerEntry `json:"ledger,omitempty"`
+	// CalibrationNote is the measured calibration of the model's stated
+	// confidence on earlier runs of this profile ("" when unknown).
+	CalibrationNote string `json:"calibration_note,omitempty"`
+}
+
+// LedgerEntry is one hypothesis of the run's ledger.
+type LedgerEntry struct {
+	ID         string  `json:"id"`
+	Statement  string  `json:"statement"`
+	Status     string  `json:"status"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Since      int64   `json:"since"`   // step that introduced it
+	Updated    int64   `json:"updated"` // step of the last change
 }
 
 // TenantKey partitions prompt caches by tenant (§33.3).

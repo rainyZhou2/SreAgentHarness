@@ -151,6 +151,12 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_PLANNER_CACHE_TTL` / `_CACHE_SIZE` | 计划缓存时长（默认 `10m`，`0` 关闭）与条目数（默认 512） |
 | `HARNESS_PLANNER_TYPICAL_OUTPUT_TOKENS` | Token 估算采用的单次输出量（默认上限的四分之一；负数按最坏情况） |
 | `HARNESS_PLANNER_AUTO_PIN` / `_DRY_RUN` | 将未固定工具的 agent 节点固定到只读工具；审批前对计划做 dry run（默认都为 `true`） |
+| `HARNESS_REASONING_VERIFY` | 对最终 task 结论做独立复核（默认 `true`；规则层无需模型） |
+| `HARNESS_VERIFIER_MODEL_ALIAS` / `_EFFORT` / `_TIMEOUT` | 复核用的模型裁判（为空则只用规则）、effort 与超时（默认 `1m`） |
+| `HARNESS_VERIFIER_MEMORY_IS_EVIDENCE` | 是否允许单独一条记忆支撑 VERIFIED 断言（默认 `false`） |
+| `HARNESS_REASONING_MAX_BACKTRACKS` | 未被接受的结论退回 agent 的次数（默认 1，负数不退回） |
+| `HARNESS_REASONING_SAMPLES` / `_MIN_AGREEMENT` | 最终结论的自一致性采样次数（默认 1：关闭）及所需一致率（默认 0.6） |
+| `HARNESS_REASONING_CALIBRATION` / `HARNESS_CALIBRATION_MIN_FORECASTS` | 按 profile 做置信度校准（默认 `true`）及拟合所需样本数（默认 30） |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
@@ -176,6 +182,10 @@ docker compose -f deploy/docker-compose.yml up --build
 
 - **量化**：每个结束的 run 由 consolidator 打分，收到反馈后重新打分。指标包括：校准度（以 VERIFIED/REFUTED 结束的假设的 Brier 分数）、证据支撑率、重复工具调用、到首个结论的步数、最终校验结论和综合质量分。离线回放用同一套打分；若候选版本在 holdout 上的校准度、证据支撑率、冗余率或质量分退化，发布门禁直接不通过。
 - **引用校验**：每条 observation 头都带有自己的引用 `obs:step<N>`，证据为 `kv:<key>@<v>`，记忆为 `memory:<id>@<v>`。kernel 会把 `supports`、`refutes`、`evidence_refs` 中的每条引用与本次请求实际给模型看的内容对照解析（`obs:4`、`obs:<tool>`、offload handle 等别名会归一为标准形式）。指向不存在内容的引用存为 `unresolved:<原文>`，不计入证据支撑。没有有效引用就被判为 VERIFIED/REFUTED 的假设记为无据结论；VERIFIED 结论如果 verification 和已证实的假设都没有有效引用，视为模型自封：打分和统计按未验证处理，不算成功，也不会被提炼成模式。引用有效率、无据假设率和无据结论率会汇总进 summary，纳入发布门禁和金丝雀门禁，并在改进循环中触发 `citation` playbook 提示。
+- **独立复核与回溯**：最终的 task 结论由不是它作者的校验器复核。规则层（始终开启）要求每条 VERIFIED/REFUTED 断言都引用真实存在的证据，失败的工具调用或单独一条记忆都不算证据，VERIFIED 结论至少要有一条被支持的已证实断言；可选的模型裁判（`HARNESS_VERIFIER_MODEL_ALIAS`，独立 prompt，看不到 agent 的历史）逐条判断所引证据是支持、矛盾还是不足。未获 SUPPORTED 的结论会通过 kernel 专属的 `harness.conclusion_review` 步骤（对模型隐藏，模型主动调用会被拒绝）退回 agent，最多 `HARNESS_REASONING_MAX_BACKTRACKS` 次，相关假设在假设账本中标为 CHALLENGED；否则 Run 完成，报告写入 `independent_verification`，未被接受的答案会被明确标注。打分时独立结论优先于 agent 自评：被反驳或证据不足的结论不算成功，也不会被提炼。
+- **多假设与自一致性**：调查过程中 agent 在 THOUGHT 行里列出竞争假设（id、状态、概率）；kernel 从本 Run 的决策重建假设账本并在每一步展示，促使 agent 在开放假设间做区分性检查，首个假设被证伪时回到下一个。`HARNESS_REASONING_SAMPLES` > 1 时，最终 task 结论会采样多次，取一致结论最多的一簇；一致率低于 `HARNESS_REASONING_MIN_AGREEMENT` 视为证据不足并触发复核。
+- **事后校准**：每个 Run 记录假设最初声明的置信度及最终结果（有独立结论时以其为准）。按租户 profile 用近期 Run 拟合保序回归校准器（优先使用经独立复核的样本）；kernel 在原始置信度旁记录校准后的值，并告诉模型其声明的置信度过去的实际命中率；summary 报告 ECE 和校准后 Brier，ECE 或被反驳率上升会让门禁不通过。
+- **归纳式 Playbook**：在 `reasoning_improver` 任务上配置 `inducer_model_alias` 后，改进循环会把最差 Run 的摘要（假设及结论、工具、校验器意见，不含原始工具输出）交给模型归纳通用指导语。点名资源或 Run、像注入指令、削弱审批/复核/校验/信任规则、或与已有行重复的条目都会被拒绝；没有可用条目时退回模板指导语。候选版本仍需通过 holdout 门禁、非提议者审批和金丝雀。
 - **复用**：已完成、未被反馈否定且校验结论为 VERIFIED 的 run，会被提炼为*推理模式*，即一条 procedural 记忆。内容是按顺序检验过的假设及各自结论，以及得出首个结论前用到的工具。它走正常的记忆生命周期（CANDIDATE → 审批 → ACTIVE），每条模式都要人工激活。每条记忆的成功率和 Wilson 下界，按检索过它的 run 统计。
 - **模式效果**：按同一服务中没用到该模式的 run 的成功率作为基线来比较，而不是用绝对成功率。模型显式引用（evidence 或假设 refs 里的 `memory:<id>`）的样本足够时，以引用为准。比基线显著且明显更差的模式会被排除。被排除的模式仍按 `reasoning.pattern_probe_rate`（上限 0.2）确定性地放给一小部分 run，这些 run 达到基线就恢复。已失效的条目会被清掉；列表到 500 条上限时，只保留证据最强的。运维人员也可以手动提议排除或恢复。
 - **轨迹结构**：假设带稳定 `id`，换个说法也按同一个算。置信度覆盖率和结构化比例纳入度量、门禁和诊断；已定论但没给置信度的假设按 0.5 预测计。

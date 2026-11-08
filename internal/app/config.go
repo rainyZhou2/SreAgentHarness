@@ -274,6 +274,13 @@ func (e Env) int64(k string, def int64) int64 {
 	return def
 }
 
+func (e Env) float(k string, def float64) float64 {
+	if f, err := strconv.ParseFloat(e(k), 64); err == nil {
+		return f
+	}
+	return def
+}
+
 func (e Env) bool(k string, def bool) bool {
 	if b, err := strconv.ParseBool(e(k)); err == nil {
 		return b

@@ -33,12 +33,14 @@ import (
 	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/scheduler"
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/stream"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/trigger"
+	"go-sre-harness/internal/verify"
 	"go-sre-harness/migrations"
 )
 
@@ -230,6 +232,10 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, fmt.Errorf("tool %q is reserved for the harness", artifactq.Name)
 	}
 	h.Tools.Register(artifactq.New(h.Artifacts))
+	if _, dup := h.Tools.Lookup(verify.ReviewToolName); dup {
+		return nil, fmt.Errorf("tool %q is reserved for the harness", verify.ReviewToolName)
+	}
+	h.Tools.Register(verify.ReviewTool{})
 	if err := applyToolOverlays(h.Tools, cfgFile.ToolOverlays, log); err != nil {
 		return nil, err
 	}
@@ -305,6 +311,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	h.Gateway = gw.New(route, store, h.Artifacts, gw.Admission{DailyBudgetMicros: int64(cfgFile.Models.DailyBudgetUSD * 1e6),
 		MaxInflightPerTenant: cfgFile.Models.MaxInflightPerTenant}, log, providers...)
 	h.Gateway.SetBreakers(breakers)
+	// Calls that belong to no run (playbook induction) use the same routes
+	// with an in-memory ledger: they cannot be lease-fenced.
+	h.OfflineGateway = gw.New(route, gw.NewMemLedger(), h.Artifacts, gw.Admission{}, log, providers...)
 	if scorer != nil {
 		h.Gateway.SetScorer(scorer)
 	}
@@ -460,6 +469,19 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if pm, ok := retriever.(kernel.PlanMemorySource); ok {
 		planMemory = pm
 	}
+	// Independent verification of conclusions: the rule layer always runs;
+	// a model judge joins when an alias is configured.
+	var verifier *verify.Verifier
+	if e.bool("HARNESS_REASONING_VERIFY", true) {
+		verifier = &verify.Verifier{MemoryIsEvidence: e.bool("HARNESS_VERIFIER_MEMORY_IS_EVIDENCE", false)}
+		if alias := e("HARNESS_VERIFIER_MODEL_ALIAS"); alias != "" {
+			verifier.Judge = &verify.ModelJudge{Gateway: h.Gateway, Alias: alias, Effort: e("HARNESS_VERIFIER_EFFORT")}
+		}
+	}
+	var calibration kernel.CalibrationSource
+	if e.bool("HARNESS_REASONING_CALIBRATION", true) {
+		calibration = &reasoning.CalibrationService{Store: store, MinN: e.int("HARNESS_CALIBRATION_MIN_FORECASTS", 0)}
+	}
 	// worker
 	if mode == "all" || mode == "worker" {
 		hostname, _ := os.Hostname()
@@ -470,6 +492,12 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			Checkpoints:        e.bool("HARNESS_CHECKPOINTS", true),
 			Memory:             retriever,
 			PlanMemory:         planMemory,
+			Verifier:           verifier,
+			MaxBacktracks:      e.int("HARNESS_REASONING_MAX_BACKTRACKS", kernel.DefaultMaxBacktracks),
+			VerifyTimeout:      e.dur("HARNESS_VERIFIER_TIMEOUT", time.Minute),
+			ConclusionSamples:  e.int("HARNESS_REASONING_SAMPLES", 1),
+			MinAgreement:       e.float("HARNESS_REASONING_MIN_AGREEMENT", 0.6),
+			Calibration:        calibration,
 			Compactor:          compactor,
 			Rules:              rules,
 			Skills:             h.Extensions,
