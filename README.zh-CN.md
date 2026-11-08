@@ -1,12 +1,16 @@
+<div align="center">
+
 # go-sre-harness
 
 [English](README.md) | **简体中文**
 
 面向 SRE 场景的认知型 Agent 运行时：把每一次推理和工具调用当作可恢复、可审计的分布式事务来执行。
 
-<p align="center"><img src="docs/images/desktop-diagnosis.png" alt="桌面客户端：一次排查的工作日志、工具调用和已验证的假设" width="900"></p>
+<img src="docs/images/desktop-diagnosis.zh-CN.png" alt="桌面客户端：一次排查的工作日志、工具调用和已验证的假设" width="900">
 
 [桌面客户端](#桌面客户端) · [快速开始](#快速开始) · [架构](#架构) · [Agent 运行时](#agent-运行时) · [记忆](#记忆) · [推理质量](#推理质量) · [触发器与策略](#触发器策略规则与动作闭环) · [部署](#部署) · [配置](#配置) · [API](#api)
+
+</div>
 
 ## 亮点
 
@@ -46,12 +50,12 @@ desktop/build.sh run
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="docs/images/desktop-approval.png" alt="对话内审批"><br><b>对话内审批</b> — 带副作用的生成计划等待审核：风险等级、计划哈希、过期时间和操作哈希</td>
-<td width="50%" valign="top"><img src="docs/images/desktop-inbox.png" alt="审批收件箱"><br><b>审批收件箱</b> — 汇总所有对话中待处理的审批，带角标和系统通知</td>
+<td width="50%" valign="top"><img src="docs/images/desktop-approval.zh-CN.png" alt="对话内审批"><br><b>对话内审批</b> — 带副作用的生成计划等待审核：风险等级、计划哈希、过期时间和操作哈希</td>
+<td width="50%" valign="top"><img src="docs/images/desktop-inbox.zh-CN.png" alt="审批收件箱"><br><b>审批收件箱</b> — 汇总所有对话中待处理的审批，带角标和系统通知</td>
 </tr>
 <tr>
-<td width="50%" valign="top"><img src="docs/images/desktop-gallery.png" alt="广场"><br><b>广场</b> — 常用 SRE 技能（延迟、错误突增、依赖、发布检查等），一键添加</td>
-<td width="50%" valign="top"><img src="docs/images/desktop-graph.png" alt="图谱"><br><b>图谱</b> — 检索 Run、步骤、工具、记忆和服务之间的关联</td>
+<td width="50%" valign="top"><img src="docs/images/desktop-gallery.zh-CN.png" alt="广场"><br><b>广场</b> — 常用 SRE 技能（延迟、错误突增、依赖、发布检查等），一键添加</td>
+<td width="50%" valign="top"><img src="docs/images/desktop-graph.zh-CN.png" alt="图谱"><br><b>图谱</b> — 检索 Run、步骤、工具、记忆和服务之间的关联</td>
 </tr>
 </table>
 
