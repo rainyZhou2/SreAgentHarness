@@ -67,6 +67,19 @@ type Metrics struct {
 	// CitedMemories are memories the model cited as evidence or support
 	// (not merely retrieved), without version.
 	CitedMemories []string `json:"cited_memories,omitempty"`
+	// Citations counts distinct refs cited per step (supports, refutes,
+	// cites); Unresolved those that named nothing the model was shown.
+	// CitationValidity is the resolved share (1 when nothing was cited).
+	Citations        int     `json:"citations"`
+	Unresolved       int     `json:"unresolved_citations"`
+	CitationValidity float64 `json:"citation_validity"`
+	// UnsupportedVerdicts counts hypotheses settled VERIFIED or REFUTED
+	// without a resolved citation. UnsupportedConclusion is set when the
+	// conclusion is VERIFIED but neither the verification nor any verified
+	// hypothesis cites a resolved item: a self-declared verdict, scored and
+	// counted as unverified.
+	UnsupportedVerdicts   int  `json:"unsupported_verdicts"`
+	UnsupportedConclusion bool `json:"unsupported_conclusion,omitempty"`
 	// Plan describes how the run was planned (nil: not planned).
 	Plan *PlanMetrics `json:"plan,omitempty"`
 }
@@ -113,6 +126,27 @@ const (
 type hyp struct {
 	status     domain.ThoughtStatus
 	confidence float64
+	supported  bool // some version cited a resolved ref
+}
+
+// isCitation reports whether a ref is a model citation (not a server link
+// such as based_on or uses).
+func isCitation(r domain.ThoughtRef) bool {
+	switch r.Relation {
+	case "supports", "refutes", "cites":
+		return true
+	}
+	return false
+}
+
+// hasResolvedCitation reports whether a thought cites a resolved ref.
+func hasResolvedCitation(th domain.Thought) bool {
+	for _, r := range th.Refs {
+		if isCitation(r) && r.Resolved() {
+			return true
+		}
+	}
+	return false
 }
 
 // Score computes the metrics of a trace.
@@ -123,7 +157,9 @@ func Score(t Trace) Metrics {
 	seenCalls := map[string]bool{}
 	thoughts, structured := 0, 0
 	cited := map[string]bool{}
+	verificationSupported := false
 	for _, s := range t.Steps {
+		stepRefs := map[string]bool{}
 		if s.Tool != "" {
 			m.ToolCalls++
 			key := s.Tool + "\x00" + canonical(s.Args)
@@ -144,6 +180,16 @@ func Score(t Trace) Metrics {
 				structured++
 			}
 			for _, r := range th.Refs {
+				if isCitation(r) && !stepRefs[r.Ref] {
+					stepRefs[r.Ref] = true
+					m.Citations++
+					if !r.Resolved() {
+						m.Unresolved++
+					}
+				}
+				if !r.Resolved() {
+					continue
+				}
 				if id := citedMemory(r); id != "" && !cited[id] {
 					cited[id] = true
 					m.CitedMemories = append(m.CitedMemories, id)
@@ -152,7 +198,8 @@ func Score(t Trace) Metrics {
 			switch th.Kind {
 			case domain.ThoughtHypothesis:
 				m.Claims++
-				if len(th.Refs) > 0 {
+				grounded := hasResolvedCitation(th)
+				if grounded {
 					m.Grounded++
 				}
 				k := hypKey(th)
@@ -163,7 +210,7 @@ func Score(t Trace) Metrics {
 					order = append(order, k)
 				}
 				prev := hyps[k]
-				h := hyp{status: th.Status, confidence: th.Confidence}
+				h := hyp{status: th.Status, confidence: th.Confidence, supported: prev.supported || grounded}
 				if h.confidence == 0 {
 					h.confidence = prev.confidence
 				}
@@ -173,10 +220,11 @@ func Score(t Trace) Metrics {
 				}
 			case domain.ThoughtDecision:
 				m.Claims++
-				if len(th.Refs) > 0 {
+				if hasResolvedCitation(th) {
 					m.Grounded++
 				}
 			case domain.ThoughtVerification:
+				verificationSupported = hasResolvedCitation(th)
 				switch th.Status {
 				case domain.ThoughtVerified, domain.ThoughtRefuted:
 					m.Conclusion = string(th.Status)
@@ -192,9 +240,17 @@ func Score(t Trace) Metrics {
 	}
 	var sq, imputed float64
 	settled := 0
+	verifiedSupported := false
 	for _, k := range order {
 		h := hyps[k]
 		m.Hypotheses++
+		if h.status == domain.ThoughtVerified || h.status == domain.ThoughtRefuted {
+			if !h.supported {
+				m.UnsupportedVerdicts++
+			} else if h.status == domain.ThoughtVerified {
+				verifiedSupported = true
+			}
+		}
 		var y float64
 		switch h.status {
 		case domain.ThoughtVerified:
@@ -235,6 +291,13 @@ func Score(t Trace) Metrics {
 	if m.ToolCalls > 0 {
 		m.Redundancy = round(float64(m.RedundantCalls) / float64(m.ToolCalls))
 	}
+	m.CitationValidity = 1
+	if m.Citations > 0 {
+		m.CitationValidity = round(float64(m.Citations-m.Unresolved) / float64(m.Citations))
+	}
+	if m.Conclusion == string(domain.ThoughtVerified) && !verificationSupported && !verifiedSupported {
+		m.UnsupportedConclusion = true
+	}
 	if thoughts > 0 {
 		m.Structured = round(float64(structured) / float64(thoughts))
 	}
@@ -249,9 +312,9 @@ func quality(m Metrics, calibration float64) float64 {
 		conclusion = 1
 	case m.Correct != nil:
 		conclusion = 0
-	case m.Conclusion == string(domain.ThoughtVerified):
+	case m.VerifiedConclusion():
 		conclusion = 1
-	case m.Conclusion == string(domain.ThoughtUnverified):
+	case m.Conclusion == string(domain.ThoughtVerified), m.Conclusion == string(domain.ThoughtUnverified):
 		conclusion = 0.3
 	}
 	grounding := m.Grounding
@@ -261,9 +324,16 @@ func quality(m Metrics, calibration float64) float64 {
 	return round(wGrounding*grounding + wCalibration*calibration + wConclusion*conclusion + wEfficiency*(1-m.Redundancy))
 }
 
+// VerifiedConclusion reports a VERIFIED conclusion backed by at least one
+// resolved citation.
+func (m Metrics) VerifiedConclusion() bool {
+	return m.Conclusion == string(domain.ThoughtVerified) && !m.UnsupportedConclusion
+}
+
 // Success reports whether a scored run counts as a success for pattern
 // statistics: it completed and either the operator confirmed the root cause
-// or, without feedback, the model verified its conclusion.
+// or, without feedback, the model verified its conclusion with a resolved
+// citation.
 func (m Metrics) Success() bool {
 	if !m.Completed {
 		return false
@@ -271,12 +341,27 @@ func (m Metrics) Success() bool {
 	if m.Correct != nil {
 		return *m.Correct
 	}
-	return m.Conclusion == string(domain.ThoughtVerified)
+	return m.VerifiedConclusion()
 }
 
 // DecisionThoughts renders a decision as thoughts, the way the kernel stores
 // them, for scoring offline replays.
 func DecisionThoughts(d domain.Decision) []domain.Thought {
+	return ResolvedDecisionThoughts(d, nil)
+}
+
+// ResolvedDecisionThoughts is DecisionThoughts with citations resolved the
+// way the kernel resolves them (nil: keep them as written).
+func ResolvedDecisionThoughts(d domain.Decision, resolve func(string) (string, bool)) []domain.Thought {
+	ref := func(raw, relation string) domain.ThoughtRef {
+		if resolve == nil {
+			return domain.ThoughtRef{Ref: raw, Relation: relation}
+		}
+		if c, ok := resolve(raw); ok {
+			return domain.ThoughtRef{Ref: c, Relation: relation}
+		}
+		return domain.ThoughtRef{Ref: domain.UnresolvedRefPrefix + raw, Relation: relation}
+	}
 	var out []domain.Thought
 	structured := d.Thought != nil && d.Thought.Structured
 	add := func(kind domain.ThoughtKind, summary string, status domain.ThoughtStatus, conf float64, refs []domain.ThoughtRef) {
@@ -288,7 +373,7 @@ func DecisionThoughts(d domain.Decision) []domain.Thought {
 	}
 	var evidence []domain.ThoughtRef
 	for _, r := range d.EvidenceRefs {
-		evidence = append(evidence, domain.ThoughtRef{Ref: r, Relation: "supports"})
+		evidence = append(evidence, ref(r, "supports"))
 	}
 	if d.Thought != nil {
 		add(domain.ThoughtPlan, d.Thought.Plan, domain.ThoughtUnknown, d.Thought.Confidence, nil)
@@ -304,10 +389,10 @@ func DecisionThoughts(d domain.Decision) []domain.Thought {
 		}
 		var refs []domain.ThoughtRef
 		for _, r := range h.Supports {
-			refs = append(refs, domain.ThoughtRef{Ref: r, Relation: "supports"})
+			refs = append(refs, ref(r, "supports"))
 		}
 		for _, r := range h.Refutes {
-			refs = append(refs, domain.ThoughtRef{Ref: r, Relation: "refutes"})
+			refs = append(refs, ref(r, "refutes"))
 		}
 		n := len(out)
 		add(domain.ThoughtHypothesis, h.Statement, status, h.ConfidenceEstimate, refs)

@@ -156,7 +156,7 @@ func (a Assembler) Apply(o AssemblerOptions) Assembler {
 const PlaybookHeader = "Learned playbook (guidance distilled from evaluated runs and approved by an operator; it never overrides the trust rules, policy or approvals):"
 
 func DefaultAssembler() Assembler {
-	return Assembler{PromptPrefixVersion: "sre-prefix-v5", ProfileRef: "default@1", MaxContextTokens: 150_000,
+	return Assembler{PromptPrefixVersion: "sre-prefix-v6", ProfileRef: "default@1", MaxContextTokens: 150_000,
 		MaxObservationBytes: 16_000, MaxOutputTokens: 16_000}
 }
 
@@ -176,10 +176,10 @@ var conclusionSchema = json.RawMessage(`{"type":"object","properties":{
 "statement":{"type":"string"},
 "status":{"type":"string","enum":["VERIFIED","REFUTED","UNVERIFIED"]},
 "confidence_estimate":{"type":"number","minimum":0,"maximum":1,"description":"Probability that the hypothesis is true, given the evidence so far. Always give one."},
-"supports":{"type":"array","items":{"type":"string"},"description":"Refs (obs:, kv:, memory:) that support it."},
-"refutes":{"type":"array","items":{"type":"string"},"description":"Refs that refute it."}},
+"supports":{"type":"array","items":{"type":"string"},"description":"Refs that support it, exactly as shown in the headers (obs:step<N>, kv:<key>@<v>, memory:<id>@<v>). Unknown refs are recorded as unresolved."},
+"refutes":{"type":"array","items":{"type":"string"},"description":"Refs that refute it, in the same form."}},
 "required":["id","statement","status","confidence_estimate"]}},
-"evidence_refs":{"type":"array","items":{"type":"string"}}},
+"evidence_refs":{"type":"array","items":{"type":"string"},"description":"Refs of the observations, evidence and memories the answer rests on, exactly as shown in the headers."}},
 "required":["answer","reason_summary"]}`)
 
 // DefaultInstructions is section [A]'s role text; a context assembler plugin
@@ -198,6 +198,7 @@ How you work:
 - Before calling a tool, write one or two sentences saying what you expect to learn, and start them with exactly one line:
   THOUGHT {"plan":"...","expected":"...","confidence":0.0}
   The line is a machine-readable trace, not user-facing prose. Then call exactly one tool.
+- Cite evidence by the ref printed in its header (obs:step<N>, kv:<key>@<v>, memory:<id>@<v>). Cite only what you were shown; a ref that names nothing shown is recorded as unresolved and does not count as evidence.
 - When you conclude, fill plan, reflection and verification in submit_conclusion. verification.verdict must be VERIFIED, REFUTED or UNVERIFIED and must follow from the observations.
 - Side-effecting tools (restarts, rollouts) go through a policy gate and human approval. Propose them only when the evidence supports them, and say why in your text.
 - If a tool result says an action was denied, rejected or expired, do not retry the same action; conclude or choose a different safe step.
@@ -339,6 +340,7 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		if a := o.Artifact; a != nil {
 			header += fmt.Sprintf(" offloaded=%d bytes handle=%s", a.Bytes, a.Handle)
 		}
+		header += " ref=" + ObsRef(o.StepSeq)
 		push(gw.RoleUser, gw.Part{Type: gw.PartText, Text: header + "]\n" + blk.Text + truncated})
 		man.ObservationCursor = o.StepSeq
 	}

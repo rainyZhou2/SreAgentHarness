@@ -65,6 +65,10 @@ type Thresholds struct {
 	// settled hypotheses).
 	MinStructured float64 `json:"min_structured,omitempty"`
 	MinCoverage   float64 `json:"min_coverage,omitempty"`
+	// MinCitationValidity flags citations that name nothing the model was
+	// shown; MaxUnsupportedRate verdicts or conclusions without one.
+	MinCitationValidity float64 `json:"min_citation_validity,omitempty"`
+	MaxUnsupportedRate  float64 `json:"max_unsupported_rate,omitempty"`
 }
 
 // Defaults fills unset fields.
@@ -108,6 +112,12 @@ func (c Config) Defaults() Config {
 	}
 	if t.MinCoverage <= 0 {
 		t.MinCoverage = 0.6
+	}
+	if t.MinCitationValidity <= 0 {
+		t.MinCitationValidity = 0.9
+	}
+	if t.MaxUnsupportedRate <= 0 {
+		t.MaxUnsupportedRate = 0.3
 	}
 	return c
 }
@@ -353,6 +363,7 @@ const (
 	DimVerification   = "verification"
 	DimDiscrimination = "discrimination"
 	DimStructure      = "structure"
+	DimCitation       = "citation"
 )
 
 func weakDimensions(s reasoning.Summary, t Thresholds) []string {
@@ -375,6 +386,10 @@ func weakDimensions(s reasoning.Summary, t Thresholds) []string {
 	if s.Structured < t.MinStructured || (s.Settled > 0 && s.CalibrationCoverage < t.MinCoverage) {
 		out = append(out, DimStructure)
 	}
+	if (s.Citations > 0 && s.CitationValidity < t.MinCitationValidity) ||
+		s.UnsupportedVerdictRate > t.MaxUnsupportedRate || s.UnsupportedConclusionRate > t.MaxUnsupportedRate {
+		out = append(out, DimCitation)
+	}
 	return out
 }
 
@@ -385,6 +400,7 @@ var guidance = map[string]string{
 	DimRedundancy:     "- Do not repeat a tool call with the same arguments; reuse the earlier observation, or query an offloaded result instead of re-running the tool.",
 	DimVerification:   "- Before concluding, run one check that could prove the conclusion wrong, and report VERIFIED only when that check passed.",
 	DimDiscrimination: "- Prefer the check that best separates your top hypotheses, and mark each hypothesis VERIFIED or REFUTED as soon as evidence settles it.",
+	DimCitation:       "- Cite only refs printed in observation, evidence and memory headers (obs:step<N>, kv:<key>@<v>, memory:<id>@<v>), and give every VERIFIED or REFUTED hypothesis and every verification at least one such ref.",
 	DimStructure:      "- Fill the structured fields: give every hypothesis a short stable id reused across steps, a status and a confidence_estimate between 0 and 1, and state the verification verdict when concluding.",
 }
 

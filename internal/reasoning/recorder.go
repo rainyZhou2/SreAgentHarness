@@ -149,7 +149,7 @@ func serviceOf(g goalDoc) string {
 // least one hypothesis.
 func DistillPattern(run domain.Run, goal, service string, t Trace, m Metrics, quality string) (memory.NewMemory, bool) {
 	if run.Status != domain.RunCompleted || quality == "DISPUTED" || service == "" ||
-		m.Conclusion != string(domain.ThoughtVerified) || m.Verified+m.Refuted == 0 {
+		!m.VerifiedConclusion() || m.Verified+m.Refuted == 0 {
 		return memory.NewMemory{}, false
 	}
 	type entry struct {
