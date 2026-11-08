@@ -157,12 +157,24 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_REASONING_MAX_BACKTRACKS` | times an unaccepted conclusion is handed back to the agent (default 1, negative: never) |
 | `HARNESS_REASONING_SAMPLES` / `_MIN_AGREEMENT` | self-consistency samples of a final conclusion (default 1: off) and the agreement it needs (default 0.6) |
 | `HARNESS_REASONING_CALIBRATION` / `HARNESS_CALIBRATION_MIN_FORECASTS` | confidence calibration per profile (default `true`) and the forecasts needed to fit it (default 30) |
+| `HARNESS_RUN_MAX_COST_USD` / `HARNESS_RUN_MAX_TOKENS` | per-run model spend limit (default 0: off); from 80% the agent is told to conclude, at 100% the kernel concludes for it without another model call. A profile's `run_limits` can only tighten them |
+| `HARNESS_LOOP_MAX_REPEATS` / `HARNESS_LOOP_STALL_STEPS` | how often an identical call may run again (default 1, negative: unlimited) and how many tool results without new content trigger the stall notice (default 4; twice that forces a conclusion; negative: off) |
+| `HARNESS_MAX_PARALLEL_TOOLS` | read-only calls of one model response that run together (default 4; 1: one call per step) |
 
 Generated plans emit `plan.generated`, `plan.validation_failed`, `plan.repaired`, `plan.fallback`, `plan.approval_requested`, `plan.approved`, `plan.rejected`, `plan.executed`, `plan.injection_suspected`, `plan.replan_requested` and `plan.replanned` events. Planner metrics are exposed on `/metrics`: `harness_plan_total`, `harness_plan_duration_seconds`, `harness_plan_repairs_total`, `harness_plan_validation_failures_total` and `harness_plan_fallback_total`.
 
 Plan datasets record the plan artifact, analysis, flow state, approvals, outcome, duration and cost. `POST /v1/eval/datasets/{id}/plan-cases` adds a terminal run, `POST /v1/eval/plan-runs` replays the frozen split offline, and the report groups success, safety, replay completion, steps, duration and cost by variant (`react`, `fallback_flow`, `generated_flow`, `profile_flow`).
 
 See `deploy/harness.example.yaml` for the rest.
+
+## Agent loop safeguards
+
+- **Run budget**: the kernel reads the run's model usage before each reasoning step. At 80% of `HARNESS_RUN_MAX_COST_USD` / `HARNESS_RUN_MAX_TOKENS` (or the profile's tighter `run_limits.max_cost_usd` / `max_tokens`) the model gets a `[kernel notice]` and a conclude-now instruction; at 100% the kernel writes the final answer itself (`stopped` in the result: the hypotheses and last tool results so far, marked UNVERIFIED) and skips the review, so a looping run cannot spend past its limit.
+- **Parallel read-only calls**: when one response asks for several tools, the extra calls run together with the first in a kernel-owned `harness.parallel` step (hidden from the model, refused if it calls it) when each is registered, visible, allowed without approval, read-only and not a repeat; at most `max_parallel_tools`. Each call becomes its own observation (`obs:step<N>.<K>`), and a call that fails or changed since planning fails alone. Calls left out (side effects, approval needed, duplicates) are listed in the step summary as `deferred_not_run`; side-effecting calls always go one at a time through the approval gate.
+- **Tool errors as observations**: a read-only call that fails permanently (bad arguments, missing resource, permission) becomes an `outcome=error` observation the agent can adapt to instead of failing the run; transient (retryable) errors still retry the step, and side-effecting calls keep the unknown-effect handling.
+- **Repair feedback**: an unusable response (no parseable tool call, schema-invalid arguments, an invalid decision, an unknown tool) is sent back to the model as a `[correction]` naming the problem (and the available tools) up to twice per attempt before the step retries; repairs are recorded in the step summary.
+- **Loop and stall guard**: an identical call (tool and canonical arguments) that already ran `max_repeats` times, or that was denied, rejected or expired, is not run again: it is recorded as a skipped step whose reason points to the earlier result. After `stall_steps` tool results without new content (repeats, errors, identical output) the agent is told to change approach; after twice that, a further tool call is replaced by a kernel conclusion.
+- Profiles set these per agent under `run_limits` (`max_cost_usd`, `max_tokens`, `max_repeats`, `stall_steps`, `max_parallel_tools`); they can only tighten the process settings.
 
 ## Triggers, policy rules and the action loop
 

@@ -17,31 +17,51 @@ import (
 // Canonical forms, also printed in the prompt headers:
 //
 //	obs:step<N>        tool result of step N (shown, or summarized by compaction)
+//	obs:step<N>.<K>    result of call K of a parallel batch step N
 //	kv:<key>@<version> operator evidence
 //	memory:<id>@<version>
 type RefSet struct {
-	obs       map[int64]string // step → tool
-	byTool    map[string]int64 // tool → latest step
-	handles   map[string]int64 // offloaded artifact handle → step
-	compacted int64            // steps before this were summarized
-	evidence  map[string]int64 // key → pinned version
-	memories  map[string]int64 // id → pinned version
+	obs       map[int64]string         // step → tool
+	parts     map[int64]map[int]string // batch step → part → tool
+	byTool    map[string]string        // tool → latest ref
+	handles   map[string]string        // offloaded artifact handle → ref
+	compacted int64                    // steps before this were summarized
+	evidence  map[string]int64         // key → pinned version
+	memories  map[string]int64         // id → pinned version
 }
 
 // ObsRef is the canonical citation of a step's observation.
 func ObsRef(step int64) string { return fmt.Sprintf("obs:step%d", step) }
 
+// ObsPartRef is the citation of one call of a batch step (part 0: the
+// step itself).
+func ObsPartRef(step int64, part int) string {
+	if part <= 0 {
+		return ObsRef(step)
+	}
+	return fmt.Sprintf("obs:step%d.%d", step, part)
+}
+
 // NewRefSet indexes the citable items of a reasoning input.
 func NewRefSet(in ReasoningInput) *RefSet {
-	r := &RefSet{obs: map[int64]string{}, byTool: map[string]int64{}, handles: map[string]int64{},
-		compacted: in.CompactedBefore, evidence: map[string]int64{}, memories: map[string]int64{}}
+	r := &RefSet{obs: map[int64]string{}, parts: map[int64]map[int]string{}, byTool: map[string]string{},
+		handles: map[string]string{}, compacted: in.CompactedBefore, evidence: map[string]int64{}, memories: map[string]int64{}}
 	for _, o := range in.Observations {
-		r.obs[o.StepSeq] = o.Tool
-		if o.StepSeq >= r.byTool[o.Tool] {
-			r.byTool[o.Tool] = o.StepSeq
+		ref := ObsPartRef(o.StepSeq, o.Part)
+		if o.Part > 0 {
+			if r.parts[o.StepSeq] == nil {
+				r.parts[o.StepSeq] = map[int]string{}
+			}
+			r.parts[o.StepSeq][o.Part] = o.Tool
+			if _, ok := r.obs[o.StepSeq]; !ok {
+				r.obs[o.StepSeq] = ""
+			}
+		} else {
+			r.obs[o.StepSeq] = o.Tool
 		}
+		r.byTool[o.Tool] = ref // observations are in step order
 		if o.Artifact != nil && o.Artifact.Handle != "" {
-			r.handles[o.Artifact.Handle] = o.StepSeq
+			r.handles[o.Artifact.Handle] = ref
 		}
 	}
 	for _, e := range in.Evidence {
@@ -60,8 +80,8 @@ func (r *RefSet) Resolve(raw string) (string, bool) {
 	if r == nil || ref == "" {
 		return ref, false
 	}
-	if step, ok := r.handles[ref]; ok {
-		return ObsRef(step), true
+	if canon, ok := r.handles[ref]; ok {
+		return canon, true
 	}
 	kind, rest, ok := strings.Cut(ref, ":")
 	if !ok {
@@ -88,15 +108,48 @@ func (r *RefSet) Resolve(raw string) (string, bool) {
 	return ref, false
 }
 
-// resolveObs accepts step<N>, <N>, step:<N>, <tool>, <tool>@step<N> and
-// <tool>@<N>. A step cited with a tool must have called that tool.
+// resolveObs accepts step<N>, <N>, step:<N>, step<N>.<K>, <tool>,
+// <tool>@step<N> and <tool>@<N>. A step cited with a tool must have called
+// that tool (for a batch step: in one of its calls).
 func (r *RefSet) resolveObs(s string) (string, bool) {
 	s = strings.TrimPrefix(strings.TrimSpace(s), ":")
 	tool := ""
 	if i := strings.LastIndexByte(s, '@'); i > 0 {
 		tool, s = s[:i], s[i+1:]
 	}
+	part := 0
+	if i := strings.LastIndexByte(s, '.'); i > 0 {
+		// step<N>.<K>; a dot elsewhere is part of a tool name.
+		if _, isStep := stepNumber(s[:i]); isStep {
+			k, err := strconv.Atoi(s[i+1:])
+			if err != nil || k <= 0 {
+				return "", false
+			}
+			part, s = k, s[:i]
+		}
+	}
 	if n, ok := stepNumber(s); ok {
+		if ps := r.parts[n]; len(ps) > 0 {
+			if part > 0 {
+				t, ok := ps[part]
+				if !ok || (tool != "" && tool != t) {
+					return "", false
+				}
+				return ObsPartRef(n, part), true
+			}
+			if tool != "" {
+				for k, t := range ps {
+					if t == tool {
+						return ObsPartRef(n, k), true
+					}
+				}
+				return "", false
+			}
+			return ObsRef(n), true
+		}
+		if part > 0 {
+			return "", false
+		}
 		if t, shown := r.obs[n]; shown {
 			if tool != "" && tool != t {
 				return "", false
@@ -111,8 +164,8 @@ func (r *RefSet) resolveObs(s string) (string, bool) {
 	if tool == "" {
 		tool = s
 	}
-	if n, ok := r.byTool[tool]; ok {
-		return ObsRef(n), true
+	if ref, ok := r.byTool[tool]; ok {
+		return ref, true
 	}
 	return "", false
 }

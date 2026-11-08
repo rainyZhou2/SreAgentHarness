@@ -122,6 +122,22 @@ type Config struct {
 	// ConclusionSamples > 1 samples final task conclusions that many times
 	// and keeps the majority (self-consistency).
 	ConclusionSamples int
+	// Run limits (the profile's run_limits can only tighten them).
+	// RunMaxCostUSD and RunMaxTokens bound one run's model spend (0: off);
+	// from 80% the agent is told to conclude, at 100% the kernel concludes
+	// for it without another model call.
+	RunMaxCostUSD float64
+	RunMaxTokens  int64
+	// MaxRepeats is how often an identical call (tool and arguments) may run
+	// again in a run (0: DefaultMaxRepeats, < 0: unlimited).
+	MaxRepeats int
+	// StallSteps is the number of consecutive tool results without new
+	// content after which the agent is told it is stuck; twice that forces
+	// a conclusion (0: DefaultStallSteps, < 0: off).
+	StallSteps int
+	// MaxParallelTools bounds the read-only calls of one response that run
+	// together (0: DefaultMaxParallelTools, 1: one call per step).
+	MaxParallelTools int
 	// PlanApprovers is the default number of approvals for a generated plan;
 	// R3 plans always require at least two.
 	PlanApprovers int
@@ -547,6 +563,14 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	factsWrite := w.gatherFacts(ctx, lease, &in)
 	cal := w.calibrator(ctx, lease)
 	in.CalibrationNote = cal.Note()
+	rules, err := w.rules(ctx, lease)
+	if err != nil {
+		return domain.StepSuccess{}, err
+	}
+	limits := w.loopLimits(rules)
+	loops := newLoopState(in.Calls)
+	bud := w.budget(ctx, lease, limits)
+	kernelStop, mustConclude := w.loopAdvisories(&in, bud, loops, limits)
 	canon, _ := json.Marshal(in)
 	contextHash := artifact.Hash(canon)
 	in.Call = cognitive.CallScope{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
@@ -579,9 +603,28 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 			strat = &copy
 		}
 	}
-	decision, err := strat.Decide(ctx, in)
-	if err == nil && w.cfg.ConclusionSamples > 1 && cognitive.Validate(decision) == nil {
-		decision = cognitive.SelfConsistency(ctx, strat, in, decision, w.cfg.ConclusionSamples)
+	var decision domain.Decision
+	var repairs []string
+	if kernelStop != "" {
+		// Hard limit: conclude without another model call.
+		decision = kernelConclusion(in, kernelStop)
+	} else {
+		for {
+			decision, err = strat.Decide(ctx, in)
+			problem := repairProblem(decision, err)
+			if problem == "" && err == nil {
+				problem = unknownToolProblem(decision, in.Tools)
+			}
+			if problem == "" || len(repairs) >= DefaultMaxOutputRepairs || ctx.Err() != nil {
+				break
+			}
+			// Tell the model what was wrong instead of re-asking blindly.
+			repairs = append(repairs, truncate(problem, 300))
+			in.Repair = problem
+		}
+		if err == nil && w.cfg.ConclusionSamples > 1 && cognitive.Validate(decision) == nil {
+			decision = cognitive.SelfConsistency(ctx, strat, in, decision, w.cfg.ConclusionSamples)
+		}
 	}
 	<-w.reasonSem
 	if err != nil {
@@ -590,6 +633,11 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	if err := cognitive.Validate(decision); err != nil {
 		// Malformed model output: retry the reasoning, never execute it (§31.3).
 		return domain.StepSuccess{}, domain.Retryable(fmt.Errorf("invalid decision: %w", err), 0)
+	}
+	if mustConclude != "" && decision.Kind == domain.DecisionTool {
+		// The agent was told to conclude and still asked for a tool.
+		kernelStop = mustConclude
+		decision = kernelConclusion(in, kernelStop)
 	}
 	decision.SchemaVersion = 1
 	decision.ContextSnapshotID = lease.ContextSnapshotID
@@ -616,6 +664,18 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	if unresolvedRefs > 0 {
 		summary["unresolved_refs"] = unresolvedRefs
 	}
+	if len(repairs) > 0 {
+		summary["repairs"] = repairs
+	}
+	if len(in.Advisories) > 0 {
+		summary["advisories"] = in.Advisories
+	}
+	if bud.usage.Requests > 0 {
+		summary["run_usage"] = bud.usage
+	}
+	if kernelStop != "" {
+		summary["kernel_stop"] = kernelStop
+	}
 	if decision.ModelRequestID != "" {
 		summary["model_request_id"], summary["model"], summary["manifest_ref"] = decision.ModelRequestID, decision.Model, decision.ManifestRef
 	}
@@ -624,9 +684,14 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 		InputHash: lease.InputHash, Status: domain.StepPending}
 
 	if decision.Kind == domain.DecisionFinal {
-		review, err := w.reviewConclusion(ctx, lease, in, decision)
-		if err != nil {
-			return domain.StepSuccess{}, err
+		var review reviewOutcome
+		if kernelStop == "" {
+			// A kernel stop is already marked unverified; reviewing it would
+			// spend what the stop protects.
+			review, err = w.reviewConclusion(ctx, lease, in, decision)
+			if err != nil {
+				return domain.StepSuccess{}, err
+			}
 		}
 		if review.thought != nil {
 			th := *review.thought
@@ -647,6 +712,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 			"thought": decision.Thought, "decision_ref": outRef}
 		if len(decision.Output) > 0 {
 			result["flow_output"] = decision.Output
+		}
+		if kernelStop != "" {
+			result["stopped"] = kernelStop
 		}
 		if rep := review.report; rep != nil {
 			result["independent_verification"] = rep
@@ -672,9 +740,18 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	call := *decision.Tool
 	// Follow-up markers are kernel-owned; a model decision never carries one.
 	call.Followup = nil
-	rules, err := w.rules(ctx, lease)
-	if err != nil {
-		return domain.StepSuccess{}, err
+	if why := loops.refuse(call, limits.maxRepeats); why != "" {
+		step, err := w.refusedStep(ctx, lease, call, why)
+		if err != nil {
+			return domain.StepSuccess{}, err
+		}
+		res.Plan = []domain.PlannedStep{step, nextReason}
+		summary["tool"], summary["loop_guard"] = call.Name, why
+		if n := len(decision.DeferredToolCalls); n > 0 {
+			summary["deferred_not_run"] = n
+		}
+		res.Summary = mustJSON(summary)
+		return res, nil
 	}
 	var reg *tools.Descriptor
 	if t, ok := w.tools.LookupFor(lease.TenantID, call.Name); ok {
@@ -691,8 +768,33 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease) (domain.
 	// The model cannot influence the risk class; the profile can only tighten.
 	pd, desc := rules.DecideCall(ctx, w.policy, profile.Call{TenantID: lease.TenantID, RunID: lease.RunID,
 		Name: call.Name, Args: call.Args}, reg)
-	if call.Name == verify.ReviewToolName {
+	if call.Name == verify.ReviewToolName || call.Name == BatchToolName {
 		pd, desc = policy.Decision{Verdict: policy.Deny, Reason: "kernel-owned tool"}, nil
+	}
+	if pd.Verdict == policy.Allow && len(decision.DeferredToolCalls) > 0 {
+		// Independent read-only calls of the same response run together.
+		calls, notes := w.planBatch(ctx, lease, rules, in, call, desc, decision.DeferredToolCalls, limits, loops)
+		if bt, ok := w.tools.LookupFor(lease.TenantID, BatchToolName); ok && len(calls) > 1 {
+			bcall := domain.ToolCall{Name: BatchToolName, Args: mustJSON(batchArgs{Calls: calls}),
+				Followup: &domain.ToolFollowup{Role: domain.FollowupBatch, OfTool: call.Name, OfStep: lease.StepSeq}}
+			if bref, bhash, err := w.put(ctx, lease.TenantID, "tool-input", bcall); err != nil {
+				return domain.StepSuccess{}, err
+			} else {
+				callRef, callHash = bref, bhash
+			}
+			bd := rules.Effective(bt.Descriptor())
+			desc = &bd
+			pd = policy.Decision{Verdict: policy.Allow, Reason: fmt.Sprintf("read-only batch of %d calls, each allowed", len(calls))}
+			call = bcall
+			summary["batch"] = len(calls)
+		} else if len(calls) > 1 {
+			notes = deferredNotes(decision.DeferredToolCalls, "parallel batches are not available")
+		}
+		if len(notes) > 0 {
+			summary["deferred_not_run"] = sortedNotes(notes)
+		}
+	} else if n := len(decision.DeferredToolCalls); n > 0 {
+		summary["deferred_not_run"] = n
 	}
 	pdJSON := mustJSON(pd)
 	toolStep := domain.PlannedStep{Kind: domain.StepTool, Executor: "tool", InputRef: callRef, InputHash: callHash,
@@ -809,6 +911,19 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		if fu := call.Followup; fu != nil && fu.Role == domain.FollowupReview {
 			ledger.challenge(fu.OfStep)
 		}
+		modelCall := call.Followup == nil
+		if call.Name == BatchToolName && call.Followup != nil && call.Followup.Role == domain.FollowupBatch {
+			parts, err := w.batchObservations(ctx, lease.TenantID, s, call)
+			if err != nil {
+				return in, err
+			}
+			for _, o := range parts {
+				in.Observations = append(in.Observations, o)
+				in.Calls = append(in.Calls, cognitive.CallRecord{Step: s.Seq, Key: callKey(o.Tool, o.Args),
+					Outcome: o.Outcome, ResultHash: resultHash(o)})
+			}
+			continue
+		}
 		obs := domain.Observation{StepSeq: s.Seq, Tool: call.Name, Args: call.Args, TrustTag: "T2"}
 		switch {
 		case s.Status == domain.StepSucceeded && s.OutputRef != nil:
@@ -817,6 +932,10 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 				return in, err
 			}
 			obs.Outcome, obs.Content = "ok", o.Content
+			if o.Outcome != "" {
+				obs.Outcome = o.Outcome
+			}
+			obs.Artifact = o.Artifact
 		case s.Status == domain.StepSucceeded:
 			obs.Outcome = "ok"
 		case s.Status == domain.StepFailed:
@@ -828,6 +947,10 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 			obs.Note = *s.StatusReason
 		}
 		in.Observations = append(in.Observations, obs)
+		if modelCall {
+			in.Calls = append(in.Calls, cognitive.CallRecord{Step: s.Seq, Key: callKey(call.Name, call.Args),
+				Outcome: obs.Outcome, ResultHash: resultHash(obs)})
+		}
 	}
 
 	in.Ledger = ledger.entries()
@@ -914,6 +1037,9 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	if !ok || lease.Intent == nil {
 		return domain.StepSuccess{}, fmt.Errorf("tool %q is not registered", call.Name)
 	}
+	if call.Name == BatchToolName && (call.Followup == nil || call.Followup.Role != domain.FollowupBatch) {
+		return domain.StepSuccess{}, fmt.Errorf("tool %q is kernel-owned: %w", call.Name, domain.ErrNotDispatched)
+	}
 	if call.Name == verify.ReviewToolName && (call.Followup == nil || call.Followup.Role != domain.FollowupReview) {
 		// Kernel-owned: a model cannot forge a review result.
 		return domain.StepSuccess{}, fmt.Errorf("tool %q is kernel-owned: %w", call.Name, domain.ErrNotDispatched)
@@ -957,6 +1083,10 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 			InputHash: next.InputHash, Status: domain.StepPending}, next}
 	}
 	sideEffect := desc.Risk.HasSideEffects()
+
+	if call.Name == BatchToolName {
+		return w.executeBatch(ctx, lease, rules, call, plan)
+	}
 
 	if call.Followup != nil && call.Followup.Role == domain.FollowupVerify {
 		select {
@@ -1019,7 +1149,11 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		span.SetStatus(codes.Error, "tool error")
 		span.End()
 		w.cfg.Observer.ObserveTool(desc.Source, string(desc.Risk), "error")
-		if !sideEffect && (strings.HasPrefix(desc.Source, "mcp:") || tools.IsBuiltin(desc.Name)) {
+		var retry *domain.RetryableError
+		if !sideEffect && ctx.Err() == nil && !errors.As(err, &retry) {
+			// A read-only call that failed is evidence too (wrong arguments,
+			// missing resource, permission): the agent sees it and adapts.
+			// Transient failures still retry the step.
 			trust := desc.Trust
 			if trust == "" {
 				trust = "T4"
@@ -1228,7 +1362,7 @@ func toolTrace(name string, d tools.Descriptor, ok bool) ([]domain.Thought, []do
 func withoutKernelTools(ds []tools.Descriptor) []tools.Descriptor {
 	out := ds[:0:0]
 	for _, d := range ds {
-		if d.Name != verify.ReviewToolName {
+		if d.Name != verify.ReviewToolName && d.Name != BatchToolName {
 			out = append(out, d)
 		}
 	}

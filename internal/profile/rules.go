@@ -43,6 +43,8 @@ type Rules struct {
 
 	// Planner is the profile's planner section (nil: process defaults).
 	Planner *PlannerSpec
+	// RunLimits is the profile's run limits (nil: process defaults).
+	RunLimits *RunLimits
 
 	// Flow is the compiled orchestration plan when strategy is "flow".
 	Flow     *flow.Spec
@@ -76,6 +78,10 @@ func Compile(ref string, s Spec) (Rules, error) {
 		return r, fmt.Errorf("profile %s: %w", ref, err)
 	}
 	r.Planner = s.Planner
+	if err := s.RunLimits.Validate(); err != nil {
+		return r, fmt.Errorf("profile %s: %w", ref, err)
+	}
+	r.RunLimits = s.RunLimits
 	for _, t := range s.Tools {
 		if t == "" || (strings.Contains(t, "*") && t != "*" && !strings.HasSuffix(t, ".*")) || strings.Count(t, "*") > 1 {
 			return r, fmt.Errorf("profile %s: invalid tool pattern %q (use a name, \"prefix.*\" or \"*\")", ref, t)

@@ -236,6 +236,10 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, fmt.Errorf("tool %q is reserved for the harness", verify.ReviewToolName)
 	}
 	h.Tools.Register(verify.ReviewTool{})
+	if _, dup := h.Tools.Lookup(kernel.BatchToolName); dup {
+		return nil, fmt.Errorf("tool %q is reserved for the harness", kernel.BatchToolName)
+	}
+	h.Tools.Register(kernel.BatchTool{})
 	if err := applyToolOverlays(h.Tools, cfgFile.ToolOverlays, log); err != nil {
 		return nil, err
 	}
@@ -496,6 +500,11 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			MaxBacktracks:      e.int("HARNESS_REASONING_MAX_BACKTRACKS", kernel.DefaultMaxBacktracks),
 			VerifyTimeout:      e.dur("HARNESS_VERIFIER_TIMEOUT", time.Minute),
 			ConclusionSamples:  e.int("HARNESS_REASONING_SAMPLES", 1),
+			RunMaxCostUSD:      e.float("HARNESS_RUN_MAX_COST_USD", 0),
+			RunMaxTokens:       e.int64("HARNESS_RUN_MAX_TOKENS", 0),
+			MaxRepeats:         e.int("HARNESS_LOOP_MAX_REPEATS", 0),
+			StallSteps:         e.int("HARNESS_LOOP_STALL_STEPS", 0),
+			MaxParallelTools:   e.int("HARNESS_MAX_PARALLEL_TOOLS", 0),
 			MinAgreement:       e.float("HARNESS_REASONING_MIN_AGREEMENT", 0.6),
 			Calibration:        calibration,
 			Compactor:          compactor,

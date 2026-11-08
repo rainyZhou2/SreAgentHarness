@@ -127,7 +127,15 @@ const (
 	// FollowupReview hands a conclusion the independent verifier did not
 	// accept back to the agent.
 	FollowupReview = "conclusion_review"
+	// FollowupBatch marks the kernel step that runs several read-only
+	// calls of one model response together.
+	FollowupBatch = "batch"
 )
+
+// BatchToolName is the kernel-owned tool of a parallel batch step. Its
+// arguments are {"calls":[{name,args,tool_version,risk}]} and its output
+// {"observations":[...]}, one per call with Part set.
+const BatchToolName = "harness.parallel"
 
 // ToolFollowup marks a tool step the kernel planned after an action. The
 // expectation and polling bounds are re-read from the registry at execution

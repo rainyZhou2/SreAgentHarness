@@ -69,6 +69,26 @@ type ReasoningInput struct {
 	// CalibrationNote is the measured calibration of the model's stated
 	// confidence on earlier runs of this profile ("" when unknown).
 	CalibrationNote string `json:"calibration_note,omitempty"`
+
+	// Advisories are kernel notices for this step (budget, repeated calls,
+	// stalled progress, calls of the last response that did not run).
+	Advisories []string `json:"advisories,omitempty"`
+	// Repair is the correction for the previous response of this step,
+	// which the kernel could not use ("" on a first try).
+	Repair string `json:"repair,omitempty"`
+	// ForceConclude tells the model it must conclude now.
+	ForceConclude bool `json:"force_conclude,omitempty"`
+	// Calls are the run's earlier tool calls, for the kernel's loop guard
+	// (not rendered).
+	Calls []CallRecord `json:"-"`
+}
+
+// CallRecord is one earlier tool call of the run.
+type CallRecord struct {
+	Step       int64
+	Key        string // tool name + canonical arguments
+	Outcome    string
+	ResultHash string // "" when the call produced no usable result
 }
 
 // LedgerEntry is one hypothesis of the run's ledger.

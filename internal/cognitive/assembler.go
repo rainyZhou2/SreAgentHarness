@@ -305,8 +305,12 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 	}
 	obsBudget := a.observationBudget(in)
 	for i, o := range in.Observations {
-		push(gw.RoleAssistant, gw.Part{Type: gw.PartText, Text: fmt.Sprintf("[step %d] I called %s with %s.",
-			o.StepSeq, o.Tool, compactJSON(o.Args))})
+		stepLabel := fmt.Sprintf("%d", o.StepSeq)
+		if o.Part > 0 {
+			stepLabel = fmt.Sprintf("%d.%d", o.StepSeq, o.Part)
+		}
+		push(gw.RoleAssistant, gw.Part{Type: gw.PartText, Text: fmt.Sprintf("[step %s] I called %s with %s.",
+			stepLabel, o.Tool, compactJSON(o.Args))})
 		body := string(o.Content)
 		if o.Note != "" {
 			body = strings.TrimSpace(body + "\nnote: " + o.Note)
@@ -327,7 +331,7 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 			trust = "T4"
 		}
 		blk := untrusted.Wrap(fmt.Sprintf("source=tool:%s trust=%s", o.Tool, trust), body)
-		header := fmt.Sprintf("[observation step=%d tool=%s outcome=%s trust=%s", o.StepSeq, o.Tool, o.Outcome, trust)
+		header := fmt.Sprintf("[observation step=%s tool=%s outcome=%s trust=%s", stepLabel, o.Tool, o.Outcome, trust)
 		if note := untrusted.FlagNote(mergeFlags(o.Injection, blk.Flags)); note != "" {
 			header += " " + note
 			man.SuspectedInjection = append(man.SuspectedInjection, fmt.Sprintf("step:%d", o.StepSeq))
@@ -341,7 +345,7 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		if a := o.Artifact; a != nil {
 			header += fmt.Sprintf(" offloaded=%d bytes handle=%s", a.Bytes, a.Handle)
 		}
-		header += " ref=" + ObsRef(o.StepSeq)
+		header += " ref=" + ObsPartRef(o.StepSeq, o.Part)
 		push(gw.RoleUser, gw.Part{Type: gw.PartText, Text: header + "]\n" + blk.Text + truncated})
 		man.ObservationCursor = o.StepSeq
 	}
@@ -397,7 +401,22 @@ func (a Assembler) Build(in ReasoningInput, alias string) (gw.Request, PromptMan
 		man.CapabilityMapRef = artifact.Hash([]byte(text))
 		man.SectionHashes["E"] = man.CapabilityMapRef
 	}
-	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: instruction(in.HasToolSteps, in.StepSeq, in.MaxSteps)})
+	if len(in.Advisories) > 0 {
+		text := "[kernel notice]\n- " + strings.Join(in.Advisories, "\n- ")
+		dyn = append(dyn, gw.Part{Type: gw.PartText, Text: text})
+		man.SectionHashes["N"] = artifact.Hash([]byte(text))
+	}
+	if r := strings.TrimSpace(in.Repair); r != "" {
+		text := "[correction] Your previous response for this step was rejected and not executed: " + r +
+			"\nRespond again with one valid tool call (or several independent read-only ones) or " + ConclusionTool + "."
+		dyn = append(dyn, gw.Part{Type: gw.PartText, Text: text})
+		man.SectionHashes["R"] = artifact.Hash([]byte(text))
+	}
+	stepInstr := instruction(in.HasToolSteps, in.StepSeq, in.MaxSteps)
+	if in.ForceConclude {
+		stepInstr = fmt.Sprintf("[instruction] Stop investigating. Call %s now with the evidence you already have: state the probable answer, your confidence, and what remains unverified. Do not call any other tool.", ConclusionTool)
+	}
+	dyn = append(dyn, gw.Part{Type: gw.PartText, Text: stepInstr})
 	dj, _ := json.Marshal(dyn)
 	man.SectionHashes["D"] = artifact.Hash(dj)
 	for _, p := range dyn {
@@ -446,7 +465,7 @@ func instruction(hasToolSteps bool, stepSeq int64, maxSteps int) string {
 		return fmt.Sprintf("[instruction] This is step %d of at most %d. Few steps remain: call %s now with the evidence you already have, state the probable answer and what remains uncertain. Do not start another investigation branch.", stepSeq, maxSteps, ConclusionTool)
 	}
 	if hasToolSteps {
-		return fmt.Sprintf("[instruction] Continue the investigation for the goal. Call exactly one tool, or call %s when the evidence is sufficient. If the user asked a question rather than requesting an action, answer it as soon as you have enough evidence.", ConclusionTool)
+		return fmt.Sprintf("[instruction] Continue the investigation for the goal. Call one tool (several only when they are independent read-only checks), or call %s when the evidence is sufficient. Do not repeat a call whose result you already have. If the user asked a question rather than requesting an action, answer it as soon as you have enough evidence.", ConclusionTool)
 	}
 	return fmt.Sprintf("[instruction] Analyze the user's message first. If it is a question, answer it with %s (intent=question) without calling tools unless live data is required. If it needs diagnosis or action, start the investigation with one tool (intent=task). If it is ambiguous and acting could be harmful, ask for clarification (intent=clarification).", ConclusionTool)
 }

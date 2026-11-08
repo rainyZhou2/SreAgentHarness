@@ -287,6 +287,14 @@ type Decision struct {
 	Consistency *Consistency `json:"consistency,omitempty"`
 }
 
+// RunUsage is the model spend of a run so far.
+type RunUsage struct {
+	Requests     int64 `json:"model_requests"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	CostMicros   int64 `json:"cost_micros"`
+}
+
 // Consistency records a self-consistency vote over sampled conclusions.
 type Consistency struct {
 	Samples int `json:"samples"`
@@ -315,6 +323,9 @@ type Observation struct {
 	// Injection lists instruction-like spans found in the full tool result
 	// (also when it was offloaded and only a summary is shown).
 	Injection []string `json:"injection_suspected,omitempty"`
+	// Part is the 1-based call index inside a parallel batch step (0 for a
+	// single-call step).
+	Part int `json:"part,omitempty"`
 }
 
 // Evidence injected by an operator through the inject_evidence command.

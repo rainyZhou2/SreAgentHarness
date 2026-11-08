@@ -157,12 +157,24 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_REASONING_MAX_BACKTRACKS` | 未被接受的结论退回 agent 的次数（默认 1，负数不退回） |
 | `HARNESS_REASONING_SAMPLES` / `_MIN_AGREEMENT` | 最终结论的自一致性采样次数（默认 1：关闭）及所需一致率（默认 0.6） |
 | `HARNESS_REASONING_CALIBRATION` / `HARNESS_CALIBRATION_MIN_FORECASTS` | 按 profile 做置信度校准（默认 `true`）及拟合所需样本数（默认 30） |
+| `HARNESS_RUN_MAX_COST_USD` / `HARNESS_RUN_MAX_TOKENS` | 单个 Run 的模型花费上限（默认 0：关闭）；用到 80% 时提示 agent 收敛，用满时 kernel 不再调用模型、直接代为结论。profile 的 `run_limits` 只能收紧 |
+| `HARNESS_LOOP_MAX_REPEATS` / `HARNESS_LOOP_STALL_STEPS` | 完全相同的调用（工具+参数）可重复执行的次数（默认 1，负数不限）；连续多少个工具结果没有新内容时提示停滞（默认 4，达到两倍时强制结论，负数关闭） |
+| `HARNESS_MAX_PARALLEL_TOOLS` | 同一次模型响应中可并行执行的只读调用数（默认 4；1 表示每步一个调用） |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
 计划数据集会记录 plan artifact、分析结果、flow 状态、审批、结果、耗时与成本。`POST /v1/eval/datasets/{id}/plan-cases` 录入已结束的 Run，`POST /v1/eval/plan-runs` 离线回放冻结的数据集，并按变体（`react`、`fallback_flow`、`generated_flow`、`profile_flow`）汇总成功率、安全性、回放完成率、步数、耗时与成本。
 
 其余配置见 `deploy/harness.example.yaml`。
+
+## Agent 循环防护
+
+- **Run 预算**：每个推理步之前 kernel 读取本 Run 的模型用量。达到 `HARNESS_RUN_MAX_COST_USD` / `HARNESS_RUN_MAX_TOKENS`（或 profile 更严格的 `run_limits.max_cost_usd` / `max_tokens`）的 80% 时，模型会收到 `[kernel notice]` 和"立即结论"指令；用满时 kernel 自己写最终答复（结果中带 `stopped`：截至当时的假设和最近的工具结果，标记为 UNVERIFIED）并跳过复核，循环中的 Run 不会超支。
+- **只读调用并行**：一次响应请求多个工具时，若额外调用均已注册、对 agent 可见、无需审批、只读且不是重复调用，则与第一个调用一起放进 kernel 自有的 `harness.parallel` 步骤中并发执行（对模型隐藏，模型直接调用会被拒绝），上限 `max_parallel_tools`。每个调用各自成为一条观察（`obs:step<N>.<K>`），某个调用失败或在规划后发生变化只影响它自己。未执行的调用（有副作用、需审批、重复）记录在步骤摘要的 `deferred_not_run` 中；有副作用的调用始终单独走审批。
+- **工具错误即观察**：只读调用的永久性失败（参数错误、资源不存在、权限）变成 `outcome=error` 的观察交给 agent 调整，不再让 Run 失败；可重试的瞬时错误仍按步骤重试，有副作用的调用保持 unknown-effect 处理。
+- **修复反馈**：无法使用的响应（无法解析的工具调用、不符合 schema 的参数、无效决策、不存在的工具）以 `[correction]` 的形式把具体问题（及可用工具列表）回传给模型，每次尝试最多两次，之后才重试步骤；修复记录写入步骤摘要。
+- **重复与停滞防护**：完全相同的调用（工具+规范化参数）已执行 `max_repeats` 次，或曾被拒绝、驳回、过期的，不再执行，而是记录为跳过的步骤并指向之前的结果。连续 `stall_steps` 个工具结果没有新内容（重复、错误、相同输出）时提示 agent 换思路；达到两倍时，再请求工具会被 kernel 结论替代。
+- profile 可在 `run_limits` 下按 agent 设置（`max_cost_usd`、`max_tokens`、`max_repeats`、`stall_steps`、`max_parallel_tools`），只能比进程配置更严格。
 
 ## 触发器、策略规则与动作闭环
 
