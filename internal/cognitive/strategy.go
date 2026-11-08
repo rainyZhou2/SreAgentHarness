@@ -81,6 +81,10 @@ type ReasoningInput struct {
 	// Calls are the run's earlier tool calls, for the kernel's loop guard
 	// (not rendered).
 	Calls []CallRecord `json:"-"`
+	// RecalledMemories are memories returned by in-run memory searches;
+	// their refs resolve like pinned memories (the content is in the
+	// search observation).
+	RecalledMemories []MemoryRef `json:"recalled_memories,omitempty"`
 	// LoadedTools are tools the agent loaded with harness.load_tools.
 	LoadedTools []string `json:"-"`
 	// MoreTools are visible tools whose schemas are not sent this step;

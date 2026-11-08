@@ -38,6 +38,7 @@ type NewMemory struct {
 	// Filled by Writer.Prepare.
 	ContentRef     string
 	ContentHash    string
+	SearchTerms    string
 	Embedding      []float32
 	EmbeddingModel string
 	Redactions     int
@@ -89,6 +90,7 @@ func (w Writer) Prepare(ctx context.Context, m NewMemory) (NewMemory, error) {
 	}
 	m.ContentRef, m.ContentHash = ref, artifact.Hash([]byte(m.Scope+"|"+m.ScopeID+"|"+m.Subject+"|"+m.Content))
 	_ = hash
+	m.SearchTerms = SearchTerms(m.Title, m.Content, m.Subject)
 	m.Embedding, m.EmbeddingModel = w.Embedder.Embed(m.Title+"\n"+m.Content), w.Embedder.Model()
 	return m, nil
 }
@@ -145,6 +147,8 @@ type Consolidator struct {
 	SideEffecting func(tool string) bool
 	Interval      time.Duration
 	Log           *slog.Logger
+	// Indexer backfills search terms and embeddings each tick (optional).
+	Indexer *Indexer
 	// Hooks run after a run is consolidated (and again when feedback
 	// requeues it). Their errors are logged and never fail consolidation.
 	Hooks []RunHook
@@ -177,6 +181,9 @@ func (c *Consolidator) Run(ctx context.Context) error {
 
 // Tick processes up to 20 finished runs.
 func (c *Consolidator) Tick(ctx context.Context) (int, error) {
+	if _, err := c.Indexer.Tick(ctx); err != nil && c.Log != nil && ctx.Err() == nil {
+		c.Log.Warn("memory indexing", "err", err)
+	}
 	jobs, err := c.Store.ClaimConsolidation(ctx, 20, time.Minute)
 	if err != nil {
 		return 0, err

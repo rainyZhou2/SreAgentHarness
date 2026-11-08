@@ -5,6 +5,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"go-sre-harness/internal/kernel"
@@ -17,12 +18,26 @@ type HashingConfig struct {
 	Dims int `json:"dims,omitempty"`
 }
 
+// HTTPConfig configures an OpenAI-compatible embeddings endpoint.
+type HTTPConfig struct {
+	BaseURL    string          `json:"base_url"`
+	Model      string          `json:"model"`
+	APIKeyEnv  string          `json:"api_key_env,omitempty"`
+	Dimensions int             `json:"dimensions,omitempty"`
+	Timeout    plugin.Duration `json:"timeout,omitempty"`
+}
+
 type RetrieverConfig struct {
 	TopK int `json:"top_k,omitempty"`
 }
 
 type JobConfig struct {
 	Interval plugin.Duration `json:"interval,omitempty"`
+	// Index backfills CJK search terms and embeddings for the current
+	// embedding model (default on).
+	Index *bool `json:"index,omitempty"`
+	// IndexBatch is the memories indexed per tick (default 50).
+	IndexBatch int `json:"index_batch,omitempty"`
 	// Reasoning scores every finished run and distills reasoning patterns
 	// (default on).
 	Reasoning *ReasoningConfig `json:"reasoning,omitempty"`
@@ -44,6 +59,22 @@ func init() {
 				return nil, err
 			}
 			return memory.HashingEmbedder{Dims: cfg.Dims}, nil
+		})
+	plugin.Register(plugin.Embedder, "http", "OpenAI-compatible embeddings endpoint (OpenAI, Azure, vLLM, Ollama, LiteLLM, …)",
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (memory.Embedder, error) {
+			var cfg HTTPConfig
+			if err := c.Decode(&cfg); err != nil {
+				return nil, err
+			}
+			if cfg.BaseURL == "" || cfg.Model == "" {
+				return nil, errors.New("http embedder: base_url and model are required")
+			}
+			key := ""
+			if cfg.APIKeyEnv != "" {
+				key = os.Getenv(cfg.APIKeyEnv)
+			}
+			return &memory.HTTPEmbedder{BaseURL: cfg.BaseURL, ModelName: cfg.Model, APIKey: key,
+				Dimensions: cfg.Dimensions, Timeout: cfg.Timeout.D(), Log: h.Log.With("component", "embedder")}, nil
 		})
 	plugin.Register(plugin.MemoryRetriever, "hybrid", "lexical + vector retrieval with RRF, scope filters and conflict resolution",
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (kernel.MemoryRetriever, error) {
@@ -69,6 +100,10 @@ func init() {
 					t, ok := reg.Lookup(name)
 					return !ok || t.Descriptor().Risk.HasSideEffects()
 				}, Interval: cfg.Interval.D(), Log: h.Log}
+			if on(cfg.Index) && h.Store != nil {
+				cons.Indexer = &memory.Indexer{Store: h.Store, Embedder: h.Embedder, Batch: cfg.IndexBatch,
+					Log: h.Log.With("component", "memory_indexer")}
+			}
 			if rc := cfg.Reasoning; rc == nil || on(rc.Enabled) {
 				rec := reasoning.NewRecorder(h.Store, h.Artifacts, writer, h.Log.With("hook", "reasoning"))
 				rec.Distill = rc == nil || on(rc.Distill)

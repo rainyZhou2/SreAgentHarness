@@ -79,6 +79,10 @@ plugins:
         allow: {search: {risk: R0}}
 
   embedder: hashing
+  # A model-backed embedder (OpenAI-compatible /embeddings); on a model
+  # switch the consolidator's indexer re-embeds existing memories.
+  # embedder: {name: http, config: {base_url: "https://api.openai.com/v1", model: text-embedding-3-small,
+  #   api_key_env: OPENAI_API_KEY, dimensions: 512, timeout: 10s}}
   memory_retriever: {name: hybrid, config: {top_k: 5}}
   strategy: [llm, rule_based]
   grader: substring

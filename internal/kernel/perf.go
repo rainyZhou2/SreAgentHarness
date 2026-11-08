@@ -284,6 +284,7 @@ func (w *Worker) speculator(ctx context.Context, lease domain.Lease, rules profi
 				return nil, sctx.Err()
 			}
 			defer func() { <-w.toolSem }()
+			sctx = domain.WithMemoryExclude(sctx, rules.MemoryExcludeFor(lease.RunID))
 			sctx = tools.WithCallInfo(sctx, tools.CallInfo{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
 				AttemptID: lease.AttemptID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
 				InputRef: lease.InputRef, Deadline: time.Now().Add(w.cfg.StepTimeout)})
@@ -590,5 +591,29 @@ func (w *Worker) withTokenCompaction(ctx context.Context, lease domain.Lease, pl
 		out = append(out, p)
 	}
 	w.loopEvent("compaction_tokens")
+	return out
+}
+
+// recalledMemories reads the hits of a memory_search observation, so their
+// memory:<id>@<v> refs resolve like pinned memories.
+func recalledMemories(content json.RawMessage) []cognitive.MemoryRef {
+	var r struct {
+		Hits []struct {
+			MemoryID string  `json:"memory_id"`
+			Version  int64   `json:"version"`
+			Kind     string  `json:"kind"`
+			Title    string  `json:"title"`
+			Trust    string  `json:"trust"`
+			Score    float64 `json:"score"`
+		} `json:"hits"`
+	}
+	_ = json.Unmarshal(content, &r)
+	var out []cognitive.MemoryRef
+	for _, h := range r.Hits {
+		if h.MemoryID != "" && h.Version > 0 {
+			out = append(out, cognitive.MemoryRef{ID: h.MemoryID, Version: h.Version, Kind: h.Kind, Title: h.Title,
+				Trust: h.Trust, Score: h.Score})
+		}
+	}
 	return out
 }

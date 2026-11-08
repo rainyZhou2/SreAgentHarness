@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go-sre-harness/internal/tools/memsearch"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -153,9 +154,13 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	strategies := &profile.Resolver{Loader: store, Factory: llmFor(modelGW)}
-	embedder := memory.HashingEmbedder{Dims: 256}
+	var embedder memory.Embedder = memory.HashingEmbedder{Dims: 256}
+	if he := memory.EmbedderFromEnv(os.Getenv, cfg.Log.With("component", "embedder")); he != nil {
+		embedder = he
+	}
 	graphSvc := &graph.Service{Store: store, Tools: reg, Extensions: extRT, Log: cfg.Log.With("component", "graph")}
 	retriever := &memory.Retriever{Store: store, Embedder: embedder, Artifacts: arts, TopK: 5}
+	reg.Register(memsearch.Tool{Retriever: retriever})
 	offlineGW, err := buildGateway(arts, gateway.NewMemLedger(), cfg.Log)
 	if err != nil {
 		return err
@@ -239,7 +244,8 @@ func Run(ctx context.Context, cfg Config) error {
 			t, ok := reg.Lookup(name)
 			return !ok || t.Descriptor().Risk.HasSideEffects()
 		}, Interval: 5 * time.Second, Log: cfg.Log.With("component", "consolidator"),
-		Hooks: []memory.RunHook{reasoning.NewRecorder(store, arts, memWriter, cfg.Log.With("component", "reasoning"))}}
+		Hooks:   []memory.RunHook{reasoning.NewRecorder(store, arts, memWriter, cfg.Log.With("component", "reasoning"))},
+		Indexer: &memory.Indexer{Store: store, Embedder: embedder, Log: cfg.Log.With("component", "memory_indexer")}}
 	var triggers *trigger.Service
 	if len(local.Triggers) > 0 {
 		if triggers, err = trigger.New(local.Triggers, server, store, cfg.Log.With("component", "trigger")); err != nil {
