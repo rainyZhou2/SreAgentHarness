@@ -111,6 +111,15 @@ scripts/demo.sh "remediate high latency service=checkout"
 desktop/build.sh run
 ```
 
+### 回答卡片
+
+在两种模式下，最终回答都以卡片形式展示，不再是一段纯文本：
+
+- **Markdown**：支持标题、列表、代码块、GFM 表格、数学公式（KaTeX）和 mermaid 图。原始 HTML 不会被渲染，而是按文本显示。链接通过 `OpenURL` 在系统浏览器中打开，只接受 `http`、`https` 和 `mailto`；`javascript:`、`file:` 等其他协议不会生成链接，也不会被打开。指向文件（`.pdf`、`.csv`、`.json` 等）的链接带类型标记。
+- **结构化附件**：`submit_conclusion` 新增可选的 `attachments` 列表，每项为 `{type: table|image|link|file, title, caption, url | ref, mime_type, columns, rows}`。内核先校验，再把它写入 run 结果（`result.attachments`）：URL 必须是不带凭据的绝对 `http(s)` 地址；`ref` 必须指向同一租户已外存的工具输出（`obs:step<N>` 会解析成对应的 handle）；文本和表格有上限（最多 12 个附件，表格最多 20 列 × 200 行），不符合要求的一律丢弃。不带附件的结论和以前完全一样。
+- **客户端渲染**：表格显示为可滚动的卡片，带“复制为 CSV”按钮。URL 图片懒加载，不发送 Referer；存储的图片只支持 PNG、JPEG、GIF、WebP（不支持 SVG），由 Go 端拉取后内联显示。链接显示为带主机名的卡片；文件显示为带文件名、类型和大小的卡片，URL 文件可以“打开”，存储的输出可以“下载”（通过保存对话框）。WebView 不会接触 API token。导出的对话也包含附件。
+- **API 使用方**：附件可以从 `GET /v1/runs/{id}`（`result.attachments`）和会话消息中拿到（助手消息的内容就是结果 artifact）。`GET /v1/runs/{id}/attachments/{index}`（viewer）提供该 run 结果里存储的附件：只提供内核接受过的 ref，大小不超过 32 MiB，带 `nosniff` 和 sandbox CSP；除可内联显示的位图外，一律作为下载返回。
+
 ## 部署
 
 ```bash
@@ -251,7 +260,7 @@ docker compose -f deploy/docker-compose.yml up --build
 
 ## API
 
-`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/v1/triggers…`、`/v1/reasoning…`、`/healthz`、`/metrics`。
+`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/v1/triggers…`、`/v1/reasoning…`、`GET /v1/runs/{id}/attachments/{index}`、`/healthz`、`/metrics`。
 
 ## 测试
 

@@ -111,6 +111,15 @@ The default `dev` authentication mode only listens on loopback addresses.
 desktop/build.sh run
 ```
 
+### Answer cards
+
+The final answer is shown as a card, not plain text, in both modes:
+
+- **Markdown**: headings, lists, code blocks, GFM tables, math (KaTeX) and mermaid diagrams. Raw HTML is never rendered (it shows as text). Links open in the system browser through `OpenURL`, which accepts only `http`, `https` and `mailto`. `javascript:`, `file:` and other schemes are not linked or opened, and links to files (`.pdf`, `.csv`, `.json`, …) get a type badge.
+- **Structured attachments**: `submit_conclusion` takes an optional `attachments` list of `{type: table|image|link|file, title, caption, url | ref, mime_type, columns, rows}`. The kernel validates the list before it reaches the run result (`result.attachments`). URLs must be absolute `http(s)` with no credentials. A `ref` must name an offloaded tool output of the same tenant (`obs:step<N>` resolves to its handle). Text and tables are capped (12 attachments, 20 columns × 200 rows), and anything else is dropped. Conclusions without attachments are unchanged.
+- **Client rendering**: a table becomes a scrollable card with *Copy CSV*. An image from a URL loads lazily with no referrer, and a stored image (PNG, JPEG, GIF or WebP only, never SVG) is fetched by the Go side and shown inline. A link becomes a tile with its host, and a file becomes a tile with name, type and size plus *Open* (URL) or *Download* (stored output, saved through a save dialog). The WebView never holds the API token. Exported chats include the attachments.
+- **API consumers**: attachments arrive in `GET /v1/runs/{id}` (`result.attachments`) and in session messages (the assistant message's content is the result artifact). `GET /v1/runs/{id}/attachments/{index}` (viewer) serves a stored attachment of that run's result. It serves only refs the kernel accepted, at most 32 MiB, with `nosniff` and a sandbox CSP, and always as a download except for an inline raster image.
+
 ## Deployment
 
 ```bash
@@ -251,7 +260,7 @@ The agent's explicit decision trace (plan, hypotheses with confidence, verificat
 
 ## API
 
-`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/v1/reasoning…`, `/healthz`, `/metrics`.
+`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/v1/reasoning…`, `GET /v1/runs/{id}/attachments/{index}`, `/healthz`, `/metrics`.
 
 ## Tests
 

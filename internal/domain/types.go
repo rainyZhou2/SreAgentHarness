@@ -299,6 +299,33 @@ type Decision struct {
 	Consistency *Consistency `json:"consistency,omitempty"`
 	// Notes are the agent's memory writes in this step (see NoteOp).
 	Notes []NoteOp `json:"notes,omitempty"`
+	// Attachments are optional structured parts of a final answer (tables,
+	// images, links, files) that clients render as cards next to the text.
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment kinds of a final answer.
+const (
+	AttachTable = "table"
+	AttachImage = "image"
+	AttachLink  = "link"
+	AttachFile  = "file"
+)
+
+// Attachment is one structured part of a final answer. URL is an http(s)
+// address; Ref names a stored tool output of the run (served by
+// GET /v1/runs/{id}/attachments/{index}). Model output is untrusted: the
+// kernel validates and caps attachments before they reach the result.
+type Attachment struct {
+	Type      string     `json:"type"`
+	Title     string     `json:"title,omitempty"`
+	Caption   string     `json:"caption,omitempty"`
+	URL       string     `json:"url,omitempty"`
+	Ref       string     `json:"ref,omitempty"`
+	MimeType  string     `json:"mime_type,omitempty"`
+	SizeBytes int64      `json:"size_bytes,omitempty"`
+	Columns   []string   `json:"columns,omitempty"`
+	Rows      [][]string `json:"rows,omitempty"`
 }
 
 // RunUsage is the model spend of a run so far.

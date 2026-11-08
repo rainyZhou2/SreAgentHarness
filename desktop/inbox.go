@@ -103,19 +103,78 @@ func (a *App) chatMarkdown(sessionID string) (string, string, error) {
 			}
 		}
 		answer, status := "", ""
+		var atts []any
 		if run, ok := view["run"].(map[string]any); ok {
 			status, _ = run["display_status"].(string)
 			if res, ok := run["result"].(map[string]any); ok {
 				answer, _ = res["answer"].(string)
+				atts = asList(res["attachments"])
 			}
 		}
 		if answer != "" {
 			fmt.Fprintf(&b, "\n%s\n\n", strings.TrimSpace(answer))
-		} else {
+		} else if len(atts) == 0 {
 			fmt.Fprintf(&b, "\n_(%s)_\n\n", strings.ToLower(status))
 		}
+		b.WriteString(attachmentsMarkdown(atts, a.tr("attachment", "附件")))
 	}
 	return b.String(), title, nil
+}
+
+// attachmentsMarkdown renders structured answer parts for the export: tables
+// as GFM tables, links/images/files as links (stored files by name only).
+func attachmentsMarkdown(atts []any, fileWord string) string {
+	var b strings.Builder
+	cell := func(v any) string {
+		s := strings.ReplaceAll(fmt.Sprint(v), "|", "\\|")
+		return strings.ReplaceAll(s, "\n", " ")
+	}
+	for _, x := range atts {
+		m, _ := x.(map[string]any)
+		typ, _ := m["type"].(string)
+		title, _ := m["title"].(string)
+		link, _ := m["url"].(string)
+		switch typ {
+		case "table":
+			cols := asList(m["columns"])
+			if len(cols) == 0 {
+				continue
+			}
+			if title != "" {
+				fmt.Fprintf(&b, "**%s**\n\n", title)
+			}
+			head := make([]string, len(cols))
+			sep := make([]string, len(cols))
+			for i, c := range cols {
+				head[i], sep[i] = cell(c), "---"
+			}
+			fmt.Fprintf(&b, "| %s |\n| %s |\n", strings.Join(head, " | "), strings.Join(sep, " | "))
+			for _, r := range asList(m["rows"]) {
+				row := asList(r)
+				line := make([]string, len(cols))
+				for i := range line {
+					if i < len(row) {
+						line[i] = cell(row[i])
+					}
+				}
+				fmt.Fprintf(&b, "| %s |\n", strings.Join(line, " | "))
+			}
+			b.WriteString("\n")
+		case "image", "link", "file":
+			if title == "" {
+				title = link
+			}
+			switch {
+			case link != "" && typ == "image":
+				fmt.Fprintf(&b, "![%s](%s)\n\n", title, link)
+			case link != "":
+				fmt.Fprintf(&b, "- [%s](%s)\n\n", title, link)
+			default:
+				fmt.Fprintf(&b, "- %s: %s\n\n", fileWord, title)
+			}
+		}
+	}
+	return b.String()
 }
 
 func asList(v any) []any { l, _ := v.([]any); return l }
