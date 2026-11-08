@@ -414,28 +414,51 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if err != nil {
 		return nil, err
 	}
+	if router, err = router.WithClassifier(e("HARNESS_PLANNER_ROUTER_EXAMPLES")); err != nil {
+		return nil, err
+	}
+	fallbacks, err := planner.ParseFallbacks(e("HARNESS_PLANNER_FALLBACKS"))
+	if err != nil {
+		return nil, err
+	}
+	var planCache planner.PlanCache
+	if ttl := e.dur("HARNESS_PLANNER_CACHE_TTL", 10*time.Minute); ttl > 0 {
+		planCache = planner.NewMemoryCache(ttl, e.int("HARNESS_PLANNER_CACHE_SIZE", 512))
+	}
 	plannerSvc := &planner.Service{
 		Gateway: h.Gateway, Artifacts: h.Artifacts, Profiles: store,
 		Log: log.With("component", "planner"), Observer: metrics,
 		Config: planner.Config{
-			ModelAlias:         e.str("HARNESS_PLANNER_MODEL_ALIAS", h.Settings.ModelAlias),
-			Effort:             e.str("HARNESS_PLANNER_EFFORT", h.Settings.ModelEffort),
-			MaxRepairs:         e.int("HARNESS_PLANNER_MAX_REPAIRS", 2),
-			MaxNodes:           e.int("HARNESS_PLANNER_MAX_NODES", 20),
-			MaxOutputTokens:    e.int64("HARNESS_PLANNER_MAX_OUTPUT_TOKENS", 8000),
-			MaxChildren:        e.int("HARNESS_PLANNER_MAX_CHILDREN", 8),
-			MaxTotalRuns:       e.int("HARNESS_PLANNER_MAX_TOTAL_RUNS", 32),
-			MaxDepth:           e.int("HARNESS_PLANNER_MAX_DEPTH", 3),
-			MaxIterations:      e.int("HARNESS_PLANNER_MAX_ITERATIONS", 10),
-			MaxModelCalls:      e.int("HARNESS_PLANNER_MAX_MODEL_CALLS", 40),
-			MaxEstimatedTokens: e.int64("HARNESS_PLANNER_MAX_ESTIMATED_TOKENS", 400000),
-			ApprovalMode:       e.str("HARNESS_PLAN_APPROVAL", "auto"),
-			ApprovalApprovers:  e.int("HARNESS_PLAN_APPROVERS", 1),
-			FallbackProfileID:  e.str("HARNESS_PLANNER_FALLBACK_PROFILE", h.Settings.DefaultProfile),
-			FallbackVersion:    e.int64("HARNESS_PLANNER_FALLBACK_VERSION", 8),
-			FallbackReact:      e.bool("HARNESS_PLANNER_FALLBACK_REACT", true),
-			Router:             router,
+			ModelAlias:          e.str("HARNESS_PLANNER_MODEL_ALIAS", h.Settings.ModelAlias),
+			Effort:              e.str("HARNESS_PLANNER_EFFORT", h.Settings.ModelEffort),
+			MaxRepairs:          e.int("HARNESS_PLANNER_MAX_REPAIRS", 2),
+			MaxNodes:            e.int("HARNESS_PLANNER_MAX_NODES", 20),
+			MaxOutputTokens:     e.int64("HARNESS_PLANNER_MAX_OUTPUT_TOKENS", 8000),
+			MaxChildren:         e.int("HARNESS_PLANNER_MAX_CHILDREN", 8),
+			MaxTotalRuns:        e.int("HARNESS_PLANNER_MAX_TOTAL_RUNS", 32),
+			MaxDepth:            e.int("HARNESS_PLANNER_MAX_DEPTH", 3),
+			MaxIterations:       e.int("HARNESS_PLANNER_MAX_ITERATIONS", 10),
+			MaxModelCalls:       e.int("HARNESS_PLANNER_MAX_MODEL_CALLS", 40),
+			MaxEstimatedTokens:  e.int64("HARNESS_PLANNER_MAX_ESTIMATED_TOKENS", 400000),
+			ApprovalMode:        e.str("HARNESS_PLAN_APPROVAL", "auto"),
+			ApprovalApprovers:   e.int("HARNESS_PLAN_APPROVERS", 1),
+			FallbackProfileID:   e.str("HARNESS_PLANNER_FALLBACK_PROFILE", h.Settings.DefaultProfile),
+			FallbackVersion:     e.int64("HARNESS_PLANNER_FALLBACK_VERSION", 8),
+			FallbackReact:       e.bool("HARNESS_PLANNER_FALLBACK_REACT", true),
+			Router:              router,
+			ModelLadder:         planner.ParseLadder(e("HARNESS_PLANNER_MODEL_LADDER")),
+			Fallbacks:           fallbacks,
+			TypicalOutputTokens: e.int64("HARNESS_PLANNER_TYPICAL_OUTPUT_TOKENS", 0),
+			Cache:               planCache,
+			DisableAutoPin:      !e.bool("HARNESS_PLANNER_AUTO_PIN", true),
+			DisableSimulation:   !e.bool("HARNESS_PLANNER_DRY_RUN", true),
 		},
+	}
+	// Plan exemplars come from the memory retriever when the plugin provides
+	// them (the built-in memory.Retriever does).
+	var planMemory kernel.PlanMemorySource
+	if pm, ok := retriever.(kernel.PlanMemorySource); ok {
+		planMemory = pm
 	}
 	// worker
 	if mode == "all" || mode == "worker" {
@@ -446,6 +469,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			StepTimeout:        e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
 			Checkpoints:        e.bool("HARNESS_CHECKPOINTS", true),
 			Memory:             retriever,
+			PlanMemory:         planMemory,
 			Compactor:          compactor,
 			Rules:              rules,
 			Skills:             h.Extensions,

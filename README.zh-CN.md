@@ -70,6 +70,8 @@ flow:
 
 Planner 把自己的输入也视为不可信：目标、会话历史、capability 描述以及失败尝试的节点输出都包在 `<<<DATA>>>` 边界内，并中和聊天模板控制符；工具描述来自插件和租户 MCP，看起来像注入指令的描述会同时从 prompt 和工具 schema 中移除。只要发现可疑输入，就记录在计划上，并强制生成的 flow 走计划审批，即使 `HARNESS_PLAN_APPROVAL=never`。生成的 flow 失败时不会立刻让 Run 失败：最多 `HARNESS_PLAN_MAX_REPLANS` 次，Planner 会拿到失败原因、已执行节点和已完成的副作用重新规划，新计划作为新的 flow generation 执行（全新状态与子 Run；失败的 generation 保留用于审计；plan hash 绑定 generation，旧审批不能复用）。
 
+计划会从历史 Run 中改进。一个在模型生成的 flow 上成功完成的 Run（非 fallback、无注入标记、未被拒绝、无争议、反馈未标错）会被提炼为 *plan exemplar* 记忆（按服务作用域、按内容去重），走正常的记忆生命周期；Planner 会以不可信数据的形式看到与目标和服务最相近的 ACTIVE exemplar 与推理模式。每个 Run 记录计划指标（修复、fallback、重规划、审批请求/拒绝、注入、缓存命中），金丝雀和候选门禁会对比 fallback、修复、重规划、拒绝、成功和注入率。路由依次看 hint、请求的模式、点名的动作、正则列表，最后是分类器（默认对标注样例目标做 n-gram kNN，也可接 embedding 分类器；设置 `ClassifierFirst` 可让分类器先于正则）。每个生成或 fallback 的 flow 在审批前都会用模拟成功的子任务做 dry run：默认路径在自身限制内走不完的 flow 会被修复，未经审批就到达的副作用节点会被标出。计划审批附带可读摘要、有序步骤、风险、dry-run 路径，以及与上一 generation（重规划）或 fallback runbook 的 diff。未固定工具的 agent 节点会被固定到只读工具，不再一律按最高风险估计。Token 估算使用典型输出量，同时给出最坏情况。没有重规划和注入标记的计划按租户与输入缓存，命中后会针对当前工具目录重新校验。Profile 的 `planner` 段可以按租户收紧（不能放宽）这些设置：模型别名或模型阶梯、审批模式、节点/调用/Token/修复/重规划上限，以及按服务或目标正则匹配的 fallback 规则。
+
 ## 设计上比较满意的地方
 
 - **数据库是唯一真相，推送只是加速**：断线、丢消息、副本故障都不会造成状态不一致。
@@ -143,6 +145,12 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_OUTPUT_OFFLOAD_BYTES` | 超过该大小的工具结果落盘并摘要，模型通过 `harness.artifact_query` 按需查询（默认 24576，负数关闭） |
 | `HARNESS_CONTEXT_PROVIDER_TIMEOUT` / `HARNESS_CONTEXT_MAX_FACTS` | 环境事实 provider 的单个超时与事实条数上限 |
 | `HARNESS_PLANNER_REACT_PATTERNS` / `_FLOW_PATTERNS` | 规划失败时的路由正则，`\|\|` 分隔；`none` 关闭该列表 |
+| `HARNESS_PLANNER_ROUTER_EXAMPLES` | `{"text","mode"}` 样例的 JSON 文件，替换内置路由分类器样例 |
+| `HARNESS_PLANNER_FALLBACKS` | `{"name","services","goal_pattern","profile_id","version"}` 的 JSON 列表，优先于默认 runbook 匹配的 fallback 规则 |
+| `HARNESS_PLANNER_MODEL_LADDER` | 逗号分隔的模型别名：第一个负责规划，每次修复升级到下一个 |
+| `HARNESS_PLANNER_CACHE_TTL` / `_CACHE_SIZE` | 计划缓存时长（默认 `10m`，`0` 关闭）与条目数（默认 512） |
+| `HARNESS_PLANNER_TYPICAL_OUTPUT_TOKENS` | Token 估算采用的单次输出量（默认上限的四分之一；负数按最坏情况） |
+| `HARNESS_PLANNER_AUTO_PIN` / `_DRY_RUN` | 将未固定工具的 agent 节点固定到只读工具；审批前对计划做 dry run（默认都为 `true`） |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 

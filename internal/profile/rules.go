@@ -41,6 +41,9 @@ type Rules struct {
 	// MemoryProbeRate re-exposes excluded memories to a share of runs.
 	MemoryProbeRate float64
 
+	// Planner is the profile's planner section (nil: process defaults).
+	Planner *PlannerSpec
+
 	// Flow is the compiled orchestration plan when strategy is "flow".
 	Flow     *flow.Spec
 	FlowHash string
@@ -69,6 +72,10 @@ func Compile(ref string, s Spec) (Rules, error) {
 		r.MemoryExclude = s.Reasoning.PatternsExcluded
 		r.MemoryProbeRate = s.Reasoning.PatternProbeRate
 	}
+	if err := s.Planner.Validate(s.AllowedAliases); err != nil {
+		return r, fmt.Errorf("profile %s: %w", ref, err)
+	}
+	r.Planner = s.Planner
 	for _, t := range s.Tools {
 		if t == "" || (strings.Contains(t, "*") && t != "*" && !strings.HasSuffix(t, ".*")) || strings.Count(t, "*") > 1 {
 			return r, fmt.Errorf("profile %s: invalid tool pattern %q (use a name, \"prefix.*\" or \"*\")", ref, t)

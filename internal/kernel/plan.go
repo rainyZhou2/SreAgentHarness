@@ -10,7 +10,9 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/flow"
 	gw "go-sre-harness/internal/gateway"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/planner"
+	"go-sre-harness/internal/profile"
 )
 
 // planArtifact is the durable output of a plan step. A flow step points its
@@ -34,6 +36,42 @@ type planArtifact struct {
 	// Generation is 0 for the first plan and n for the nth replan.
 	Generation int                     `json:"generation,omitempty"`
 	Injection  []planner.InjectionFlag `json:"injection,omitempty"`
+	Review     *planner.Review         `json:"review,omitempty"`
+}
+
+// PlanMemorySource retrieves plan exemplars and reasoning patterns for a
+// goal (implemented by memory.Retriever).
+type PlanMemorySource interface {
+	PlanMemories(ctx context.Context, tenantID, goal string, services []string, k int) ([]memory.PlanMemory, error)
+}
+
+// planHistoryMessages is how many recent conversation messages the planner
+// may choose from; it keeps the recent ones and the relevant older ones.
+const planHistoryMessages = 40
+
+// plannerOverride converts the profile's planner section.
+func plannerOverride(p *profile.PlannerSpec) *planner.Override {
+	if p == nil {
+		return nil
+	}
+	o := &planner.Override{ModelAlias: p.ModelAlias, ModelLadder: p.ModelLadder, ApprovalMode: p.ApprovalMode,
+		MaxNodes: p.MaxNodes, MaxModelCalls: p.MaxModelCalls, MaxEstimatedTokens: p.MaxEstimatedTokens,
+		MaxRepairs: p.MaxRepairs}
+	for _, f := range p.Fallbacks {
+		o.Fallbacks = append(o.Fallbacks, planner.FallbackRule{Name: f.Name, Services: f.Services,
+			GoalPattern: f.GoalPattern, ProfileID: f.ProfileID, Version: f.Version})
+	}
+	return o
+}
+
+// maxReplans is the effective replan budget of a run: the profile may only
+// lower the worker's.
+func (w *Worker) maxReplans(rules profile.Rules) int {
+	n := w.cfg.PlanMaxReplans
+	if rules.Planner != nil && rules.Planner.MaxReplans != nil && *rules.Planner.MaxReplans < n {
+		n = *rules.Planner.MaxReplans
+	}
+	return n
 }
 
 // executePlan turns one goal into either a generated flow step or a normal
@@ -68,8 +106,8 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 			return domain.StepSuccess{}, err
 		}
 		start := 0
-		if len(msgs) > 8 {
-			start = len(msgs) - 8
+		if len(msgs) > planHistoryMessages {
+			start = len(msgs) - planHistoryMessages
 		}
 		for _, m := range msgs[start:] {
 			text := strings.TrimSpace(w.messageText(ctx, lease.TenantID, m))
@@ -108,8 +146,13 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 		if replan != nil {
 			res.Generation = replan.Generation
 		}
-		return w.commitPlan(ctx, lease, res)
+		return w.commitPlan(ctx, lease, res, nil)
 	}
+	var services []string
+	if g.Context != nil {
+		services = domain.NormalizeServices(g.Context.Services)
+	}
+	exemplars, hits := w.planExemplars(ctx, lease, rules, g.Goal, services)
 	scope := gw.Scope{
 		TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID, StepAttemptID: lease.AttemptID,
 		WorkerID: lease.WorkerID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
@@ -117,20 +160,45 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 	res, err := w.cfg.Planner.Plan(ctx, scope, planner.Input{
 		Goal: g.Goal, History: history, Capabilities: capabilities, Tools: visible,
 		AllowTool: allowTool, MaxSteps: rules.MaxSteps, ModeHint: modeHint(g.Context), Replan: replan,
+		Services: services, Exemplars: exemplars, Override: plannerOverride(rules.Planner),
 	})
 	if err != nil {
 		return domain.StepSuccess{}, err
 	}
-	return w.commitPlan(ctx, lease, res)
+	return w.commitPlan(ctx, lease, res, hits)
 }
 
-func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner.Result) (domain.StepSuccess, error) {
+// planExemplars retrieves plan exemplars and reasoning patterns, honouring
+// the profile's pattern exclusions. Retrieval failures only cost the hint.
+// The returned hits are committed with the plan step, so the memories'
+// effectiveness is measured like any other retrieval.
+func (w *Worker) planExemplars(ctx context.Context, lease domain.Lease, rules profile.Rules, goal string, services []string) ([]planner.Exemplar, []domain.MemoryHit) {
+	if w.cfg.PlanMemory == nil {
+		return nil, nil
+	}
+	mctx := domain.WithMemoryExclude(ctx, rules.MemoryExcludeFor(lease.RunID))
+	ms, err := w.cfg.PlanMemory.PlanMemories(mctx, lease.TenantID, goal, services, 2)
+	if err != nil {
+		w.log.Warn("planner exemplars", "err", err)
+		return nil, nil
+	}
+	var ex []planner.Exemplar
+	var hits []domain.MemoryHit
+	for i, m := range ms {
+		ex = append(ex, planner.Exemplar{MemoryID: m.ID, Kind: m.Kind, Title: m.Title, Content: m.Content})
+		hits = append(hits, domain.MemoryHit{MemoryID: m.ID, Version: m.Version, Score: m.Score, Rank: i + 1})
+	}
+	return ex, hits
+}
+
+func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner.Result, hits []domain.MemoryHit) (domain.StepSuccess, error) {
 	planHash := res.PlanHash
 	if planHash == "" {
 		planHash = planner.PlanHash(res.Mode, res.Hash, res.Inputs, res.Generation)
 	}
 	needsReview := res.NeedsReview
-	switch strings.ToLower(w.cfg.PlanApprovalMode) {
+	// The tenant's mode can only make the worker's stricter.
+	switch strings.ToLower(planner.StricterApproval(w.cfg.PlanApprovalMode, res.ApprovalMode)) {
 	case "always":
 		needsReview = true
 	case "never":
@@ -160,6 +228,21 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 	}
 	if res.Generation > 0 {
 		art["generation"] = res.Generation
+	}
+	if res.Cached {
+		art["cached"] = true
+	}
+	if res.ModelAlias != "" {
+		art["model_alias"] = res.ModelAlias
+	}
+	if len(res.Exemplars) > 0 {
+		art["exemplars"] = res.Exemplars
+	}
+	if res.Review != nil {
+		art["review"] = res.Review
+	}
+	if res.FallbackSource != "" {
+		art["fallback_source"] = res.FallbackSource
 	}
 	if len(res.Injection) > 0 {
 		art["injection"] = res.Injection
@@ -255,8 +338,16 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 				return domain.StepSuccess{}, err
 			}
 			plan = []domain.PlannedStep{step}
-			events = append(events, domain.EmittedEvent{Type: "plan.approval_requested", Payload: map[string]any{
-				"plan_hash": planHash, "risk": step.Intent.RiskClass, "approvers": step.RequiredApprovals}})
+			payload := map[string]any{"plan_hash": planHash, "risk": step.Intent.RiskClass,
+				"approvers": step.RequiredApprovals}
+			if res.Review != nil {
+				payload["summary"] = truncate(res.Review.Summary, 500)
+				payload["risks"] = len(res.Review.Risks)
+				if res.Review.DiffBase != "" {
+					payload["diff_base"], payload["diff"] = res.Review.DiffBase, len(res.Review.Diff)
+				}
+			}
+			events = append(events, domain.EmittedEvent{Type: "plan.approval_requested", Payload: payload})
 		} else {
 			plan = []domain.PlannedStep{{Kind: domain.StepFlow, Executor: "flow", InputRef: ref, InputHash: hash,
 				Status: domain.StepPending}}
@@ -274,7 +365,7 @@ func (w *Worker) commitPlan(ctx context.Context, lease domain.Lease, res planner
 
 	return domain.StepSuccess{
 		OutputRef: ref, OutputHash: hash, ArtifactKind: "plan", Summary: mustJSON(summary),
-		Plan: plan, Thoughts: []domain.Thought{thought}, Events: events,
+		Plan: plan, Thoughts: []domain.Thought{thought}, Events: events, MemoryHits: hits,
 	}, nil
 }
 
@@ -296,8 +387,25 @@ func (w *Worker) planReviewStep(lease domain.Lease, planRef, planHash string, re
 	if risk == domain.RiskR3 && approvers < 2 {
 		approvers = 2
 	}
-	effects, _ := json.Marshal(map[string]any{"plan_hash": planHash, "flow_hash": res.Hash,
-		"nodes": analysisNodes(res.Analysis), "risk": risk, "side_effects": analysisSideEffects(res.Analysis)})
+	eff := map[string]any{"plan_hash": planHash, "flow_hash": res.Hash,
+		"nodes": analysisNodes(res.Analysis), "risk": risk, "side_effects": analysisSideEffects(res.Analysis)}
+	if rv := res.Review; rv != nil {
+		// What the approver sees: the readable plan, its risks and dry run,
+		// and the diff against the plan it replaces or the runbook.
+		eff["summary"] = rv.Summary
+		eff["steps"] = capList(rv.Steps, 40)
+		if len(rv.Risks) > 0 {
+			eff["risks"] = capList(rv.Risks, 20)
+		}
+		if rv.DiffBase != "" {
+			eff["diff_base"], eff["diff"] = rv.DiffBase, capList(rv.Diff, 40)
+		}
+		if rv.Simulation != nil {
+			eff["dry_run"] = map[string]any{"completed": rv.Simulation.Completed, "path": capList(rv.Simulation.Path, 40),
+				"approvals": rv.Simulation.Approvals, "side_effects": rv.Simulation.SideEffects}
+		}
+	}
+	effects, _ := json.Marshal(eff)
 	intent := domain.ActionIntent{
 		Environment: "plan", Target: "plan:" + strings.TrimPrefix(planHash, "sha256:"), ToolName: "plan.review",
 		ToolVersion: "1", InputHash: planHash,
@@ -382,4 +490,11 @@ func modeHint(gc *domain.GoalContext) string {
 		return ""
 	}
 	return gc.Mode
+}
+
+func capList(xs []string, n int) []string {
+	if len(xs) <= n {
+		return xs
+	}
+	return append(append([]string(nil), xs[:n]...), fmt.Sprintf("… %d more", len(xs)-n))
 }

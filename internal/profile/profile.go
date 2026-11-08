@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -36,6 +37,10 @@ type Spec struct {
 	// Reasoning is learned guidance and pattern selection, evolvable by
 	// gated candidates (see ReasoningSpec).
 	Reasoning *ReasoningSpec `json:"reasoning,omitempty"`
+	// Planner tunes the auto-run planner for this profile (per tenant):
+	// models, fallbacks, and budgets/approval that only tighten the
+	// process configuration (see PlannerSpec).
+	Planner *PlannerSpec `json:"planner,omitempty"`
 	// Flow is the optional orchestration DSL. It is frozen with the profile
 	// version and only valid together with strategy "flow".
 	Flow json.RawMessage `json:"flow,omitempty"`
@@ -124,6 +129,9 @@ func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 		return base, nil, fmt.Errorf("invalid effort %q", out.Effort)
 	}
 	if err := out.Reasoning.Validate(); err != nil {
+		return base, nil, err
+	}
+	if err := out.Planner.Validate(base.AllowedAliases); err != nil {
 		return base, nil, err
 	}
 	if out.MemoryTopK < 0 || out.MemoryTopK > 20 || out.CompactEvery < 0 || out.CompactEvery > 50 ||
@@ -287,4 +295,69 @@ func (s Spec) Playbook() string {
 		return ""
 	}
 	return s.Reasoning.Playbook
+}
+
+// PlannerSpec is the profile's planner section. Model choices and fallback
+// rules replace the process defaults; budgets, repairs, replans and the
+// approval mode can only make the process configuration stricter.
+type PlannerSpec struct {
+	ModelAlias         string            `json:"model_alias,omitempty"`
+	ModelLadder        []string          `json:"model_ladder,omitempty"`
+	ApprovalMode       string            `json:"approval_mode,omitempty"`
+	MaxNodes           int               `json:"max_nodes,omitempty"`
+	MaxModelCalls      int               `json:"max_model_calls,omitempty"`
+	MaxEstimatedTokens int64             `json:"max_estimated_tokens,omitempty"`
+	MaxRepairs         *int              `json:"max_repairs,omitempty"`
+	MaxReplans         *int              `json:"max_replans,omitempty"`
+	Fallbacks          []PlannerFallback `json:"fallbacks,omitempty"`
+}
+
+// PlannerFallback picks a fallback runbook per service or goal class.
+type PlannerFallback struct {
+	Name        string   `json:"name,omitempty"`
+	Services    []string `json:"services,omitempty"`
+	GoalPattern string   `json:"goal_pattern,omitempty"`
+	ProfileID   string   `json:"profile_id"`
+	Version     int64    `json:"version"`
+}
+
+// MaxPlannerFallbacks bounds the fallback rules of one profile.
+const MaxPlannerFallbacks = 20
+
+// Validate bounds the planner section. allowed are the profile's allowed
+// model aliases (empty: any).
+func (p *PlannerSpec) Validate(allowed []string) error {
+	if p == nil {
+		return nil
+	}
+	switch p.ApprovalMode {
+	case "", "auto", "always", "never":
+	default:
+		return fmt.Errorf("planner.approval_mode must be auto, always or never")
+	}
+	if p.MaxNodes < 0 || p.MaxModelCalls < 0 || p.MaxEstimatedTokens < 0 ||
+		(p.MaxRepairs != nil && (*p.MaxRepairs < 0 || *p.MaxRepairs > 5)) ||
+		(p.MaxReplans != nil && (*p.MaxReplans < 0 || *p.MaxReplans > 5)) {
+		return fmt.Errorf("planner budgets must be >= 0 (max_repairs and max_replans at most 5)")
+	}
+	aliases := append([]string{p.ModelAlias}, p.ModelLadder...)
+	for _, a := range aliases {
+		if a != "" && len(allowed) > 0 && !contains(allowed, a) {
+			return fmt.Errorf("planner model %q is not in allowed_aliases", a)
+		}
+	}
+	if len(p.Fallbacks) > MaxPlannerFallbacks {
+		return fmt.Errorf("planner.fallbacks has %d rules (max %d)", len(p.Fallbacks), MaxPlannerFallbacks)
+	}
+	for i, f := range p.Fallbacks {
+		if f.ProfileID == "" || f.Version <= 0 {
+			return fmt.Errorf("planner.fallbacks[%d]: profile_id and version are required", i)
+		}
+		if f.GoalPattern != "" {
+			if _, err := regexp.Compile("(?i)" + f.GoalPattern); err != nil {
+				return fmt.Errorf("planner.fallbacks[%d].goal_pattern: %w", i, err)
+			}
+		}
+	}
+	return nil
 }

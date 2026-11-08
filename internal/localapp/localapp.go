@@ -166,6 +166,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if router, err = router.WithClassifier(os.Getenv("HARNESS_PLANNER_ROUTER_EXAMPLES")); err != nil {
+		return err
+	}
 	var gatherer kernel.ContextGatherer
 	if len(local.ContextProviders) > 0 {
 		deps := envctx.Deps{Registry: reg, Dependencies: store, Network: extensions.NetPolicy{Allow: networks}, Timeout: 5 * time.Second}
@@ -188,11 +191,12 @@ func Run(ctx context.Context, cfg Config) error {
 		Config: planner.Config{ModelAlias: "sre-reasoning", MaxRepairs: 2, MaxNodes: 20,
 			MaxOutputTokens: 8000, MaxChildren: 8, MaxTotalRuns: 24, MaxDepth: 3, MaxIterations: 8,
 			MaxModelCalls: 40, MaxEstimatedTokens: 400000, ApprovalMode: "auto", ApprovalApprovers: 1,
-			FallbackProfileID: "sre-diagnosis", FallbackVersion: 8, FallbackReact: true, Router: router}}
+			FallbackProfileID: "sre-diagnosis", FallbackVersion: 8, FallbackReact: true, Router: router,
+			Cache: planner.NewMemoryCache(10*time.Minute, 256)}}
 
 	worker := kernel.NewWorker(kernel.Config{ID: "local-worker", LeaseTTL: 30 * time.Second,
 		StepTimeout: 2 * time.Minute, Checkpoints: true, Rules: rules, Planner: plannerSvc,
-		Memory: retriever, CapabilityMap: graphSvc,
+		Memory: retriever, PlanMemory: retriever, CapabilityMap: graphSvc,
 		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics,
 		Context: gatherer, OutputOffloadBytes: offload, Strategies: strategies},
 		store, arts, strategy, reg, pol, cfg.Log)
