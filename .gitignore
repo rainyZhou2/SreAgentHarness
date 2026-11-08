@@ -16,10 +16,7 @@
 .env
 .env.*
 
-# tests stay local (not uploaded)
-*_test.go
-/internal/testutil/
-testdata/
+# test output
 coverage.*
 *.coverprofile
 

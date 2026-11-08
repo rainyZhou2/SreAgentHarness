@@ -424,7 +424,10 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (Reco
 			return rt.reject(ctx, rec, "precondition failed: "+strings.Join(probs, "; "))
 		}
 		if desc.VersionFact != "" {
-			f, _, _ := snap.Value(rec.TargetRef, desc.VersionFact)
+			f, _, conflict := snap.Value(rec.TargetRef, desc.VersionFact)
+			if conflict {
+				return rt.reject(ctx, rec, "precondition failed: sources disagree on "+desc.VersionFact)
+			}
 			if f.Value != rec.TargetVersion {
 				return rt.reject(ctx, rec, fmt.Sprintf("precondition failed: target version is %q, plan was for %q",
 					f.Value, rec.TargetVersion))
