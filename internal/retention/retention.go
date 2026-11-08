@@ -1,7 +1,7 @@
 // Package retention runs the background cleanup jobs of §13.8: published
 // outbox rows, expired token-stream segments (rows and objects), expired
-// memories (marked STALE, never silently deleted) and, optionally, old
-// security audit rows. Durable facts (runs, steps, events) are kept; their
+// memories (marked STALE, never silently deleted), old reasoning scores and,
+// optionally, old security audit rows. Durable facts (runs, steps, events) are kept; their
 // archival is a deployment decision (partition drop / export).
 package retention
 
@@ -20,7 +20,11 @@ type Store interface {
 	DeleteSegment(ctx context.Context, e pg.ExpiredSegment) error
 	ExpireMemories(ctx context.Context, now time.Time, limit int) (int64, error)
 	DeleteOldAudit(ctx context.Context, cutoff time.Time, limit int) (int64, error)
+	DeleteOldReasoningScores(ctx context.Context, cutoff time.Time, limit int) (int64, error)
 }
+
+// DefaultReasoningRetention keeps reasoning scores for 90 days.
+const DefaultReasoningRetention = 90 * 24 * time.Hour
 
 type Observer interface{ ObserveRetention(kind string, n int64) }
 
@@ -28,7 +32,10 @@ type Config struct {
 	Interval        time.Duration
 	OutboxRetention time.Duration // default 24h
 	AuditRetention  time.Duration // 0 = keep forever
-	Batch           int
+	// ReasoningRetention bounds reasoning_scores (default 90 days). Keep it
+	// longer than the reasoning improver's window and any canary.
+	ReasoningRetention time.Duration
+	Batch              int
 }
 
 type Cleaner struct {
@@ -41,7 +48,7 @@ type Cleaner struct {
 }
 
 type Result struct {
-	Outbox, Segments, SegmentObjects, Memories, Audit int64
+	Outbox, Segments, SegmentObjects, Memories, Audit, ReasoningScores int64
 }
 
 func (c *Cleaner) defaults() {
@@ -50,6 +57,9 @@ func (c *Cleaner) defaults() {
 	}
 	if c.Cfg.OutboxRetention == 0 {
 		c.Cfg.OutboxRetention = 24 * time.Hour
+	}
+	if c.Cfg.ReasoningRetention <= 0 {
+		c.Cfg.ReasoningRetention = DefaultReasoningRetention
 	}
 	if c.Cfg.Batch == 0 {
 		c.Cfg.Batch = 1000
@@ -100,11 +110,15 @@ func (c *Cleaner) Tick(ctx context.Context) (Result, error) {
 			return res, err
 		}
 	}
+	if res.ReasoningScores, err = c.Store.DeleteOldReasoningScores(ctx, now.Add(-c.Cfg.ReasoningRetention), c.Cfg.Batch); err != nil {
+		return res, err
+	}
 	if c.Observer != nil {
 		c.Observer.ObserveRetention("outbox", res.Outbox)
 		c.Observer.ObserveRetention("stream_segment", res.Segments)
 		c.Observer.ObserveRetention("memory_expired", res.Memories)
 		c.Observer.ObserveRetention("audit", res.Audit)
+		c.Observer.ObserveRetention("reasoning_score", res.ReasoningScores)
 	}
 	return res, nil
 }
@@ -117,7 +131,8 @@ func (c *Cleaner) Run(ctx context.Context) error {
 		if r, err := c.Tick(ctx); err != nil && ctx.Err() == nil {
 			c.Log.Warn("retention tick", "err", err)
 		} else if r != (Result{}) {
-			c.Log.Info("retention", "outbox", r.Outbox, "segments", r.Segments, "memories_expired", r.Memories, "audit", r.Audit)
+			c.Log.Info("retention", "outbox", r.Outbox, "segments", r.Segments, "memories_expired", r.Memories, "audit", r.Audit,
+				"reasoning_scores", r.ReasoningScores)
 		}
 		select {
 		case <-ctx.Done():

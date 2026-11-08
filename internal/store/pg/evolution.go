@@ -13,6 +13,7 @@ import (
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eval"
+	"go-sre-harness/internal/reasoning"
 )
 
 var _ eval.Store = (*Store)(nil)
@@ -519,5 +520,32 @@ func (s *Store) RolloutStats(ctx context.Context, tenantID, rolloutID string, co
 		st.FailRate = float64(st.Failed) / float64(st.Finished)
 		st.CostPerRun = float64(st.CostMicros) / 1e6 / float64(st.Finished)
 	}
+	rows, err := s.pool.Query(ctx, `SELECT s.metrics FROM reasoning_scores s
+		JOIN agent_runs r ON r.tenant_id = s.tenant_id AND r.id = s.run_id
+		WHERE r.tenant_id = $1 AND r.created_at >= $3 AND `+where+`
+		ORDER BY s.scored_at DESC LIMIT 5000`, tenantID, rolloutID, since, profileID)
+	if err != nil {
+		return st, err
+	}
+	raws, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
+	if err != nil {
+		return st, err
+	}
+	st.Reasoning = summarizeMetrics(raws)
 	return st, nil
+}
+
+func summarizeMetrics(raws [][]byte) *reasoning.Summary {
+	if len(raws) == 0 {
+		return nil
+	}
+	ms := make([]reasoning.Metrics, 0, len(raws))
+	for _, raw := range raws {
+		var m reasoning.Metrics
+		if json.Unmarshal(raw, &m) == nil {
+			ms = append(ms, m)
+		}
+	}
+	sum := reasoning.Summarize(ms)
+	return &sum
 }

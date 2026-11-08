@@ -35,7 +35,9 @@ type RetentionConfig struct {
 	Interval        plugin.Duration `json:"interval,omitempty"`
 	OutboxRetention plugin.Duration `json:"outbox_retention,omitempty"`
 	AuditRetention  plugin.Duration `json:"audit_retention,omitempty"` // 0 = keep forever
-	Batch           int             `json:"batch,omitempty"`
+	// ReasoningRetention bounds reasoning_scores (default 2160h = 90 days).
+	ReasoningRetention plugin.Duration `json:"reasoning_retention,omitempty"`
+	Batch              int             `json:"batch,omitempty"`
 }
 
 func init() {
@@ -111,6 +113,6 @@ func init() {
 			}
 			return &retention.Cleaner{Store: h.Store, Artifacts: h.Artifacts, Log: h.Log, Observer: h.Metrics,
 				Cfg: retention.Config{Interval: cfg.Interval.D(), OutboxRetention: cfg.OutboxRetention.D(),
-					AuditRetention: cfg.AuditRetention.D(), Batch: cfg.Batch}}, nil
+					AuditRetention: cfg.AuditRetention.D(), ReasoningRetention: cfg.ReasoningRetention.D(), Batch: cfg.Batch}}, nil
 		})
 }

@@ -12,6 +12,7 @@ import (
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eval"
+	"go-sre-harness/internal/reasoning"
 )
 
 // Evaluation and evolution state. The local runtime keeps the same lifecycle
@@ -469,6 +470,7 @@ func (s *Store) RolloutStats(ctx context.Context, tenantID, rolloutID string, co
 	}
 	s.mu.Unlock()
 	var st eval.RolloutStats
+	var scored []reasoning.Metrics
 	for _, r := range runs {
 		match := false
 		if control {
@@ -490,10 +492,17 @@ func (s *Store) RolloutStats(ctx context.Context, tenantID, rolloutID string, co
 				st.CostMicros += c.CostMicros
 			}
 		}
+		if sc, err := s.ReasoningScore(ctx, tenantID, r.ID); err == nil {
+			scored = append(scored, sc.Metrics)
+		}
 	}
 	if st.Finished > 0 {
 		st.FailRate = float64(st.Failed) / float64(st.Finished)
 		st.CostPerRun = float64(st.CostMicros) / 1e6 / float64(st.Finished)
+	}
+	if len(scored) > 0 {
+		sum := reasoning.Summarize(scored)
+		st.Reasoning = &sum
 	}
 	return st, nil
 }
