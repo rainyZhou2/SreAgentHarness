@@ -818,6 +818,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease, st *exec
 		if len(decision.Output) > 0 {
 			result["flow_output"] = decision.Output
 		}
+		if atts := cognitive.ResolveAttachments(lease.TenantID, in, decision.Attachments); len(atts) > 0 {
+			result["attachments"] = atts
+		}
 		if kernelStop != "" {
 			result["stopped"] = kernelStop
 		}

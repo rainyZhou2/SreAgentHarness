@@ -183,7 +183,8 @@ var conclusionSchema = json.RawMessage(`{"type":"object","properties":{
 "refutes":{"type":"array","items":{"type":"string"},"description":"Refs that refute it, in the same form."}},
 "required":["id","statement","status","confidence_estimate"]}},
 "evidence_refs":{"type":"array","items":{"type":"string"},"description":"Refs of the observations, evidence and memories the answer rests on, exactly as shown in the headers."},
-"notes":` + notesSchema + `},
+"notes":` + notesSchema + `,
+"attachments":` + attachmentsSchema + `},
 "required":["answer","reason_summary"]}`)
 
 // notesSchema describes memory writes (THOUGHT line and conclusion).
@@ -700,6 +701,7 @@ func decisionFromResponse(resp gw.Response) (domain.Decision, error) {
 				Reflection    string               `json:"reflection"`
 				Verification  *domain.Verification `json:"verification"`
 				Notes         []domain.NoteOp      `json:"notes"`
+				Attachments   json.RawMessage      `json:"attachments"`
 			}
 			if err := json.Unmarshal(c.Args, &concl); err != nil {
 				return d, fmt.Errorf("submit_conclusion arguments: %w", err)
@@ -707,6 +709,7 @@ func decisionFromResponse(resp gw.Response) (domain.Decision, error) {
 			d.Kind, d.Intent, d.Answer, d.Hypotheses, d.EvidenceRefs = domain.DecisionFinal, intentOf(concl.Intent),
 				concl.Answer, concl.Hypotheses, concl.EvidenceRefs
 			d.Notes = append(d.Notes, concl.Notes...)
+			d.Attachments = parseAttachments(concl.Attachments)
 			if concl.ReasonSummary != "" {
 				d.ReasonSummary = concl.ReasonSummary
 			}

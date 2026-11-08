@@ -58,6 +58,8 @@ const ICONS = {
   stop: '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>',
   book: '<path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v15H7.5A2.5 2.5 0 0 0 5 20.5z"/><path d="M5 20.5A2.5 2.5 0 0 1 7.5 18H19v3H7.5"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  file: '<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5M9 13h6M9 16.5h4"/>',
 };
 const kbd = (k) => h("kbd", {}, k);
 function icon(name) {
@@ -123,7 +125,10 @@ const mdEngine = (() => {
   const linkOpen = engine.renderer.rules.link_open ||
     ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
   engine.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-    if (!safeHref(tokens[idx].attrGet("href"))) tokens[idx].attrSet("href", "#");
+    const href = safeHref(tokens[idx].attrGet("href"));
+    if (!href) tokens[idx].attrSet("href", "#");
+    const ext = href && fileExt(href);
+    if (ext) { tokens[idx].attrJoin("class", "file-link"); tokens[idx].attrSet("data-ext", ext); }
     tokens[idx].attrSet("target", "_blank");
     tokens[idx].attrSet("rel", "noopener noreferrer");
     return linkOpen(tokens, idx, options, env, self);
@@ -261,6 +266,184 @@ function mdFallback(text) {
     }
   });
   return root;
+}
+
+// ---------- answer cards ----------
+// A completed run's answer is a card: the Markdown text plus the optional
+// structured attachments the server validated (table, image, link, file).
+// Every field is untrusted model output: it only ever becomes text nodes or
+// attributes on elements built here, links go through openExternal, and
+// stored files are fetched by the Go side with the client's credentials.
+const FILE_EXTS = /\.(pdf|csv|tsv|json|ya?ml|txt|log|md|zip|gz|tgz|tar|xlsx?|docx?|pptx?|png|jpe?g|gif|webp|svg|html?)$/i;
+function fileExt(href) {
+  try {
+    const u = new URL(href);
+    if (!/^https?:$/.test(u.protocol)) return "";
+    const m = u.pathname.match(FILE_EXTS);
+    return m ? m[1].toLowerCase() : "";
+  } catch { return ""; }
+}
+function webHref(raw) {
+  try {
+    const u = new URL(String(raw || ""));
+    return /^https?:$/.test(u.protocol) && u.hostname ? u.href : "";
+  } catch { return ""; }
+}
+async function openExternal(href) {
+  const u = webHref(href) || (/^mailto:/i.test(href || "") ? href : "");
+  if (!u) return;
+  try {
+    await api().OpenURL(u);
+  } catch (e) {
+    // Browser preview mode has no system browser behind the bridge.
+    if (/preview mode/.test(errText(e))) window.open(u, "_blank", "noopener,noreferrer");
+    else toast(errText(e), true);
+  }
+}
+function fmtBytes(n) {
+  if (!n) return "";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : String(n)) + " " + u[i];
+}
+function attName(a, i) {
+  if (a.title) return a.title;
+  const src = a.url || "";
+  try { const p = new URL(src).pathname.split("/").filter(Boolean).pop(); if (p) return decodeURIComponent(p); } catch { /* fall through */ }
+  return t("Attachment {n}", { n: i + 1 });
+}
+function attKind(a, name) {
+  const m = String(name || "").match(/\.([a-z0-9]{1,6})$/i);
+  if (m) return m[1].toUpperCase();
+  const mt = a.mime_type || "";
+  if (!mt) return t("File");
+  const sub = mt.split("/")[1] || mt;
+  return sub.replace(/^x-|^vnd\./, "").split(/[.+;]/)[0].toUpperCase();
+}
+
+const attImages = new Map(); // run_id:index -> data URL | Promise | Error
+function loadAttImage(runId, idx, img, box) {
+  const key = runId + ":" + idx;
+  const got = attImages.get(key);
+  const apply = (v) => {
+    if (typeof v === "string") { img.src = v; box.classList.remove("loading"); }
+    else { box.classList.remove("loading"); box.classList.add("failed"); box.append(h("div", { class: "att-note" }, t("Image could not be loaded"))); }
+  };
+  if (typeof got === "string" || got instanceof Error) return apply(got);
+  let p = got;
+  if (!p) {
+    p = api().AttachmentImage(runId, idx).catch((e) => new Error(errText(e)));
+    attImages.set(key, p);
+    p.then((v) => { if (attImages.get(key) === p) cacheSet(attImages, key, v, 60); });
+  }
+  p.then(apply);
+}
+
+async function saveAttachment(runId, idx, name) {
+  try {
+    const path = await api().SaveAttachment(runId, idx, name);
+    if (path) toast(t("Saved to {path}", { path }));
+  } catch (e) { toast(errText(e), true); }
+}
+
+function attTable(a) {
+  const cols = a.columns || [];
+  const csv = () => [cols, ...(a.rows || [])].map((r) => r.map((c) => {
+    const v = String(c ?? "");
+    return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  }).join(",")).join("\n");
+  return h("div", { class: "att-card att-table" },
+    h("div", { class: "att-head" },
+      h("span", { class: "att-title" }, a.title || t("Table")),
+      h("span", { class: "att-meta" }, tn((a.rows || []).length, "{n} row", "{n} rows")),
+      h("button", { class: "att-btn", type: "button", onclick: () => {
+        navigator.clipboard.writeText(csv()).then(() => toast(t("Copied as CSV")), () => toast(t("Copy failed"), true));
+      } }, t("Copy CSV"))),
+    h("div", { class: "md" }, h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, cols.map((c) => h("th", {}, c)))),
+      h("tbody", {}, (a.rows || []).map((r) => h("tr", {}, r.map((c) => h("td", {}, c)))))))),
+    a.caption ? h("div", { class: "att-caption" }, a.caption) : null);
+}
+
+function attImage(runId, a, i) {
+  const href = webHref(a.url);
+  const img = h("img", { alt: a.title || "", loading: "lazy", referrerpolicy: "no-referrer", decoding: "async" });
+  const box = h("div", { class: "att-img" + (href ? "" : " loading") }, img);
+  if (href) {
+    img.src = href;
+    img.addEventListener("error", () => { box.classList.add("failed"); box.append(h("div", { class: "att-note" }, t("Image could not be loaded"))); }, { once: true });
+  } else if (a.ref) {
+    loadAttImage(runId, i, img, box);
+  }
+  const name = attName(a, i);
+  return h("figure", { class: "att-card att-image" }, box,
+    h("figcaption", { class: "att-foot" },
+      h("span", { class: "att-title" }, a.title || name),
+      a.caption ? h("span", { class: "att-caption" }, a.caption) : null,
+      h("span", { class: "att-actions" }, href
+        ? h("button", { class: "att-btn", type: "button", onclick: () => openExternal(href) }, t("Open"))
+        : h("button", { class: "att-btn", type: "button", onclick: () => saveAttachment(runId, i, name) }, t("Download")))));
+}
+
+function attLink(a) {
+  const href = webHref(a.url);
+  if (!href) return null;
+  const host = new URL(href).host;
+  return h("a", { class: "att-card att-link", href, title: href },
+    h("span", { class: "att-icon" }, icon("link")),
+    h("span", { class: "att-body" },
+      h("span", { class: "att-title" }, a.title || host),
+      a.caption ? h("span", { class: "att-caption" }, a.caption) : null,
+      h("span", { class: "att-meta" }, host)),
+    h("span", { class: "att-go" }, "↗"));
+}
+
+function attFile(runId, a, i) {
+  const href = webHref(a.url);
+  if (!href && !a.ref) return null;
+  const name = attName(a, i);
+  const meta = [attKind(a, name), fmtBytes(a.size_bytes), href ? new URL(href).host : ""].filter(Boolean).join(" · ");
+  return h("div", { class: "att-card att-file" },
+    h("span", { class: "att-icon" }, icon("file")),
+    h("span", { class: "att-body" },
+      h("span", { class: "att-title", title: name }, name),
+      a.caption ? h("span", { class: "att-caption" }, a.caption) : null,
+      h("span", { class: "att-meta" }, meta)),
+    href
+      ? h("button", { class: "att-btn", type: "button", onclick: () => openExternal(href) }, t("Open"))
+      : h("button", { class: "att-btn", type: "button", onclick: () => saveAttachment(runId, i, name) }, t("Download")));
+}
+
+function renderAttachments(runId, list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const blocks = [], tiles = [];
+  list.forEach((a, i) => {
+    if (!a || typeof a !== "object") return;
+    if (a.type === "table") blocks.push(attTable(a));
+    else if (a.type === "image") blocks.push(attImage(runId, a, i));
+    else if (a.type === "link") tiles.push(attLink(a));
+    else if (a.type === "file") tiles.push(attFile(runId, a, i));
+  });
+  const kept = tiles.filter(Boolean);
+  if (!blocks.length && !kept.length) return null;
+  return h("div", { class: "attachments" }, blocks, kept.length ? h("div", { class: "att-tiles" }, kept) : null);
+}
+
+function renderAnswer(run, result) {
+  const atts = renderAttachments(run.id, result.attachments);
+  if (!result.answer && !atts) return null;
+  return h("div", { class: "answer" + (atts ? " answer-card" : "") }, result.answer ? md(result.answer) : null, atts);
+}
+
+// Links inside answers never navigate the app's WebView: http(s)/mailto open
+// in the system browser, anything else is ignored.
+function interceptLinks(e) {
+  const a = e.target.closest && e.target.closest("a[href]");
+  if (!a || !a.closest(".md, .attachments, .thought, .trace")) return;
+  e.preventDefault();
+  const href = a.getAttribute("href");
+  if (href && href !== "#") openExternal(href);
 }
 
 // ---------- connection ----------
@@ -741,7 +924,7 @@ function renderRun(v) {
   }
 
   if (status === "COMPLETED" && result) {
-    if (result.answer) parts.push(h("div", { class: "answer" }, md(result.answer)));
+    parts.push(renderAnswer(run, result));
     const hyps = result.hypotheses || [];
     if (!conversational && hyps.length) parts.push(h("div", { class: "hyps" }, hyps.map((x) => h("div", { class: "hyp" },
       badge(x.status), h("span", {}, x.statement), h("span", { class: "conf" }, Math.round((x.confidence_estimate || 0) * 100) + "%")))));
@@ -2845,6 +3028,7 @@ function bind() {
   $("#dlg-ask").addEventListener("close", () => { if (askResolve) askResolve(null); });
   document.addEventListener("mousedown", (e) => { if (!e.target.closest("#menu") && !e.target.closest(".row-more, .head-btn")) closeMenu(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+  document.addEventListener("click", interceptLinks);
   window.runtime.EventsOn("approvals:update", (list) => {
     state.approvals = list || [];
     updateInboxBadge();

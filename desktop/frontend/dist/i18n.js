@@ -523,6 +523,17 @@ const ZH = {
   "{selected} of {total} selected": "已选 {selected} / {total}",
   "No tools match": "没有匹配的工具",
   "Click to expand": "点击展开",
+  // answer cards
+  "Attachment {n}": "附件 {n}",
+  "File": "文件",
+  "Table": "表格",
+  "{n} row": "{n} 行",
+  "{n} rows": "{n} 行",
+  "Copy CSV": "复制为 CSV",
+  "Copied as CSV": "已复制为 CSV",
+  "Copy failed": "复制失败",
+  "Download": "下载",
+  "Image could not be loaded": "图片加载失败",
 };
 
 const i18n = { lang: "en" };

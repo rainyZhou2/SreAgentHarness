@@ -158,6 +158,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{run_id}", s.getRun)
 	mux.HandleFunc("GET /v1/runs/{run_id}/steps", s.listSteps)
 	mux.HandleFunc("GET /v1/runs/{run_id}/flow", s.getFlow)
+	mux.HandleFunc("GET /v1/runs/{run_id}/attachments/{index}", s.getAttachment)
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
 	mux.HandleFunc("GET /v1/runs/{run_id}/approvals", s.listApprovals)
 	mux.HandleFunc("GET /v1/runs/{run_id}/events", s.listEvents)

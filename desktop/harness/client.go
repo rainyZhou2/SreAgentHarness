@@ -133,6 +133,36 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	return json.Unmarshal(data, out)
 }
 
+// Download fetches a binary response (at most limit bytes) and returns it
+// with its Content-Type and Content-Disposition headers.
+func (c *Client) Download(ctx context.Context, path string, limit int64) (data []byte, contentType, disposition string, err error) {
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		e := &APIError{Status: resp.StatusCode}
+		if json.Unmarshal(msg, e) != nil || e.Kind == "" {
+			e.Kind, e.Message = http.StatusText(resp.StatusCode), strings.TrimSpace(string(msg))
+		}
+		return nil, "", "", e
+	}
+	data, err = io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, "", "", err
+	}
+	if int64(len(data)) > limit {
+		return nil, "", "", fmt.Errorf("download exceeds %d bytes", limit)
+	}
+	return data, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Disposition"), nil
+}
+
 // Get is Do with GET.
 func (c *Client) Get(ctx context.Context, path string, out any) error {
 	return c.Do(ctx, http.MethodGet, path, nil, out)
