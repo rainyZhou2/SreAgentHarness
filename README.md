@@ -1,12 +1,16 @@
+<div align="center">
+
 # go-sre-harness
 
 **English** | [简体中文](README.zh-CN.md)
 
 A cognitive agent runtime for SRE: every reasoning step and tool call runs as a recoverable, auditable distributed transaction.
 
-<p align="center"><img src="docs/images/desktop-diagnosis.png" alt="Desktop client: a diagnosis with its work log, tool calls and verified hypotheses" width="900"></p>
+<img src="docs/images/desktop-diagnosis.png" alt="Desktop client: a diagnosis with its work log, tool calls and verified hypotheses" width="900">
 
 [Desktop client](#desktop-client) · [Quick start](#quick-start) · [Architecture](#architecture) · [Agent runtime](#agent-runtime) · [Memory](#memory) · [Reasoning quality](#reasoning-quality) · [Triggers & policy](#triggers-policy-rules-and-the-action-loop) · [Deployment](#deployment) · [Configuration](#configuration) · [API](#api)
+
+</div>
 
 ## Highlights
 
@@ -42,7 +46,7 @@ desktop/build.sh run
 
 ### Screenshots
 
-All screenshots are the local runtime with no model configured (the rule-based strategy), UI in Chinese.
+All screenshots are the local runtime with no model configured (the rule-based strategy).
 
 <table>
 <tr>
