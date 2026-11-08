@@ -236,12 +236,18 @@ type ReasoningSpec struct {
 	Playbook string `json:"playbook,omitempty"`
 	// PatternsExcluded hides memories (reasoning patterns) from retrieval.
 	PatternsExcluded []string `json:"patterns_excluded,omitempty"`
+	// PatternProbeRate re-exposes each excluded pattern to this share of
+	// runs (deterministic per run and memory), so an excluded pattern keeps
+	// producing evidence and can be reinstated. 0 = permanently hidden.
+	PatternProbeRate float64 `json:"pattern_probe_rate,omitempty"`
 }
 
 // Limits of the reasoning layer.
 const (
 	MaxPlaybookRunes    = 2000
 	MaxExcludedPatterns = 500
+	// MaxPatternProbeRate bounds how much traffic sees excluded patterns.
+	MaxPatternProbeRate = 0.2
 )
 
 // Validate bounds the reasoning layer and rejects instruction-like text
@@ -259,10 +265,18 @@ func (r *ReasoningSpec) Validate() error {
 	if len(r.PatternsExcluded) > MaxExcludedPatterns {
 		return fmt.Errorf("reasoning.patterns_excluded has %d entries (max %d)", len(r.PatternsExcluded), MaxExcludedPatterns)
 	}
+	seen := make(map[string]bool, len(r.PatternsExcluded))
 	for _, id := range r.PatternsExcluded {
 		if id == "" || len(id) > 64 {
 			return fmt.Errorf("reasoning.patterns_excluded: invalid id %q", id)
 		}
+		if seen[id] {
+			return fmt.Errorf("reasoning.patterns_excluded: duplicate id %q", id)
+		}
+		seen[id] = true
+	}
+	if r.PatternProbeRate < 0 || r.PatternProbeRate > MaxPatternProbeRate || r.PatternProbeRate != r.PatternProbeRate {
+		return fmt.Errorf("reasoning.pattern_probe_rate must be in [0, %.1f]", MaxPatternProbeRate)
 	}
 	return nil
 }

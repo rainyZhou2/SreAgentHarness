@@ -171,7 +171,14 @@ var conclusionSchema = json.RawMessage(`{"type":"object","properties":{
 "plan":{"type":"string","description":"What you set out to establish in this step and why."},
 "reflection":{"type":"string","description":"What changed in your understanding after the observations, and what remains uncertain."},
 "verification":{"type":"object","description":"The check that supports the conclusion.","properties":{"expected":{"type":"string"},"observed":{"type":"string"},"verdict":{"type":"string","enum":["VERIFIED","REFUTED","UNVERIFIED"]}},"required":["verdict"]},
-"hypotheses":{"type":"array","description":"Hypotheses considered, each with id, statement, status (VERIFIED|REFUTED|UNVERIFIED) and confidence_estimate. Omit for a question.","items":{"type":"object"}},
+"hypotheses":{"type":"array","description":"Hypotheses considered. Omit for a question.","items":{"type":"object","properties":{
+"id":{"type":"string","description":"Short stable id (e.g. h1). Reuse the same id for the same hypothesis in every step, even if you reword it."},
+"statement":{"type":"string"},
+"status":{"type":"string","enum":["VERIFIED","REFUTED","UNVERIFIED"]},
+"confidence_estimate":{"type":"number","minimum":0,"maximum":1,"description":"Probability that the hypothesis is true, given the evidence so far. Always give one."},
+"supports":{"type":"array","items":{"type":"string"},"description":"Refs (obs:, kv:, memory:) that support it."},
+"refutes":{"type":"array","items":{"type":"string"},"description":"Refs that refute it."}},
+"required":["id","statement","status","confidence_estimate"]}},
 "evidence_refs":{"type":"array","items":{"type":"string"}}},
 "required":["answer","reason_summary"]}`)
 

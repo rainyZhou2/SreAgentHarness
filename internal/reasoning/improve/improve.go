@@ -36,10 +36,21 @@ type Config struct {
 	Window    time.Duration `json:"-"`
 	MinRuns   int           `json:"min_runs,omitempty"`
 	MinUses   int           `json:"min_uses,omitempty"`
-	// RetireBelow excludes ACTIVE patterns whose success lower bound is
-	// below this value after MinUses uses.
-	RetireBelow float64    `json:"retire_below,omitempty"`
-	Thresholds  Thresholds `json:"thresholds,omitempty"`
+	// RetireZ and MinLift retire an ACTIVE pattern whose exposed runs
+	// succeed significantly (z <= -RetireZ) and materially (lift <=
+	// -MinLift) less often than their services' baseline (defaults 1.96
+	// and 0.10).
+	RetireZ float64 `json:"retire_z,omitempty"`
+	MinLift float64 `json:"min_lift,omitempty"`
+	// ReinstateZ reinstates an excluded pattern whose probed runs reach this
+	// z against the baseline (default 0: at least as good as baseline).
+	// Retire and reinstate thresholds differ, so a pattern does not flap.
+	ReinstateZ float64 `json:"reinstate_z,omitempty"`
+	// ProbeRate is proposed as reasoning.pattern_probe_rate when patterns
+	// are excluded and the profile has none (default 0.05).
+	ProbeRate    float64    `json:"probe_rate,omitempty"`
+	DisableProbe bool       `json:"disable_probe,omitempty"`
+	Thresholds   Thresholds `json:"thresholds,omitempty"`
 }
 
 // Thresholds mark a dimension as weak.
@@ -49,6 +60,11 @@ type Thresholds struct {
 	MaxRedundancy     float64 `json:"max_redundancy,omitempty"`
 	MaxUnverifiedRate float64 `json:"max_unverified_rate,omitempty"`
 	MaxNoVerdictRate  float64 `json:"max_no_verdict_rate,omitempty"`
+	// MinStructured and MinCoverage flag traces that are not structured
+	// enough to measure (structured thought share, confidence coverage of
+	// settled hypotheses).
+	MinStructured float64 `json:"min_structured,omitempty"`
+	MinCoverage   float64 `json:"min_coverage,omitempty"`
 }
 
 // Defaults fills unset fields.
@@ -62,8 +78,14 @@ func (c Config) Defaults() Config {
 	if c.MinUses <= 0 {
 		c.MinUses = 5
 	}
-	if c.RetireBelow <= 0 {
-		c.RetireBelow = 0.3
+	if c.RetireZ <= 0 {
+		c.RetireZ = 1.96
+	}
+	if c.MinLift <= 0 {
+		c.MinLift = 0.10
+	}
+	if c.ProbeRate <= 0 {
+		c.ProbeRate = 0.05
 	}
 	t := &c.Thresholds
 	if t.MaxBrier <= 0 {
@@ -81,6 +103,12 @@ func (c Config) Defaults() Config {
 	if t.MaxNoVerdictRate <= 0 {
 		t.MaxNoVerdictRate = 0.5
 	}
+	if t.MinStructured <= 0 {
+		t.MinStructured = 0.8
+	}
+	if t.MinCoverage <= 0 {
+		t.MinCoverage = 0.6
+	}
 	return c
 }
 
@@ -92,8 +120,14 @@ func (c Config) Validate() error {
 	if len(c.Tenants) == 0 {
 		return errors.New("reasoning improver: tenants are required")
 	}
-	if c.RetireBelow < 0 || c.RetireBelow >= 1 {
-		return errors.New("reasoning improver: retire_below must be in [0,1)")
+	if c.RetireZ < 0 || c.MinLift < 0 || c.MinLift >= 1 {
+		return errors.New("reasoning improver: retire_z must be >= 0 and min_lift in [0,1)")
+	}
+	if c.ReinstateZ <= -c.Defaults().RetireZ {
+		return errors.New("reasoning improver: reinstate_z must be above -retire_z, or patterns would flap")
+	}
+	if c.ProbeRate < 0 || c.ProbeRate > profile.MaxPatternProbeRate {
+		return fmt.Errorf("reasoning improver: probe_rate must be in [0, %.1f]", profile.MaxPatternProbeRate)
 	}
 	return nil
 }
@@ -116,11 +150,11 @@ type Evolution interface {
 
 // Diagnosis is what the loop found.
 type Diagnosis struct {
-	Summary      reasoning.Summary       `json:"summary"`
-	Weak         []string                `json:"weak_dimensions,omitempty"`
-	Retire       []reasoning.PatternStat `json:"retire_patterns,omitempty"`
-	FailureCases []string                `json:"failure_digests,omitempty"`
-	Excluded     int                     `json:"excluded_holdout_runs"`
+	Summary      reasoning.Summary `json:"summary"`
+	Weak         []string          `json:"weak_dimensions,omitempty"`
+	Patterns     ExclusionPlan     `json:"patterns"`
+	FailureCases []string          `json:"failure_digests,omitempty"`
+	Excluded     int               `json:"excluded_holdout_runs"`
 }
 
 // Outcome reports one tick for one tenant.
@@ -226,37 +260,25 @@ func (im *Improver) TickTenant(ctx context.Context, tenant string) Outcome {
 	}
 	d.Summary = reasoning.Summarize(reasoning.MetricsOf(kept))
 	d.Weak = weakDimensions(d.Summary, cfg.Thresholds)
-	excluded := map[string]bool{}
+	current := profile.ReasoningSpec{}
 	if spec.Reasoning != nil {
-		for _, id := range spec.Reasoning.PatternsExcluded {
-			excluded[id] = true
-		}
+		current = *spec.Reasoning
 	}
-	for _, st := range reasoning.SortedStats(reasoning.PatternStats(kept)) {
-		if st.Uses < cfg.MinUses || st.Lower95 >= cfg.RetireBelow || excluded[st.MemoryID] {
-			continue
-		}
-		m, err := im.Store.GetMemory(ctx, tenant, st.MemoryID)
-		if err != nil || m.Status != "ACTIVE" || !reasoning.IsPattern(m) {
-			continue
-		}
-		d.Retire = append(d.Retire, st)
+	d.Patterns, err = PlanExclusions(ctx, im.Store, tenant, current.PatternsExcluded, reasoning.PatternStats(kept), cfg)
+	if err != nil {
+		return fail(err)
 	}
 	d.FailureCases = failureDigests(kept, 8)
 	o.Diagnosis = &d
-	if len(d.Weak) == 0 && len(d.Retire) == 0 {
-		return skip("no weak dimension and no underperforming pattern")
+	if len(d.Weak) == 0 && !d.Patterns.Changes() {
+		return skip("no weak dimension and no pattern to retire or reinstate")
 	}
 
-	next := profile.ReasoningSpec{}
-	if spec.Reasoning != nil {
-		next = *spec.Reasoning
-		next.PatternsExcluded = append([]string(nil), spec.Reasoning.PatternsExcluded...)
+	next := current
+	next.PatternsExcluded = d.Patterns.Next
+	if len(next.PatternsExcluded) > 0 && next.PatternProbeRate == 0 && !cfg.DisableProbe {
+		next.PatternProbeRate = cfg.ProbeRate
 	}
-	for _, st := range d.Retire {
-		next.PatternsExcluded = append(next.PatternsExcluded, st.MemoryID)
-	}
-	sort.Strings(next.PatternsExcluded)
 	if len(d.Weak) > 0 {
 		next.Playbook = StatsPlaybook(d.Weak, next.Playbook)
 	}
@@ -268,7 +290,7 @@ func (im *Improver) TickTenant(ctx context.Context, tenant string) Outcome {
 	}
 	patch, _ := json.Marshal(map[string]any{"reasoning": next})
 	rationale, _ := json.Marshal(map[string]any{"weak_dimensions": d.Weak, "summary": d.Summary,
-		"retire_patterns": d.Retire, "excluded_holdout_runs": d.Excluded})
+		"patterns": d.Patterns, "excluded_holdout_runs": d.Excluded})
 	c, err := im.Evolution.Propose(ctx, tenant, cfg.ProfileID, base, patch, string(rationale), Actor)
 	if err != nil {
 		return fail(err)
@@ -330,6 +352,7 @@ const (
 	DimRedundancy     = "redundancy"
 	DimVerification   = "verification"
 	DimDiscrimination = "discrimination"
+	DimStructure      = "structure"
 )
 
 func weakDimensions(s reasoning.Summary, t Thresholds) []string {
@@ -349,6 +372,9 @@ func weakDimensions(s reasoning.Summary, t Thresholds) []string {
 	if s.NoVerdictRate > t.MaxNoVerdictRate {
 		out = append(out, DimDiscrimination)
 	}
+	if s.Structured < t.MinStructured || (s.Settled > 0 && s.CalibrationCoverage < t.MinCoverage) {
+		out = append(out, DimStructure)
+	}
 	return out
 }
 
@@ -359,6 +385,7 @@ var guidance = map[string]string{
 	DimRedundancy:     "- Do not repeat a tool call with the same arguments; reuse the earlier observation, or query an offloaded result instead of re-running the tool.",
 	DimVerification:   "- Before concluding, run one check that could prove the conclusion wrong, and report VERIFIED only when that check passed.",
 	DimDiscrimination: "- Prefer the check that best separates your top hypotheses, and mark each hypothesis VERIFIED or REFUTED as soon as evidence settles it.",
+	DimStructure:      "- Fill the structured fields: give every hypothesis a short stable id reused across steps, a status and a confidence_estimate between 0 and 1, and state the verification verdict when concluding.",
 }
 
 // StatsPlaybook merges guidance for the weak dimensions into the current
@@ -421,7 +448,8 @@ func orDash(s string) string {
 }
 
 func equalReasoning(a, b profile.ReasoningSpec) bool {
-	if strings.TrimSpace(a.Playbook) != strings.TrimSpace(b.Playbook) || len(a.PatternsExcluded) != len(b.PatternsExcluded) {
+	if strings.TrimSpace(a.Playbook) != strings.TrimSpace(b.Playbook) || len(a.PatternsExcluded) != len(b.PatternsExcluded) ||
+		a.PatternProbeRate != b.PatternProbeRate {
 		return false
 	}
 	x := append([]string(nil), a.PatternsExcluded...)
