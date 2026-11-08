@@ -17,13 +17,14 @@ import (
 	"go-sre-harness/internal/notify"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/sandbox"
 	"go-sre-harness/internal/stream"
 	"go-sre-harness/internal/tools"
 )
 
 // Bootstrap order (each phase sees the Host fields of earlier phases):
 //
-//	telemetry → artifact_store → tools → profile_source → policy →
+//	telemetry → artifact_store → tools → sandbox → profile_source → policy →
 //	stream_bus → broker → event_bus → route_policy → model_provider (→ Host.Gateway) →
 //	embedder → memory_retriever → context_provider → context_assembler → strategy → compactor →
 //	grader → event_sink → job → authenticator → api
@@ -50,6 +51,7 @@ var (
 	Compactor        = NewKind[kernel.Compactor]("compactor", false, "summarizes old observations; the kernel always appends safety facts")
 	EventSink        = NewKind[eventsink.Sink]("event_sink", true, "at-least-once delivery of committed run events (webhooks, chat, paging)")
 	ContextProvider  = NewKind[envctx.Provider]("context_provider", true, "environment facts (topology, ownership, on-call, recent changes) pinned per run as untrusted data")
+	Sandbox          = NewKind[sandbox.Backend]("sandbox", false, "isolated per-run execution environment behind harness.sandbox.exec (optional)")
 )
 
 // TelemetryExporter is a telemetry plugin. Implement kernel.Observer as

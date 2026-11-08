@@ -203,6 +203,14 @@ docker compose -f deploy/docker-compose.yml up --build
 - **只读调用提前执行**（`HARNESS_SPECULATIVE_TOOLS`）：模型流中每个工具调用一完成，若它可见、只读、无需审批且不是重复调用，就立即开始执行；执行同一调用（版本、风险、参数都相同）的工具步直接取用结果。未被使用的结果两分钟后过期；有副作用的调用从不提前执行。
 - **可观测性**：每个步骤摘要带 `timings_ms`（queue、context、model、review、tool），并与提交耗时一起导出为 `harness_step_phase_seconds{kind,phase}`；`harness_agent_loop_events_total{event}` 统计修复、循环防护、提示、批量、收敛、路由、压缩、提前执行和 artifact 缓存命中。Run 结果中带 `loop`（步数、模型请求数、token、花费）。
 
+## 沙箱
+
+`harness.sandbox.exec` 在本 Run 的沙箱中执行命令（`command` 用 `sh -c` 执行，或用 `argv`）：输入的 `files` 写入 `/workspace`，该目录在本 Run 的多次调用间保留，不与其他 Run 或租户共享；执行后返回退出码、stdout、stderr 以及 `outputs` 列出的文件。它用于处理 agent 已经拿到的数据；对生产环境的修改仍然只能通过带类型的工具和审批。
+
+- **安全基线**：不带 harness 的环境变量和凭据（只有请求里显式设置的变量），网络为 `none`，根文件系统只读，非 root 用户，去掉所有 capability，开启 `no-new-privileges`，限制 CPU、内存、进程数、时长和输出大小。工作区文件通过 `os.Root` 读写，命令留下的符号链接无法指向宿主机文件。结果视为不可信（T4）；工具风险为 R0，无需审批，并且不会被提前（推测）执行。
+- **后端**（`sandbox` plugin 类型）：`container` 每次调用启动一个新的 docker 或 podman 容器（gVisor 用 `extra_args: [--runtime=runsc]`）。服务端通过 `sandbox: {name: container, config: {...}}` 开启（见 `deploy/harness.example.yaml`）；桌面运行时通过 `HARNESS_SANDBOX_RUNTIME=docker|podman` 和可选的 `HARNESS_SANDBOX_IMAGE`（默认 `python:3.12-alpine`）开启。超过 `workspace_ttl`（24h）未使用的工作区会被删除。harness 本身运行在容器中时，`root` 必须是容器守护进程可以挂载的路径。
+- **MCP stdio 服务器**不再继承 harness 的环境变量：只拿到基础变量（`PATH`、`HOME`、语言区域、临时目录）和配置里的 `env`；运维配置中写一个不带值的 `KEY` 可透传该变量，租户自行安装的服务器不能这样做。
+
 ## 记忆分层
 
 | 层级 | 生命周期 | 内容 | 写入方 |

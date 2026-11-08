@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/tools/memsearch"
+	"go-sre-harness/internal/tools/sandboxexec"
 	"log/slog"
 	"net/http"
 	"os"
@@ -246,6 +247,17 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, fmt.Errorf("tool %q is reserved for the harness", kernel.LoadToolsName)
 	}
 	h.Tools.Register(kernel.LoadToolsTool{Registry: h.Tools})
+	// sandbox: isolated per-run execution (optional)
+	sbx, err := optionalOne(ctx, plugin.Sandbox, h, specs["sandbox"])
+	if err != nil {
+		return nil, err
+	}
+	if sbx != nil {
+		if _, dup := h.Tools.Lookup(sandboxexec.Name); dup {
+			return nil, fmt.Errorf("tool %q is reserved for the harness", sandboxexec.Name)
+		}
+		h.Tools.Register(sandboxexec.Tool{Backend: sbx})
+	}
 	if err := applyToolOverlays(h.Tools, cfgFile.ToolOverlays, log); err != nil {
 		return nil, err
 	}

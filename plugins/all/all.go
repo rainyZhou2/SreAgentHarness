@@ -13,6 +13,7 @@ import (
 	_ "go-sre-harness/plugins/models"
 	_ "go-sre-harness/plugins/profiles"
 	_ "go-sre-harness/plugins/relay"
+	_ "go-sre-harness/plugins/sandbox"
 	_ "go-sre-harness/plugins/sretools"
 	_ "go-sre-harness/plugins/storage"
 	_ "go-sre-harness/plugins/strategies"

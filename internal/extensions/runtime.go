@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -301,7 +302,14 @@ func (r *Runtime) server(name string, s MCPSpec) (*mcpexec.Server, error) {
 	if err := s.check(r.Options); err != nil {
 		return nil, err
 	}
-	cfg := mcpexec.ServerConfig{Name: name, URL: s.URL, Headers: s.Headers, Command: s.Command, Args: s.Args, Env: s.Env,
+	// A tenant sets values; it never passes harness variables through.
+	var env []string
+	for _, e := range s.Env {
+		if strings.Contains(e, "=") {
+			env = append(env, e)
+		}
+	}
+	cfg := mcpexec.ServerConfig{Name: name, URL: s.URL, Headers: s.Headers, Command: s.Command, Args: s.Args, Env: env,
 		Allow: s.Allow, MaxOutputBytes: s.MaxOutputBytes, Transport: r.Options.Network.Transport()}
 	if d, err := time.ParseDuration(s.CallTimeout); err == nil {
 		cfg.CallTimeout = mcpexec.Duration(d)
