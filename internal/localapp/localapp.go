@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go-sre-harness/internal/sandbox"
 	"go-sre-harness/internal/tools/memsearch"
+	"go-sre-harness/internal/tools/sandboxexec"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -161,6 +163,21 @@ func Run(ctx context.Context, cfg Config) error {
 	graphSvc := &graph.Service{Store: store, Tools: reg, Extensions: extRT, Log: cfg.Log.With("component", "graph")}
 	retriever := &memory.Retriever{Store: store, Embedder: embedder, Artifacts: arts, TopK: 5}
 	reg.Register(memsearch.Tool{Retriever: retriever})
+	if rt := os.Getenv("HARNESS_SANDBOX_RUNTIME"); rt != "" {
+		// Opt-in: commands run in a container per call, without network or
+		// credentials, in a per-run workspace under the data directory.
+		image := os.Getenv("HARNESS_SANDBOX_IMAGE")
+		if image == "" {
+			image = "python:3.12-alpine"
+		}
+		sbx, err := sandbox.NewContainer(sandbox.ContainerConfig{Runtime: rt, Image: image,
+			Root: filepath.Join(cfg.DataDir, "sandbox"), Log: cfg.Log.With("component", "sandbox")})
+		if err != nil {
+			cfg.Log.Warn("sandbox disabled", "err", err)
+		} else {
+			reg.Register(sandboxexec.Tool{Backend: sbx})
+		}
+	}
 	offlineGW, err := buildGateway(arts, gateway.NewMemLedger(), cfg.Log)
 	if err != nil {
 		return err

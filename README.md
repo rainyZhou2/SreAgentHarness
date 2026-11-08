@@ -203,6 +203,14 @@ See `deploy/harness.example.yaml` for the rest.
 - **Speculative read-only calls** (`HARNESS_SPECULATIVE_TOOLS`): as each tool call completes in the model's stream, a call that is visible, read-only, allowed without approval and not a repeat starts at once; the tool step that runs the same call (same version, risk and arguments) takes the result. Unused results expire after two minutes; side-effecting calls are never started early.
 - **Observability**: every step summary carries `timings_ms` (queue, context, model, review, tool), exported as `harness_step_phase_seconds{kind,phase}` together with commit time; `harness_agent_loop_events_total{event}` counts repairs, loop guards, notices, batches, convergence, routing, compaction, speculation and artifact-cache hits. The run result carries `loop` (steps, model requests, tokens, cost).
 
+## Sandbox
+
+`harness.sandbox.exec` runs a command (`command` for `sh -c`, or `argv`) in the run's sandbox: input `files` are written into `/workspace`, which persists across the run's calls and is never shared with another run or tenant, and the listed `outputs` are returned with exit code, stdout and stderr. It is for computing over data the agent already has; production changes still go through typed tools and approval.
+
+- **Safety floor**: no harness environment or credentials (only variables the request sets), network `none`, read-only root file system, non-root user, all capabilities dropped, `no-new-privileges`, CPU / memory / process / time / output limits. Workspace files are read and written through `os.Root`, so a symlink planted by the command cannot reach host files. Results are untrusted (T4) and the tool is R0, so it needs no approval; it is never started speculatively.
+- **Backends** (`sandbox` plugin kind): `container` runs a fresh docker or podman container per call (`extra_args: [--runtime=runsc]` for gVisor). The server enables it with `sandbox: {name: container, config: {...}}` (see `deploy/harness.example.yaml`); the desktop runtime with `HARNESS_SANDBOX_RUNTIME=docker|podman` and optional `HARNESS_SANDBOX_IMAGE` (default `python:3.12-alpine`). Workspaces untouched for `workspace_ttl` (24h) are removed. When the harness itself runs in a container, `root` must be a path the container daemon can mount.
+- **MCP stdio servers** no longer inherit the harness environment: they get basic variables (`PATH`, `HOME`, locale, temp directory) plus their configured `env`; a bare `KEY` in an operator's config passes that variable through, which tenant-installed servers cannot do.
+
 ## Memory tiers
 
 | Tier | Lifetime | What it holds | Written by |

@@ -255,7 +255,7 @@ func (w *Worker) speculator(ctx context.Context, lease domain.Lease, rules profi
 	}
 	return func(name string, args json.RawMessage) {
 		if name == cognitive.ConclusionTool || name == BatchToolName || name == LoadToolsName ||
-			name == verify.ReviewToolName || !visibleTool(visible, name) || !json.Valid(args) {
+			name == verify.ReviewToolName || name == domain.SandboxExecToolName || !visibleTool(visible, name) || !json.Valid(args) {
 			return
 		}
 		t, ok := w.tools.LookupFor(lease.TenantID, name)

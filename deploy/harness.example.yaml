@@ -86,6 +86,11 @@ plugins:
   memory_retriever: {name: hybrid, config: {top_k: 5}}
   strategy: [llm, rule_based]
   grader: substring
+  # Isolated per-run execution behind harness.sandbox.exec (optional):
+  # a fresh container per call, no network, no credentials, run workspace
+  # mounted at /workspace. Pin the image by digest; gVisor: extra_args: [--runtime=runsc].
+  # sandbox: {name: container, config: {runtime: docker, image: "python:3.12-alpine", root: /var/lib/harness/sandbox,
+  #   cpus: 1, memory_mb: 512, pids: 128, timeout: 60s, max_output_bytes: 65536, workspace_ttl: 24h}}
   job:
     - {name: consolidator, config: {interval: 10s}}
     - {name: rollout_monitor, config: {interval: 1m}}

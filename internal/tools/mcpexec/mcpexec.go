@@ -40,7 +40,11 @@ type ServerConfig struct {
 	// stdio transport
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
-	Env     []string `json:"env,omitempty"`
+	// Env is the server's environment: KEY=VALUE entries, or a bare KEY to
+	// pass that variable through from the harness. Nothing else of the
+	// harness environment (database URLs, model keys) reaches the server
+	// except the basics in BaseEnv.
+	Env []string `json:"env,omitempty"`
 	// streamable HTTP transport
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
@@ -128,7 +132,7 @@ func defaultDialer(cfg ServerConfig) Dialer {
 	case cfg.Command != "":
 		return func() (mcp.Transport, error) {
 			cmd := exec.Command(cfg.Command, cfg.Args...)
-			cmd.Env = append(os.Environ(), cfg.Env...)
+			cmd.Env = StdioEnv(os.Environ(), cfg.Env)
 			return &mcp.CommandTransport{Command: cmd}, nil
 		}
 	case cfg.URL != "":
@@ -137,6 +141,55 @@ func defaultDialer(cfg ServerConfig) Dialer {
 		}
 	}
 	return nil
+}
+
+// BaseEnv are the harness variables every stdio server gets: what a
+// process needs to start (PATH to find node/python, HOME for caches,
+// locale, temp dir, Windows system paths).
+var BaseEnv = []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP",
+	"SHELL", "SystemRoot", "SystemDrive", "WINDIR", "ComSpec", "PATHEXT", "APPDATA", "LOCALAPPDATA", "USERPROFILE"}
+
+// StdioEnv builds a stdio server's environment from the harness
+// environment: BaseEnv, then the configured entries (a bare KEY passes the
+// harness value through; KEY=VALUE sets it).
+func StdioEnv(harness, configured []string) []string {
+	have := map[string]string{}
+	for _, kv := range harness {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			have[k] = v
+		}
+	}
+	out := map[string]string{}
+	var order []string
+	set := func(k, v string) {
+		if _, ok := out[k]; !ok {
+			order = append(order, k)
+		}
+		out[k] = v
+	}
+	for _, k := range BaseEnv {
+		if v, ok := have[k]; ok {
+			set(k, v)
+		}
+	}
+	for _, e := range configured {
+		k, v, hasValue := strings.Cut(e, "=")
+		if k = strings.TrimSpace(k); k == "" {
+			continue
+		}
+		if !hasValue {
+			if hv, ok := have[k]; ok {
+				set(k, hv)
+			}
+			continue
+		}
+		set(k, v)
+	}
+	env := make([]string, 0, len(order))
+	for _, k := range order {
+		env = append(env, k+"="+out[k])
+	}
+	return env
 }
 
 func (s *Server) Name() string { return s.cfg.Name }

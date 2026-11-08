@@ -141,6 +141,11 @@ const BatchToolName = "harness.parallel"
 // during a run. Its hits are citable as memory:<id>@<version>.
 const MemorySearchToolName = "harness.memory_search"
 
+// SandboxExecToolName is the builtin tool that runs commands in the run's
+// sandbox. It changes the run's workspace, so it is never run
+// speculatively.
+const SandboxExecToolName = "harness.sandbox.exec"
+
 // ToolFollowup marks a tool step the kernel planned after an action. The
 // expectation and polling bounds are re-read from the registry at execution
 // time; the artifact only identifies the action.
