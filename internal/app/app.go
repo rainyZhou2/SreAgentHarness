@@ -521,6 +521,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			ArtifactCacheBytes:  e.int64("HARNESS_ARTIFACT_CACHE_BYTES", 0),
 			ToolTopK:            e.int("HARNESS_TOOL_TOP_K", 0),
 			CompactTokens:       e.int("HARNESS_COMPACT_TOKENS", 0),
+			ShortTermMessages:   e.int("HARNESS_SHORT_TERM_MESSAGES", 0),
 			RoutineModelAlias:   e.str("HARNESS_MODEL_ROUTINE_ALIAS", ""),
 			EscalatedModelAlias: e.str("HARNESS_MODEL_ESCALATED_ALIAS", ""),
 			SpeculativeTools:    e.bool("HARNESS_SPECULATIVE_TOOLS", false),

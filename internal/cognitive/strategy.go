@@ -56,10 +56,20 @@ type ReasoningInput struct {
 	Facts []domain.ContextFact
 
 	// v1.1 context (§29, §33): all of it is pinned by the snapshot.
-	Call            CallScope
-	Conversation    []ConversationMessage // earlier turns on the branch
-	Memories        []MemoryRef           // pinned retrieve_memory hits
-	Summary         string                // compaction summary replacing observations before CompactedBefore
+	Call         CallScope
+	Conversation []ConversationMessage // earlier turns on the branch (the recent window)
+	// ConversationDigest condenses the earlier turns outside the window
+	// ("" when every earlier message is in Conversation).
+	ConversationDigest string `json:"conversation_digest,omitempty"`
+	// Notes are the agent's live memory notes: this run's working notes,
+	// the session's short-term notes (carried from earlier turns) and the
+	// user / long_term writes it made in this run.
+	Notes []domain.Note `json:"notes,omitempty"`
+	// NoteState is the note set behind Notes, tombstones included (the
+	// kernel adds the final decision's writes to it).
+	NoteState       *domain.NoteSet `json:"-"`
+	Memories        []MemoryRef     // pinned retrieve_memory hits
+	Summary         string          // compaction summary replacing observations before CompactedBefore
 	CompactedBefore int64
 	CompactionEpoch int64
 

@@ -141,6 +141,10 @@ type Config struct {
 	// ArtifactCacheBytes bounds the worker's cache of immutable artifacts
 	// (0: DefaultArtifactCacheBytes, < 0: off).
 	ArtifactCacheBytes int64
+	// ShortTermMessages is how many earlier conversation messages are
+	// rendered verbatim; older ones are condensed into a digest
+	// (0: DefaultShortTermMessages, < 0: all verbatim).
+	ShortTermMessages int
 	// ToolTopK is how many tool schemas the model sees when more tools are
 	// visible (0: DefaultToolTopK, < 0: all); the rest are listed by name
 	// and loaded with harness.load_tools.
@@ -817,6 +821,9 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease, st *exec
 		if kernelStop != "" {
 			result["stopped"] = kernelStop
 		}
+		if rm := runMemory(in.NoteState, lease.StepSeq, decision.Notes); rm != nil {
+			result["memory"] = rm
+		}
 		result["loop"] = map[string]any{"steps": lease.StepSeq, "model_requests": bud.usage.Requests,
 			"input_tokens": bud.usage.InputTokens, "output_tokens": bud.usage.OutputTokens,
 			"cost_usd": float64(bud.usage.CostMicros) / 1e6}
@@ -998,11 +1005,15 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		return in, err
 	}
 	ledger := newLedger()
+	var noteWrites []stepNotes
 	for _, s := range history {
 		if s.Kind == domain.StepReason && s.Status == domain.StepSucceeded && s.OutputRef != nil {
 			var d domain.Decision
 			if err := w.get(ctx, lease.TenantID, *s.OutputRef, &d); err == nil {
 				ledger.add(s.Seq, d.Hypotheses)
+				if len(d.Notes) > 0 {
+					noteWrites = append(noteWrites, stepNotes{seq: s.Seq, ops: d.Notes})
+				}
 			}
 			continue
 		}
@@ -1067,16 +1078,24 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 
 	in.Ledger = ledger.entries()
 
+	notes := &domain.NoteSet{}
 	if cr, ok := w.store.(ConversationReader); ok {
 		msgs, err := cr.RunConversation(ctx, lease.TenantID, lease.RunID)
 		if err != nil {
 			return in, err
 		}
+		var all []cognitive.ConversationMessage
 		for _, m := range msgs {
-			in.Conversation = append(in.Conversation, cognitive.ConversationMessage{Seq: m.Seq, Role: m.Role,
+			all = append(all, cognitive.ConversationMessage{Seq: m.Seq, Role: m.Role,
 				Text: w.messageText(ctx, lease.TenantID, m)})
 		}
+		in.Conversation, in.ConversationDigest = conversationWindow(all, w.shortTermMessages())
+		notes.Seed(w.priorSessionNotes(ctx, lease.TenantID, msgs))
 	}
+	for _, sn := range noteWrites {
+		notes.Apply(sn.seq, capNoteOps(sn.ops))
+	}
+	in.Notes, in.NoteState = notes.Live(), notes
 	if w.cfg.Skills != nil {
 		// Manual skills apply once the chat mentions /name (goal or an
 		// earlier user message); the others always apply.

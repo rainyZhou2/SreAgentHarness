@@ -17,32 +17,36 @@ import (
 )
 
 type Memory struct {
-	ID             string     `json:"id"`
-	TenantID       string     `json:"tenant_id"`
-	Scope          string     `json:"scope"` // organization | service | incident | agent
-	ScopeID        string     `json:"scope_id"`
-	Type           string     `json:"memory_type"` // semantic | episodic | procedural
-	Status         string     `json:"status"`
-	Version        int64      `json:"version"`
-	Subject        string     `json:"subject"`
-	Title          string     `json:"title"`
-	Content        string     `json:"content"`
-	ContentRef     string     `json:"content_ref"`
-	ContentHash    string     `json:"content_hash"`
-	SourceRefs     []string   `json:"source_refs"`
-	EvidenceRefs   []string   `json:"evidence_refs"`
-	Trust          string     `json:"trust"`
-	Sensitivity    string     `json:"sensitivity"`
-	Confidence     *float64   `json:"confidence,omitempty"`
-	VerifiedBy     *string    `json:"verified_by,omitempty"`
-	Environment    *string    `json:"environment,omitempty"`
-	SupersededBy   *string    `json:"superseded_by,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	CreatedBy      string     `json:"created_by"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	Embedding      []float32  `json:"-"`
-	EmbeddingModel string     `json:"-"`
+	ID           string   `json:"id"`
+	TenantID     string   `json:"tenant_id"`
+	Scope        string   `json:"scope"` // organization | service | incident | agent | user
+	ScopeID      string   `json:"scope_id"`
+	Type         string   `json:"memory_type"` // semantic | episodic | procedural
+	Status       string   `json:"status"`
+	Version      int64    `json:"version"`
+	Subject      string   `json:"subject"`
+	Title        string   `json:"title"`
+	Content      string   `json:"content"`
+	ContentRef   string   `json:"content_ref"`
+	ContentHash  string   `json:"content_hash"`
+	SourceRefs   []string `json:"source_refs"`
+	EvidenceRefs []string `json:"evidence_refs"`
+	Trust        string   `json:"trust"`
+	Sensitivity  string   `json:"sensitivity"`
+	Confidence   *float64 `json:"confidence,omitempty"`
+	VerifiedBy   *string  `json:"verified_by,omitempty"`
+	Environment  *string  `json:"environment,omitempty"`
+	SupersededBy *string  `json:"superseded_by,omitempty"`
+	// Reinforcements counts how often the same (or a near-identical)
+	// memory was written again from a new source.
+	Reinforcements   int        `json:"reinforcements"`
+	LastReinforcedAt *time.Time `json:"last_reinforced_at,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	CreatedBy        string     `json:"created_by"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	Embedding        []float32  `json:"-"`
+	EmbeddingModel   string     `json:"-"`
 }
 
 // ---------- write-path safety (§8.4) ----------

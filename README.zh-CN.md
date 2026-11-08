@@ -165,6 +165,7 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_COMPACT_TOKENS` | 未压缩的工具结果超过约这么多 token 时压缩历史（默认 16000；负数只按步数） |
 | `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | 常规调查步使用的模型 alias，以及决定结果的步骤使用的 alias（默认沿用策略自身的 alias） |
 | `HARNESS_SPECULATIVE_TOOLS` | 模型仍在流式输出时提前执行允许的只读调用，工具步直接复用结果（默认 `false`） |
+| `HARNESS_SHORT_TERM_MESSAGES` | 原样保留的历史对话消息数（默认 12；更早的消息压缩为摘要；负数全部保留） |
 | `HARNESS_EMBEDDING_BASE_URL` / `_MODEL` / `_DIMENSIONS` / `_API_KEY_ENV` | 桌面运行时：使用 OpenAI 兼容的 embeddings 接口替代哈希 embedder；密钥从 `_API_KEY_ENV` 指定的变量读取（默认 `HARNESS_EMBEDDING_API_KEY`）。服务端在 `HARNESS_CONFIG` 中配置 `embedder: {name: http, …}` |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
@@ -192,6 +193,26 @@ docker compose -f deploy/docker-compose.yml up --build
 - **按 token 预算压缩**：除每 N 个工具步压缩一次外，未压缩结果超过 `HARNESS_COMPACT_TOKENS` 时也会压缩（此时只保留最新一个结果原文）。默认压缩器（`deterministic-v2`）每条结果一行、以可引用的 ref 开头，大的 JSON 对象按顶层字段呈现；被压缩的 ref（包括批量步骤的子调用）仍可引用。
 - **只读调用提前执行**（`HARNESS_SPECULATIVE_TOOLS`）：模型流中每个工具调用一完成，若它可见、只读、无需审批且不是重复调用，就立即开始执行；执行同一调用（版本、风险、参数都相同）的工具步直接取用结果。未被使用的结果两分钟后过期；有副作用的调用从不提前执行。
 - **可观测性**：每个步骤摘要带 `timings_ms`（queue、context、model、review、tool），并与提交耗时一起导出为 `harness_step_phase_seconds{kind,phase}`；`harness_agent_loop_events_total{event}` 统计修复、循环防护、提示、批量、收敛、路由、压缩、提前执行和 artifact 缓存命中。Run 结果中带 `loop`（步数、模型请求数、token、花费）。
+
+## 记忆分层
+
+| 层级 | 生命周期 | 内容 | 写入方 |
+|---|---|---|---|
+| 工作记忆 | 单个 Run | agent 的笔记：已确认的事实、约束、待查项；以及假设账本 | scope 为 `run` 的 `notes` |
+| 短期记忆 | 单个会话（分支） | 最近 `HARNESS_SHORT_TERM_MESSAGES` 条消息原文、更早轮次的摘要、会话笔记 | scope 为 `session` 的 `notes` |
+| 长期记忆 | 租户 | 事件、修复方案、推理模式、计划范例、agent 提议的事实（organization / service / incident） | consolidator、运维人员、scope 为 `long_term` 的 `notes`（作为 CANDIDATE） |
+| 个性化记忆 | 单个用户 | 发起 Run 的用户的稳定偏好（语言、格式、默认值） | scope 为 `user` 的 `notes`，或用户通过 `/v1/me/memories` 管理 |
+
+- **笔记**：agent 在 `THOUGHT` 行或结论中写 `"notes":[{"key","value","scope"}]`；重复写同一个 key 即更新，值为空即删除。kernel 从已存储的决策重建笔记，因此重试和压缩后依然存在，并在数据边界内以 `[working memory]` 小节呈现。每层最多 24 条、每条 500 字符。
+- **短期记忆**：Run 结束时的会话笔记写入其结果（`memory.session`）；同一分支的下一轮从最近一个完成轮次的笔记开始，因此分叉出的分支只看到自己的历史。
+- **个性化记忆**：用户发起的 Run 完成后，其 `user` 笔记按 key（`pref:<key>`，ACTIVE，`restricted`）为该用户新建、强化、修订（新版本）或归档记忆。个性化记忆与本 Run 检索到的记忆一起固定，只在该用户自己的 Run 中以 `[about the user]` 小节呈现；共享检索、`harness.memory_search` 和其他用户都看不到（管理员可列出）。指令性文本会被拒绝，偏好永远不能授权任何操作。用户通过 `GET /v1/me/memories`、`PUT|DELETE /v1/me/memories/{key}` 管理自己的偏好。
+- **agent 提议的长期记忆**：已完成且未被否定的 Run 中的 `long_term` 笔记成为 CANDIDATE 记忆（反馈确认后为 VALIDATING），subject 为 `note:<key>`，与其他记忆一样走审核。
+
+## 记忆更新机制
+
+- **强化而非重复**：在同一 scope 中再次写入相同内容，或写入同 subject、近似重复（embedding 余弦 ≥ 0.95；无可比 embedding 时词元重叠 ≥ 0.85）且验证程度不高于已有记忆的内容时，若来源是新的，则记为对已有记忆的一次强化（`reinforcements`、`last_reinforced_at`，合并 `source_refs`）。被强化的记忆排序略微提升（最多 ×1.3）。
+- **修订**：`PATCH /v1/memories/{id}`（approver；`expected_version`、`title` 和/或 `content`、`reason`）写入新版本：与新记忆一样脱敏和投毒检查，重新生成向量和检索词，记审计，状态不变。旧版本保留在 `agent_memory_versions` 中，引用旧版本的 ref 仍可解析；修订后与其他记忆内容重复时会被拒绝。
+- **取代**（激活一条记忆会让同 subject、同 scope 的 ACTIVE 记忆变为 SUPERSEDED）、**生命周期迁移**、反馈和保留策略保持不变。整理过程是幂等的：反馈触发的重新整理不会重复强化或修订。
 
 ## 记忆检索
 

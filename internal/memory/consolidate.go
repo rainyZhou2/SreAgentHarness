@@ -55,6 +55,11 @@ type Writer struct {
 func (w Writer) Prepare(ctx context.Context, m NewMemory) (NewMemory, error) {
 	switch m.Scope {
 	case "organization", "service", "incident", "agent":
+	case "user":
+		// Personal memory belongs to one user and never leaves their runs.
+		if strings.TrimSpace(m.ScopeID) == "" {
+			return m, errors.New("user memory needs the user id as scope_id")
+		}
 	default:
 		return m, fmt.Errorf("invalid scope %q", m.Scope)
 	}
@@ -224,14 +229,16 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 		_ = json.Unmarshal(data, &goal)
 	}
 	l := lessons{Goal: goal.Goal, Outcome: string(run.Status)}
+	var runMem *domain.RunMemory
 	if run.ResultRef != nil {
 		var res struct {
-			Answer string `json:"answer"`
+			Answer string            `json:"answer"`
+			Memory *domain.RunMemory `json:"memory"`
 		}
 		if data, err := c.Artifacts.Get(ctx, j.TenantID, *run.ResultRef); err == nil {
 			_ = json.Unmarshal(data, &res)
 		}
-		l.Conclusion = res.Answer
+		l.Conclusion, runMem = res.Answer, res.Memory
 	}
 	for _, s := range rec.Steps {
 		if s.Kind != domain.StepTool {
@@ -333,6 +340,11 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 			if _, _, err := c.Store.CreateMemory(ctx, prepared); err != nil {
 				return err
 			}
+		}
+	}
+	if runMem != nil {
+		if err := c.applyRunMemory(ctx, rec, runMem, service, quality, shards, &l); err != nil {
+			return err
 		}
 	}
 	data, _ := json.Marshal(l)

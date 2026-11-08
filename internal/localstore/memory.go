@@ -70,8 +70,25 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		cur := rec.Mem
 		if cur.TenantID == m.TenantID && cur.Scope == m.Scope && cur.ScopeID == m.ScopeID &&
 			cur.ContentHash == m.ContentHash && cur.Status != "REJECTED" && cur.Status != "ARCHIVED" {
-			return cur, false, nil
+			return s.reinforceLocked(rec, m.SourceRefs), false, nil
 		}
+	}
+	// A near-identical memory with the same subject is reinforced instead
+	// of duplicated (newest first, at least as validated as the new one).
+	var near *memoryRec
+	for _, rec := range s.memories {
+		cur := rec.Mem
+		if cur.TenantID != m.TenantID || cur.Scope != m.Scope || cur.ScopeID != m.ScopeID || cur.Subject != m.Subject ||
+			memory.StatusRank(cur.Status) < 0 || memory.StatusRank(cur.Status) < memory.StatusRank(m.Status) {
+			continue
+		}
+		if memory.NearDuplicate(m, cur, rec.Embeddings[m.EmbeddingModel]) && (near == nil || cur.UpdatedAt.After(near.Mem.UpdatedAt)) {
+			r := rec
+			near = &r
+		}
+	}
+	if near != nil {
+		return s.reinforceLocked(*near, m.SourceRefs), false, nil
 	}
 	now := now()
 	mem := memory.Memory{ID: newID(), TenantID: m.TenantID, Scope: m.Scope, ScopeID: m.ScopeID, Type: m.Type,
@@ -92,6 +109,108 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		s.supersedeSubjectLocked(mem.TenantID, mem.ID, mem.Scope, mem.ScopeID, mem.Subject)
 	}
 	return mem, true, nil
+}
+
+func (s *Store) reinforceLocked(rec memoryRec, sources []string) memory.Memory {
+	merged, changed := memory.MergeSources(rec.Mem.SourceRefs, sources)
+	if !changed {
+		return rec.Mem
+	}
+	t := now()
+	rec.Mem.SourceRefs, rec.Mem.Reinforcements, rec.Mem.LastReinforcedAt = merged, rec.Mem.Reinforcements+1, &t
+	s.saveMemory(rec)
+	return rec.Mem
+}
+
+var _ memory.Updater = (*Store)(nil)
+var _ memory.PersonalStore = (*Store)(nil)
+
+func (s *Store) LiveMemoryBySubject(_ context.Context, tenantID, scope, scopeID, subject string) (memory.Memory, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var best memory.Memory
+	found := false
+	for _, rec := range s.memories {
+		m := rec.Mem
+		if m.TenantID != tenantID || m.Scope != scope || m.ScopeID != scopeID || m.Subject != subject ||
+			memory.StatusRank(m.Status) < 0 {
+			continue
+		}
+		if !found || memory.StatusRank(m.Status) > memory.StatusRank(best.Status) ||
+			(memory.StatusRank(m.Status) == memory.StatusRank(best.Status) && m.UpdatedAt.After(best.UpdatedAt)) {
+			best, found = m, true
+		}
+	}
+	return best, found, nil
+}
+
+// UpdateMemory writes a new version of a live memory's content.
+func (s *Store) UpdateMemory(_ context.Context, r memory.Revision) (memory.Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.memories[r.ID]
+	if !ok || rec.Mem.TenantID != r.TenantID {
+		return memory.Memory{}, domain.ErrNotFound
+	}
+	cur := rec.Mem
+	if r.ExpectedVersion > 0 && cur.Version != r.ExpectedVersion {
+		return memory.Memory{}, domain.ErrVersionConflict
+	}
+	if memory.StatusRank(cur.Status) < 0 && cur.Status != "STALE" {
+		return memory.Memory{}, &domain.RejectedError{Reason: "memory_not_live_" + strings.ToLower(cur.Status)}
+	}
+	p := r.Prepared
+	if p.ContentHash == cur.ContentHash && p.Title == cur.Title {
+		return cur, nil
+	}
+	for id, o := range s.memories {
+		if id != cur.ID && o.Mem.TenantID == cur.TenantID && o.Mem.Scope == cur.Scope && o.Mem.ScopeID == cur.ScopeID &&
+			o.Mem.ContentHash == p.ContentHash && o.Mem.Status != "REJECTED" && o.Mem.Status != "ARCHIVED" {
+			return memory.Memory{}, &domain.RejectedError{Reason: "duplicate_content_of_" + id}
+		}
+	}
+	cur.Title, cur.Content, cur.ContentRef, cur.ContentHash = p.Title, p.Content, p.ContentRef, p.ContentHash
+	cur.SourceRefs, cur.EvidenceRefs, cur.Version, cur.UpdatedAt = p.SourceRefs, p.EvidenceRefs, cur.Version+1, now()
+	emb := map[string][]float32{}
+	if len(p.Embedding) > 0 && p.EmbeddingModel != "" {
+		emb[p.EmbeddingModel] = p.Embedding // vectors of the old version no longer apply
+	}
+	s.saveMemory(memoryRec{Mem: cur, Embeddings: emb})
+	return cur, nil
+}
+
+func (s *Store) RunInitiator(_ context.Context, tenantID, runID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.runs[runID]
+	if !ok || r.TenantID != tenantID {
+		return "", domain.ErrNotFound
+	}
+	if r.InitiatorType != "user" || r.InitiatorID == nil {
+		return "", nil
+	}
+	return *r.InitiatorID, nil
+}
+
+func (s *Store) PersonalMemories(_ context.Context, tenantID, userID string, limit int) ([]memory.Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 || limit > 200 {
+		limit = memory.MaxPersonalMemories
+	}
+	var out []memory.Memory
+	for _, rec := range s.memories {
+		m := rec.Mem
+		if m.TenantID == tenantID && m.Scope == "user" && m.ScopeID == userID && m.Status == "ACTIVE" &&
+			(m.ExpiresAt == nil || m.ExpiresAt.After(now())) {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func stringShards(m memory.NewMemory) []domain.MemoryShard {

@@ -165,6 +165,7 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_COMPACT_TOKENS` | compact history when uncompacted tool results exceed about this many tokens (default 16000; negative: step count only) |
 | `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | model alias for routine investigation steps and for the steps that decide the outcome (default: the strategy's alias) |
 | `HARNESS_SPECULATIVE_TOOLS` | start allowed read-only calls while the model is still streaming and reuse the result in the tool step (default `false`) |
+| `HARNESS_SHORT_TERM_MESSAGES` | earlier conversation messages rendered verbatim (default 12; older ones are condensed into a digest; negative: all) |
 | `HARNESS_EMBEDDING_BASE_URL` / `_MODEL` / `_DIMENSIONS` / `_API_KEY_ENV` | desktop runtime: use an OpenAI-compatible embeddings endpoint instead of the hashing embedder; the key is read from the variable named by `_API_KEY_ENV` (default `HARNESS_EMBEDDING_API_KEY`). The server configures `embedder: {name: http, …}` in `HARNESS_CONFIG` |
 
 Generated plans emit `plan.generated`, `plan.validation_failed`, `plan.repaired`, `plan.fallback`, `plan.approval_requested`, `plan.approved`, `plan.rejected`, `plan.executed`, `plan.injection_suspected`, `plan.replan_requested` and `plan.replanned` events. Planner metrics are exposed on `/metrics`: `harness_plan_total`, `harness_plan_duration_seconds`, `harness_plan_repairs_total`, `harness_plan_validation_failures_total` and `harness_plan_fallback_total`.
@@ -192,6 +193,26 @@ See `deploy/harness.example.yaml` for the rest.
 - **Token-budget compaction**: besides every N tool steps, history is compacted when the uncompacted results exceed `HARNESS_COMPACT_TOKENS` (then all but the newest result are folded). The default compactor (`deterministic-v2`) writes one line per result led by its citable ref and renders large JSON objects as their top-level fields; compacted refs, including batch parts, stay citable.
 - **Speculative read-only calls** (`HARNESS_SPECULATIVE_TOOLS`): as each tool call completes in the model's stream, a call that is visible, read-only, allowed without approval and not a repeat starts at once; the tool step that runs the same call (same version, risk and arguments) takes the result. Unused results expire after two minutes; side-effecting calls are never started early.
 - **Observability**: every step summary carries `timings_ms` (queue, context, model, review, tool), exported as `harness_step_phase_seconds{kind,phase}` together with commit time; `harness_agent_loop_events_total{event}` counts repairs, loop guards, notices, batches, convergence, routing, compaction, speculation and artifact-cache hits. The run result carries `loop` (steps, model requests, tokens, cost).
+
+## Memory tiers
+
+| Tier | Lifetime | What it holds | Written by |
+|---|---|---|---|
+| Working | one run | the agent's notes: established facts, constraints, what is left to check; plus the hypothesis ledger | `notes` with scope `run` |
+| Short-term | one conversation (branch) | the last `HARNESS_SHORT_TERM_MESSAGES` messages verbatim, a digest of older turns, and session notes | `notes` with scope `session` |
+| Long-term | the tenant | incidents, remediations, reasoning patterns, plan exemplars, proposed facts (organization / service / incident scopes) | the consolidator, operators, `notes` with scope `long_term` (as CANDIDATE) |
+| Personal | one user | stable preferences of the user who started the run (language, format, defaults) | `notes` with scope `user`, or the user via `/v1/me/memories` |
+
+- **Notes**: the agent writes memory in its `THOUGHT` line or its conclusion as `"notes":[{"key","value","scope"}]`; writing a key again updates it, an empty value deletes it. The kernel rebuilds notes from the stored decisions, so they survive retries and compaction, and renders them in a `[working memory]` section inside a data boundary. A tier holds at most 24 notes of 500 characters.
+- **Short-term**: the session notes after a run are stored in its result (`memory.session`); the next turn on the same branch starts from the latest completed turn's notes, so a forked branch sees only its own history.
+- **Personal**: when a user-started run completes, its `user` notes create, reinforce, revise (new version) or archive that user's memory for each key (`pref:<key>`, ACTIVE, `restricted`). Personal memory is pinned with the run's retrieved memories and rendered in an `[about the user]` section for that user's runs only; shared retrieval, `harness.memory_search` and other users never see it (admins can list it). Instruction-like text is rejected, and a preference never authorizes an action. Users manage theirs with `GET /v1/me/memories`, `PUT|DELETE /v1/me/memories/{key}`.
+- **Long-term from the agent**: `long_term` notes of a completed, undisputed run become CANDIDATE memories (VALIDATING when feedback verified the run) with subject `note:<key>`, reviewed like any other.
+
+## Updating memory
+
+- **Reinforcement instead of duplicates**: writing the same content again in the same scope, or a near-identical memory with the same subject (embedding cosine ≥ 0.95, or token overlap ≥ 0.85 without a comparable embedding) that is at least as validated, counts a reinforcement on the existing memory (`reinforcements`, `last_reinforced_at`, merged `source_refs`) when it comes from a new source. Reinforced memories rank slightly higher (up to ×1.3).
+- **Revisions**: `PATCH /v1/memories/{id}` (approver; `expected_version`, `title` and/or `content`, `reason`) writes a new version: redacted and poison-checked like a new memory, re-embedded and re-indexed, audited, the status unchanged. Earlier versions stay in `agent_memory_versions`, so citations pinned to them still resolve; a revision that would duplicate another memory's content is rejected.
+- **Supersession** (activating a memory retires ACTIVE ones with the same subject and scope), **lifecycle transitions**, feedback and retention work as before. Consolidation is idempotent: a re-run after feedback does not reinforce or revise twice.
 
 ## Memory search
 
