@@ -18,6 +18,7 @@ import (
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/toolconfig"
 	"go-sre-harness/internal/trigger"
+	"go-sre-harness/internal/workengine"
 )
 
 // File is the harness configuration file (HARNESS_CONFIG, YAML or JSON).
@@ -37,6 +38,9 @@ type File struct {
 	// ToolOverlays attach operator metadata (labels, lifecycle, time
 	// arguments, offload size) to tools by name, whatever their source.
 	ToolOverlays map[string]tools.Overlay `json:"tool_overlays,omitempty"`
+	// Work configures the v2 control plane (templates, correlation rules);
+	// it is used only with HARNESS_WORK_ENGINE_ENABLED.
+	Work workengine.Config `json:"work,omitempty"`
 }
 
 type ModelSettings struct {

@@ -14,6 +14,8 @@ import (
 	"syscall"
 
 	"go-sre-harness/internal/localapp"
+	// The v2 simulator (work_extensions: ["sre-sim"]); no external services.
+	_ "go-sre-harness/plugins/srework"
 )
 
 func main() {

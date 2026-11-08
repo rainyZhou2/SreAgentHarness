@@ -15,6 +15,7 @@ import (
 	_ "go-sre-harness/plugins/relay"
 	_ "go-sre-harness/plugins/sandbox"
 	_ "go-sre-harness/plugins/sretools"
+	_ "go-sre-harness/plugins/srework"
 	_ "go-sre-harness/plugins/storage"
 	_ "go-sre-harness/plugins/strategies"
 	_ "go-sre-harness/plugins/telemetry"

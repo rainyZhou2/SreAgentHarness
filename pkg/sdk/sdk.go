@@ -22,6 +22,7 @@ package sdk
 import (
 	"context"
 
+	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/api"
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/auth"
@@ -29,16 +30,19 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eval"
 	"go-sre-harness/internal/eventbus"
+	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/eventsink"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/notify"
+	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/stream"
 	"go-sre-harness/internal/tools"
+	"go-sre-harness/internal/world"
 )
 
 // ---- framework ----
@@ -230,3 +234,37 @@ func DefaultAssembler() cognitive.Assembler { return cognitive.DefaultAssembler(
 
 // PermanentDeliveryError marks an event sink error that must not be retried.
 func PermanentDeliveryError(err error) error { return eventsink.Permanent(err) }
+
+// ---- v2 control plane (Works, actions, outcomes, world) ----
+
+type (
+	WorkExtension    = plugin.WorkExtension
+	WorkRunner       = plugin.WorkRunner
+	WorkEnv          = plugin.WorkEnv
+	ActionExecutor   = action.Executor
+	ActionDescriptor = action.Descriptor
+	ActionPlan       = action.Plan
+	ActionPreflight  = action.PreflightResult
+	ActionInspection = action.InspectResult
+	MetricSource     = outcome.MetricSource
+	MetricQuery      = outcome.MetricQuery
+	MetricResult     = outcome.MetricResult
+	MetricSample     = outcome.Sample
+	WorldFact        = world.Fact
+	EventEnvelope    = eventing.Envelope
+)
+
+// WorkExt registers WorkExtension plugins (config: plugins.work_extension).
+var WorkExt = plugin.WorkExt
+
+// Action idempotency modes and errors.
+const (
+	IdempotencyNative           = action.IdemNative
+	IdempotencyQueryBeforeRetry = action.IdemQueryBeforeRetry
+	IdempotencyNone             = action.IdemNone
+)
+
+// ErrActionNotApplied tells the runtime the downstream rejected the call
+// before any effect (safe to mark FAILED); any other error is an unknown
+// effect that is reconciled, never blindly retried.
+var ErrActionNotApplied = action.ErrNotApplied

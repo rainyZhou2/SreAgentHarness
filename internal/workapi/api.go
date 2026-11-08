@@ -1,0 +1,807 @@
+// Package workapi exposes the v2 control plane over HTTP as an api.Server
+// extension:
+//
+//	POST /v1/works                         create a Work (operator; Idempotency-Key)
+//	GET  /v1/works                         list Works (viewer)
+//	GET  /v1/works/{id}                    read a Work (ETag = version)
+//	GET  /v1/works/{id}/events             timeline page (after_seq, limit)
+//	GET  /v1/works/{id}/events/stream      timeline SSE (Last-Event-ID / after_seq)
+//	GET  /v1/works/{id}/runs|evidence|hypotheses|watches|outcomes|actions
+//	POST /v1/works/{id}/commands           pause|resume|cancel|replan|resolve|wake (operator),
+//	                                       confirm|reopen (approver); Idempotency-Key, If-Match
+//	GET  /v1/work-templates                template catalog
+//	POST /v1/events                        ingest an event envelope (operator)
+//	GET  /v1/events/{id}                   inbox record
+//	GET  /v1/world/entities                ?ref= or ?attr=&value=
+//	GET  /v1/world/facts                   ?subject=&predicate=&as_of=&known_at=
+//	POST /v1/world/facts                   assert a fact (operator; untrusted tier unless admin)
+//	POST /v1/world/snapshots/query         bitemporal snapshot (viewer)
+//	GET  /v1/world/snapshots/{id}
+//	GET  /v1/actions/{id}
+//	POST /v1/actions/{id}/approve          approve/reject bound to intent_hash (approver)
+//	POST /v1/actions/{id}/reconcile        read-only reconcile of an unknown effect (operator)
+//	POST /v1/actions/{id}/resolve          human resolution of an unknown effect (approver)
+//
+// Every query is scoped to the authenticated tenant.
+package workapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"go-sre-harness/internal/action"
+	"go-sre-harness/internal/auth"
+	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/evidence"
+	"go-sre-harness/internal/orchestration"
+	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/store/cpsql"
+	"go-sre-harness/internal/work"
+	"go-sre-harness/internal/world"
+)
+
+// MaxBody bounds request bodies.
+const MaxBody = 1 << 20
+
+// API is the HTTP extension.
+type API struct {
+	Store    *cpsql.Store
+	Service  *orchestration.Service
+	Ingestor *orchestration.Ingestor // nil: event ingestion disabled
+	Actions  *action.Runtime         // nil: action routes return 503
+	World    *world.Service
+	Clock    cpkit.Clock
+	Log      *slog.Logger
+	// StreamPoll is the SSE store poll interval (default 1s); StreamMax the
+	// maximum stream duration before the client reconnects (default 30m).
+	StreamPoll time.Duration
+	StreamMax  time.Duration
+}
+
+func (a *API) log() *slog.Logger {
+	if a.Log != nil {
+		return a.Log
+	}
+	return slog.Default()
+}
+
+// RouteRoles declares the minimum role per route.
+func (a *API) RouteRoles() map[string]auth.Role {
+	return map[string]auth.Role{
+		"POST /v1/works":                   auth.Operator,
+		"GET /v1/works":                    auth.Viewer,
+		"GET /v1/works/{id}":               auth.Viewer,
+		"GET /v1/works/{id}/events":        auth.Viewer,
+		"GET /v1/works/{id}/events/stream": auth.Viewer,
+		"GET /v1/works/{id}/runs":          auth.Viewer,
+		"GET /v1/works/{id}/evidence":      auth.Viewer,
+		"GET /v1/works/{id}/hypotheses":    auth.Viewer,
+		"GET /v1/works/{id}/watches":       auth.Viewer,
+		"GET /v1/works/{id}/outcomes":      auth.Viewer,
+		"GET /v1/works/{id}/actions":       auth.Viewer,
+		"POST /v1/works/{id}/commands":     auth.Operator,
+		"GET /v1/work-templates":           auth.Viewer,
+		"POST /v1/events":                  auth.Operator,
+		"GET /v1/events/{id}":              auth.Viewer,
+		"GET /v1/world/entities":           auth.Viewer,
+		"GET /v1/world/facts":              auth.Viewer,
+		"POST /v1/world/facts":             auth.Operator,
+		"POST /v1/world/snapshots/query":   auth.Viewer,
+		"GET /v1/world/snapshots/{id}":     auth.Viewer,
+		"GET /v1/actions/{id}":             auth.Viewer,
+		"POST /v1/actions/{id}/approve":    auth.Approver,
+		"POST /v1/actions/{id}/reconcile":  auth.Operator,
+		"POST /v1/actions/{id}/resolve":    auth.Approver,
+	}
+}
+
+// Register mounts the routes.
+func (a *API) Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/works", a.createWork)
+	mux.HandleFunc("GET /v1/works", a.listWorks)
+	mux.HandleFunc("GET /v1/works/{id}", a.getWork)
+	mux.HandleFunc("GET /v1/works/{id}/events", a.workEvents)
+	mux.HandleFunc("GET /v1/works/{id}/events/stream", a.streamEvents)
+	mux.HandleFunc("GET /v1/works/{id}/runs", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListRunLinks(ctx, t, id)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/evidence", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListEvidence(ctx, t, id, 500)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/hypotheses", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListHypotheses(ctx, t, id)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/watches", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListWatches(ctx, t, id, false)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/outcomes", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListOutcomes(ctx, t, id, 100)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/actions", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListActions(ctx, t, id)
+	}))
+	mux.HandleFunc("POST /v1/works/{id}/commands", a.command)
+	mux.HandleFunc("GET /v1/work-templates", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := principal(w, r); ok {
+			writeJSON(w, http.StatusOK, map[string]any{"templates": a.Service.Catalog.List()})
+		}
+	})
+	mux.HandleFunc("POST /v1/events", a.ingest)
+	mux.HandleFunc("GET /v1/events/{id}", a.getEvent)
+	mux.HandleFunc("GET /v1/world/entities", a.entities)
+	mux.HandleFunc("GET /v1/world/facts", a.facts)
+	mux.HandleFunc("POST /v1/world/facts", a.assertFact)
+	mux.HandleFunc("POST /v1/world/snapshots/query", a.snapshot)
+	mux.HandleFunc("GET /v1/world/snapshots/{id}", a.getSnapshot)
+	mux.HandleFunc("GET /v1/actions/{id}", a.getAction)
+	mux.HandleFunc("POST /v1/actions/{id}/approve", a.approve)
+	mux.HandleFunc("POST /v1/actions/{id}/reconcile", a.reconcile)
+	mux.HandleFunc("POST /v1/actions/{id}/resolve", a.resolve)
+}
+
+// ---- helpers ----
+
+func principal(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
+	p, ok := auth.FromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
+	}
+	return p, ok
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, code int, kind, msg string) {
+	writeJSON(w, code, map[string]string{"error": kind, "message": msg})
+}
+
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBody))
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+		return false
+	}
+	if len(body) == 0 {
+		body = []byte("{}")
+	}
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return false
+	}
+	return true
+}
+
+// fail maps domain errors to HTTP statuses.
+func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
+	var te *work.TransitionError
+	switch {
+	case errors.Is(err, work.ErrNotFound), errors.Is(err, action.ErrNotFound), errors.Is(err, world.ErrNotFound),
+		errors.Is(err, cpsql.ErrEvidenceNotFound):
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
+	case errors.Is(err, work.ErrVersionConflict), errors.Is(err, action.ErrVersionConflict),
+		errors.Is(err, evidence.ErrVersionConflict):
+		if r.Header.Get("If-Match") != "" {
+			writeErr(w, http.StatusPreconditionFailed, "version_mismatch", "the resource changed; reload and retry")
+			return
+		}
+		writeErr(w, http.StatusConflict, "version_conflict", "concurrent update; retry")
+	case errors.Is(err, work.ErrIdempotencyConflict):
+		writeErr(w, http.StatusUnprocessableEntity, "idempotency_conflict", "the idempotency key was used with a different request")
+	case errors.As(err, &te), errors.Is(err, work.ErrInvalidTransition):
+		writeErr(w, http.StatusConflict, "invalid_transition", err.Error())
+	case errors.Is(err, work.ErrOwnerConflict):
+		writeErr(w, http.StatusConflict, "owner_conflict", err.Error())
+	case errors.Is(err, action.ErrInvalidState), errors.Is(err, action.ErrTargetBusy):
+		writeErr(w, http.StatusConflict, "invalid_action_state", err.Error())
+	case errors.Is(err, action.ErrApprovalMismatch):
+		writeErr(w, http.StatusUnprocessableEntity, "approval_mismatch", err.Error())
+	case errors.Is(err, work.ErrInvalid), errors.Is(err, eventing.ErrInvalid), errors.Is(err, world.ErrInvalid),
+		errors.Is(err, outcome.ErrInvalidSpec), errors.Is(err, evidence.ErrInvalid), errors.Is(err, action.ErrNotApplied):
+		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeErr(w, http.StatusServiceUnavailable, "timeout", "request timed out")
+	default:
+		a.log().Error("work api", "method", r.Method, "path", r.URL.Path, "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal", "internal error")
+	}
+}
+
+func idempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	k := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if k == "" || len(k) > 200 {
+		writeErr(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key header (max 200 chars) is required")
+		return "", false
+	}
+	return k, true
+}
+
+// ifMatch parses an If-Match version ("7" or W/"7"); 0 when absent.
+func ifMatch(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	v := strings.TrimSpace(r.Header.Get("If-Match"))
+	if v == "" {
+		return 0, true
+	}
+	v = strings.Trim(strings.TrimPrefix(v, "W/"), `"`)
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_if_match", "If-Match must be a Work version")
+		return 0, false
+	}
+	return n, true
+}
+
+func etag(w http.ResponseWriter, version int64) { w.Header().Set("ETag", fmt.Sprintf(`"%d"`, version)) }
+
+func queryInt(r *http.Request, name string, def, max int) int {
+	n, err := strconv.Atoi(r.URL.Query().Get(name))
+	if err != nil || n <= 0 {
+		return def
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+func queryTime(w http.ResponseWriter, r *http.Request, name string, def time.Time) (time.Time, bool) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def, true
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_time", name+" must be RFC 3339")
+		return t, false
+	}
+	return t.UTC(), true
+}
+
+// sub serves a list below a Work after checking the Work exists in the
+// caller's tenant.
+func (a *API) sub(fn func(ctx context.Context, tenant, workID string) (any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := principal(w, r)
+		if !ok {
+			return
+		}
+		id := r.PathValue("id")
+		if _, err := a.Store.GetWork(r.Context(), p.Tenant, id); err != nil {
+			a.fail(w, r, err)
+			return
+		}
+		items, err := fn(r.Context(), p.Tenant, id)
+		if err != nil {
+			a.fail(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	}
+}
+
+// ---- works ----
+
+func (a *API) createWork(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var req orchestration.CreateRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Template != nil && !p.Has(auth.Admin) {
+		writeErr(w, http.StatusForbidden, "forbidden", "inline templates require the admin role")
+		return
+	}
+	req.TenantID, req.ActorID, req.ActorType, req.IdempotencyKey = p.Tenant, p.Subject, "user", key
+	wk, created, err := a.Service.Create(r.Context(), req)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+		a.log().Info("work created", "tenant", p.Tenant, "work_id", wk.ID, "kind", wk.Kind, "actor", p.Subject)
+	}
+	etag(w, wk.Version)
+	w.Header().Set("Location", "/v1/works/"+wk.ID)
+	writeJSON(w, code, wk)
+}
+
+func (a *API) listWorks(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	f := work.Filter{TenantID: p.Tenant, Kind: work.Kind(q.Get("kind")), Subject: q.Get("subject"),
+		Limit: queryInt(r, "limit", 50, 200), BeforeID: q.Get("before_id")}
+	for _, s := range q["status"] {
+		for _, x := range strings.Split(s, ",") {
+			if x = strings.TrimSpace(strings.ToUpper(x)); x != "" {
+				st := work.Status(x)
+				if !st.Valid() {
+					writeErr(w, http.StatusBadRequest, "invalid_status", "unknown status "+x)
+					return
+				}
+				f.Status = append(f.Status, st)
+			}
+		}
+	}
+	if v := q.Get("before_updated"); v != "" {
+		t, ok := queryTime(w, r, "before_updated", time.Time{})
+		if !ok {
+			return
+		}
+		f.BeforeUpdated = &t
+	}
+	items, err := a.Store.ListWorks(r.Context(), f)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	resp := map[string]any{"items": items}
+	if len(items) == f.Limit && len(items) > 0 {
+		last := items[len(items)-1]
+		resp["next"] = map[string]any{"before_updated": last.UpdatedAt, "before_id": last.ID}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (a *API) getWork(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	wk, err := a.Store.GetWork(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	etag(w, wk.Version)
+	writeJSON(w, http.StatusOK, wk)
+}
+
+func (a *API) workEvents(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := a.Store.GetWork(r.Context(), p.Tenant, id); err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
+	evs, err := a.Store.ListWorkEvents(r.Context(), p.Tenant, id, after, queryInt(r, "limit", 200, 1000))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	next := after
+	if len(evs) > 0 {
+		next = evs[len(evs)-1].Seq
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": evs, "next_after_seq": next})
+}
+
+// streamEvents is an SSE stream of the timeline read from the durable log,
+// resumable with Last-Event-ID (the work_seq of the last event received).
+func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := a.Store.GetWork(r.Context(), p.Tenant, id); err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming_unsupported", "streaming unsupported")
+		return
+	}
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			after = n
+		}
+	}
+	poll, max := a.StreamPoll, a.StreamMax
+	if poll <= 0 {
+		poll = time.Second
+	}
+	if max <= 0 {
+		max = 30 * time.Minute
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "retry: 3000\n\n")
+	flusher.Flush()
+	ctx, cancel := context.WithTimeout(r.Context(), max)
+	defer cancel()
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	lastBeat := time.Now()
+	for {
+		evs, err := a.Store.ListWorkEvents(ctx, p.Tenant, id, after, 200)
+		if err != nil {
+			if ctx.Err() == nil {
+				fmt.Fprintf(w, "event: error\ndata: {\"error\":\"store\"}\n\n")
+				flusher.Flush()
+			}
+			return
+		}
+		for _, e := range evs {
+			b, _ := json.Marshal(e)
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, e.Type, b)
+			after = e.Seq
+		}
+		if len(evs) > 0 {
+			flusher.Flush()
+			lastBeat = time.Now()
+			if len(evs) == 200 {
+				continue
+			}
+		} else if time.Since(lastBeat) > 15*time.Second {
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+			lastBeat = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+func (a *API) command(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	version, ok := ifMatch(w, r)
+	if !ok {
+		return
+	}
+	var req orchestration.CommandRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if (req.Type == work.CmdConfirm || req.Type == work.CmdReopen) && !p.Has(auth.Approver) {
+		writeErr(w, http.StatusForbidden, "forbidden", req.Type+" requires the approver role")
+		return
+	}
+	req.TenantID, req.WorkID, req.ActorID, req.IdempotencyKey, req.ExpectedVersion = p.Tenant, r.PathValue("id"), p.Subject, key, version
+	wk, err := a.Service.Command(r.Context(), req)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	a.log().Info("work command", "tenant", p.Tenant, "work_id", wk.ID, "command", req.Type, "actor", p.Subject)
+	etag(w, wk.Version)
+	writeJSON(w, http.StatusOK, wk)
+}
+
+// ---- events ----
+
+func (a *API) ingest(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if a.Ingestor == nil {
+		writeErr(w, http.StatusServiceUnavailable, "disabled", "event ingestion is disabled")
+		return
+	}
+	var env eventing.Envelope
+	if !decode(w, r, &env) {
+		return
+	}
+	if env.TenantID != "" && env.TenantID != p.Tenant {
+		writeErr(w, http.StatusForbidden, "forbidden", "tenant_id does not match the caller")
+		return
+	}
+	env.TenantID = p.Tenant
+	rec, created, err := a.Ingestor.Ingest(r.Context(), env)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	code := http.StatusAccepted
+	if !created {
+		code = http.StatusOK
+	}
+	writeJSON(w, code, map[string]any{"inbox_id": rec.InboxID, "duplicate": !created, "state": rec.State,
+		"work_id": rec.WorkID, "decision": rec.Decision})
+}
+
+func (a *API) getEvent(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	rec, err := a.Store.GetEvent(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+// ---- world ----
+
+func (a *API) entities(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	if ref := q.Get("ref"); ref != "" {
+		e, err := a.Store.GetEntity(r.Context(), p.Tenant, ref)
+		if err != nil {
+			a.fail(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, e)
+		return
+	}
+	if q.Get("attr") == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "ref or attr/value is required")
+		return
+	}
+	items, err := a.Store.FindEntities(r.Context(), p.Tenant, q.Get("attr"), q.Get("value"), queryInt(r, "limit", 20, 100))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (a *API) facts(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	subjects := q["subject"]
+	if len(subjects) == 0 || len(subjects) > 50 {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "1–50 subject parameters are required")
+		return
+	}
+	now := a.Clock.Now()
+	asOf, ok := queryTime(w, r, "as_of", now)
+	if !ok {
+		return
+	}
+	knownAt, ok := queryTime(w, r, "known_at", now)
+	if !ok {
+		return
+	}
+	items, err := a.Store.FactsAt(r.Context(), p.Tenant, subjects, q["predicate"], asOf, knownAt)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "as_of": asOf, "known_at": knownAt})
+}
+
+func (a *API) assertFact(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	var f world.Fact
+	if !decode(w, r, &f) {
+		return
+	}
+	f.ID, f.TenantID = "", p.Tenant
+	// API writers are untrusted unless admin: a model or script posting
+	// facts must not outrank first-party sources.
+	if !p.Has(auth.Admin) || f.TrustTier == "" {
+		f.TrustTier = world.TrustUntrusted
+	}
+	if f.Source == "" {
+		f.Source = "api:" + p.Subject
+	}
+	out, created, err := a.Store.AssertFact(r.Context(), f)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+	}
+	writeJSON(w, code, out)
+}
+
+type snapshotQuery struct {
+	Subjects []string       `json:"subjects"`
+	AsOf     *time.Time     `json:"as_of,omitempty"`
+	KnownAt  *time.Time     `json:"known_at,omitempty"`
+	MaxAge   cpkit.Duration `json:"max_age,omitempty"`
+	Required []string       `json:"required,omitempty"`
+	Depth    int            `json:"depth,omitempty"`
+	MaxNodes int            `json:"max_nodes,omitempty"`
+	Persist  bool           `json:"persist,omitempty"`
+}
+
+func (a *API) snapshot(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if a.World == nil {
+		writeErr(w, http.StatusServiceUnavailable, "disabled", "world state is not configured")
+		return
+	}
+	var q snapshotQuery
+	if !decode(w, r, &q) {
+		return
+	}
+	req := world.SnapshotRequest{TenantID: p.Tenant, Subjects: q.Subjects, MaxAge: q.MaxAge.D(), Required: q.Required,
+		Depth: q.Depth, MaxNodes: q.MaxNodes, Persist: q.Persist}
+	if q.AsOf != nil {
+		req.AsOf = *q.AsOf
+	}
+	if q.KnownAt != nil {
+		req.KnownAt = *q.KnownAt
+	}
+	snap, err := a.World.Snapshot(r.Context(), req)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+func (a *API) getSnapshot(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	snap, err := a.Store.GetSnapshot(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// ---- actions ----
+
+func (a *API) getAction(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	rec, err := a.Store.GetAction(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (a *API) actionsEnabled(w http.ResponseWriter) bool {
+	if a.Actions == nil {
+		writeErr(w, http.StatusServiceUnavailable, "disabled", "the action runtime is disabled (HARNESS_ACTION_V2_ENABLED)")
+		return false
+	}
+	return true
+}
+
+// wake asks the orchestrator to look at the action's Work now.
+func (a *API) wake(ctx context.Context, rec action.Record, reason, actor string) {
+	if err := a.Store.WakeWork(ctx, rec.TenantID, rec.WorkID, reason, "user", actor,
+		map[string]any{"action_id": rec.ID, "state": rec.State}); err != nil && !errors.Is(err, work.ErrNotFound) {
+		a.log().Warn("wake work after action decision failed", "work_id", rec.WorkID, "err", err)
+	}
+}
+
+func (a *API) approve(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok || !a.actionsEnabled(w) {
+		return
+	}
+	var req struct {
+		Decision   string `json:"decision"`
+		IntentHash string `json:"intent_hash"`
+		Comment    string `json:"comment,omitempty"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Decision == "" {
+		req.Decision = "approve"
+	}
+	cur, err := a.Store.GetAction(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	owner := ""
+	if wk, err := a.Store.GetWork(r.Context(), p.Tenant, cur.WorkID); err == nil {
+		owner = wk.OwnerActor
+	}
+	rec, err := a.Actions.Decide(r.Context(), p.Tenant, cur.ID, p.Subject, req.Decision, req.IntentHash,
+		cpkit.Truncate(req.Comment, 500), owner)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	a.log().Info("action decision", "tenant", p.Tenant, "action_id", rec.ID, "decision", req.Decision, "actor", p.Subject,
+		"state", rec.State)
+	a.wake(r.Context(), rec, "action_"+req.Decision, p.Subject)
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (a *API) reconcile(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok || !a.actionsEnabled(w) {
+		return
+	}
+	rec, err := a.Actions.Reconcile(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	a.wake(r.Context(), rec, "action_reconciled", p.Subject)
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (a *API) resolve(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok || !a.actionsEnabled(w) {
+		return
+	}
+	var req struct {
+		Applied *bool  `json:"applied"`
+		Comment string `json:"comment"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Applied == nil || strings.TrimSpace(req.Comment) == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "applied and comment are required")
+		return
+	}
+	rec, err := a.Actions.Resolve(r.Context(), p.Tenant, r.PathValue("id"), p.Subject, *req.Applied, cpkit.Truncate(req.Comment, 1000))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	a.log().Info("action resolved by human", "tenant", p.Tenant, "action_id", rec.ID, "applied", *req.Applied, "actor", p.Subject)
+	a.wake(r.Context(), rec, "action_resolved", p.Subject)
+	writeJSON(w, http.StatusOK, rec)
+}
