@@ -59,7 +59,15 @@ func (w *Worker) latestFlowPlan(ctx context.Context, lease domain.Lease) (*planA
 func (w *Worker) replanAfterFailure(ctx context.Context, lease domain.Lease, spec *flow.Spec, st *flow.State,
 	snap domain.FlowSnapshot, results map[string]flow.NodeResult, failure string, commit *domain.FlowCommit,
 	events []domain.EmittedEvent) (domain.StepSuccess, bool, error) {
-	if w.cfg.Planner == nil || w.cfg.PlanMaxReplans <= 0 || lease.FlowDepth > 0 {
+	if w.cfg.Planner == nil || lease.FlowDepth > 0 {
+		return domain.StepSuccess{}, false, nil
+	}
+	rules, err := w.rules(ctx, lease)
+	if err != nil {
+		return domain.StepSuccess{}, false, err
+	}
+	limit := w.maxReplans(rules)
+	if limit <= 0 {
 		return domain.StepSuccess{}, false, nil
 	}
 	for _, n := range snap.Nodes {
@@ -71,7 +79,7 @@ func (w *Worker) replanAfterFailure(ctx context.Context, lease domain.Lease, spe
 	if err != nil || plan == nil {
 		return domain.StepSuccess{}, false, err
 	}
-	if plan.Generation != snap.Generation || plan.Generation >= w.cfg.PlanMaxReplans {
+	if plan.Generation != snap.Generation || plan.Generation >= limit {
 		return domain.StepSuccess{}, false, nil
 	}
 	planHash := plan.PlanHash
@@ -81,7 +89,7 @@ func (w *Worker) replanAfterFailure(ctx context.Context, lease domain.Lease, spe
 	rp := planner.Replan{
 		Generation: plan.Generation + 1, PreviousPlanHash: planHash, PreviousFlowHash: plan.FlowHash,
 		PreviousRationale: plan.Rationale, PreviousFallback: plan.Fallback, Failure: failure,
-		Nodes: w.replanNodes(lease.TenantID, spec, st, results),
+		Nodes: w.replanNodes(lease.TenantID, spec, st, results), PreviousFlow: plan.Flow,
 	}
 	ref, hash, err := w.put(ctx, lease.TenantID, "replan", replanDoc{Kind: replanKind, Replan: rp})
 	if err != nil {

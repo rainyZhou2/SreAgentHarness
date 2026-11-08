@@ -27,6 +27,11 @@ type Budget struct {
 	MaxModelCalls      int
 	MaxOutputTokens    int64
 	MaxEstimatedTokens int64
+	// TypicalOutputTokens is the expected output of one model call (for
+	// example the observed p50 of the planner's model); the token budget is
+	// checked against calls × typical, and calls × MaxOutputTokens is
+	// reported as the worst case. 0 checks the worst case.
+	TypicalOutputTokens int64
 }
 
 func (b Budget) withDefaults() Budget {
@@ -80,12 +85,15 @@ type Analysis struct {
 	EstimatedSteps        int              `json:"estimated_steps"`
 	EstimatedModelCalls   int              `json:"estimated_model_calls"`
 	EstimatedOutputTokens int64            `json:"estimated_output_tokens,omitempty"`
+	WorstCaseOutputTokens int64            `json:"worst_case_output_tokens,omitempty"`
 	HighestRisk           domain.RiskClass `json:"highest_risk"`
 	SideEffects           int              `json:"side_effects"`
 	ApprovalNodes         int              `json:"approval_nodes"`
 	Tools                 []ToolUse        `json:"tools,omitempty"`
 	Findings              []Finding        `json:"findings,omitempty"`
 	RequiresReview        bool             `json:"requires_review"`
+	// Simulation is the dry run of the default path (nil when not run).
+	Simulation *Simulation `json:"simulation,omitempty"`
 }
 
 // Errors returns the findings that must make plan validation fail.
@@ -135,6 +143,9 @@ type AnalysisOptions struct {
 	Tools    []tools.Descriptor
 	Budget   Budget
 	MaxSteps int
+	// Simulate dry-runs the default path with mock results (see Simulate).
+	Simulate bool
+	Inputs   map[string]any
 }
 
 type analyzer struct {
@@ -201,7 +212,16 @@ func Analyze(spec flow.Spec, opts AnalysisOptions) Analysis {
 		out.HighestRisk = domain.RiskR0
 	}
 	if opts.Budget.MaxOutputTokens > 0 && est.modelCalls > 0 {
-		out.EstimatedOutputTokens = int64(est.modelCalls) * opts.Budget.MaxOutputTokens
+		out.WorstCaseOutputTokens = int64(est.modelCalls) * opts.Budget.MaxOutputTokens
+		out.EstimatedOutputTokens = out.WorstCaseOutputTokens
+		if t := opts.Budget.TypicalOutputTokens; t > 0 && t < opts.Budget.MaxOutputTokens {
+			out.EstimatedOutputTokens = int64(est.modelCalls) * t
+		}
+	}
+	if opts.Simulate {
+		sim := Simulate(spec, opts.Inputs, opts.Tools)
+		out.Simulation = &sim
+		out.Findings = append(out.Findings, simulationFindings(spec, sim)...)
 	}
 	out.RequiresReview = requiresReview(out)
 	return out
@@ -325,10 +345,14 @@ func (a *analyzer) checkBudget(spec flow.Spec, est estimate, budget Budget) {
 				est.modelCalls, budget.MaxModelCalls))
 	}
 	if budget.MaxOutputTokens > 0 {
-		tokens := int64(est.modelCalls) * budget.MaxOutputTokens
+		per, what := budget.MaxOutputTokens, "can emit"
+		if budget.TypicalOutputTokens > 0 && budget.TypicalOutputTokens < per {
+			per, what = budget.TypicalOutputTokens, "is expected to emit"
+		}
+		tokens := int64(est.modelCalls) * per
 		if budget.MaxEstimatedTokens > 0 && tokens > budget.MaxEstimatedTokens {
 			a.addFinding("token_budget", "error", "",
-				fmt.Sprintf("plan can emit %d tokens, limit is %d", tokens, budget.MaxEstimatedTokens))
+				fmt.Sprintf("plan %s %d tokens, limit is %d", what, tokens, budget.MaxEstimatedTokens))
 		}
 	}
 	if a.maxDepth > budget.MaxDepth {

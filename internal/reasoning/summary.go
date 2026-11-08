@@ -29,6 +29,8 @@ type Summary struct {
 	// the share of them that carried a confidence (pooled).
 	Settled             int     `json:"settled_hypotheses"`
 	CalibrationCoverage float64 `json:"calibration_coverage"`
+	// Plan aggregates the planned runs (nil: none was planned).
+	Plan *PlanSummary `json:"plan,omitempty"`
 }
 
 // Summarize aggregates metrics. Grounding and redundancy are pooled over
@@ -103,6 +105,7 @@ func Summarize(ms []Metrics) Summary {
 	if s.Settled > 0 {
 		s.CalibrationCoverage = round(float64(calibrated) / float64(s.Settled))
 	}
+	s.Plan = SummarizePlans(ms)
 	return s
 }
 
@@ -133,6 +136,8 @@ type GateConfig struct {
 	// other checks depend on (0 = default 0.10).
 	MaxStructuredDrop float64 `json:"max_structured_drop,omitempty"`
 	MaxCoverageDrop   float64 `json:"max_coverage_drop,omitempty"`
+	// Plan bounds planning regressions (zero values: DefaultPlanGate).
+	Plan PlanGateConfig `json:"plan,omitempty"`
 }
 
 // DefaultGate returns the default margins.
@@ -173,7 +178,7 @@ func Gate(base, cand Summary, cfg GateConfig) []string {
 	if base.Settled > 0 && cand.Settled > 0 && base.CalibrationCoverage-cand.CalibrationCoverage > cd {
 		f = append(f, fmt.Sprintf("confidence coverage dropped: %.3f → %.3f", base.CalibrationCoverage, cand.CalibrationCoverage))
 	}
-	return f
+	return append(f, PlanGate(base.Plan, cand.Plan, cfg.Plan)...)
 }
 
 // ---------- stored scores and pattern statistics ----------

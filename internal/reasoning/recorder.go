@@ -82,6 +82,8 @@ func (r *Recorder) AfterRun(ctx context.Context, rec memory.RunRecord, quality s
 		}
 	}
 	m := Score(trace)
+	pm, plan := PlanMetricsOf(ctx, r.Artifacts, run, rec.Steps)
+	m.Plan = pm
 	ids, err := r.Store.RunMemoryIDs(ctx, run.TenantID, run.ID)
 	if err != nil {
 		return fmt.Errorf("run memories: %w", err)
@@ -95,15 +97,25 @@ func (r *Recorder) AfterRun(ctx context.Context, rec memory.RunRecord, quality s
 	if !r.Distill {
 		return nil
 	}
-	nm, ok := DistillPattern(run, g.Goal, service, trace, m, quality)
-	if !ok {
-		return nil
+	if nm, ok := DistillPattern(run, g.Goal, service, trace, m, quality); ok {
+		if err := r.store(ctx, run.ID, "reasoning pattern", nm); err != nil {
+			return err
+		}
 	}
+	if nm, ok := DistillPlanExemplar(run, g.Goal, service, plan, pm, quality, trace.Correct); ok {
+		if err := r.store(ctx, run.ID, "plan exemplar", nm); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Recorder) store(ctx context.Context, runID, what string, nm memory.NewMemory) error {
 	prepared, err := r.Writer.Prepare(ctx, nm)
 	if err != nil {
-		// Poisoned or otherwise unfit content is not stored as a pattern.
+		// Poisoned or otherwise unfit content is not stored.
 		if r.Log != nil {
-			r.Log.Info("reasoning pattern not stored", "run_id", run.ID, "err", err)
+			r.Log.Info(what+" not stored", "run_id", runID, "err", err)
 		}
 		return nil
 	}
@@ -232,8 +244,15 @@ func DistillPattern(run domain.Run, goal, service string, t Trace, m Metrics, qu
 		Shards: shards}, true
 }
 
-// IsPattern reports whether a memory is a reasoning pattern.
+// IsPattern reports whether a memory is a learned procedure whose
+// effectiveness is measured and can be retired: a reasoning pattern or a
+// plan exemplar.
 func IsPattern(m memory.Memory) bool {
+	return m.Type == "procedural" && (strings.HasSuffix(m.Subject, ":"+PatternSubject) || IsPlanExemplar(m))
+}
+
+// IsReasoningPattern reports whether a memory is a reasoning pattern only.
+func IsReasoningPattern(m memory.Memory) bool {
 	return m.Type == "procedural" && strings.HasSuffix(m.Subject, ":"+PatternSubject)
 }
 

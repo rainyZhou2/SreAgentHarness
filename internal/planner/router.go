@@ -12,14 +12,27 @@ import (
 //
 //  1. the goal context hint (set by a trigger or the API caller);
 //  2. the mode the model asked for in its last invalid plan;
-//  3. the configured ReAct patterns (questions stay conversational);
-//  4. a side-effecting tool the goal names (registry metadata);
+//  3. a side-effecting tool the goal names (registry metadata);
+//  4. the configured ReAct patterns (questions stay conversational);
 //  5. the configured flow patterns;
-//  6. ReAct.
+//  6. the classifier, when it is confident: it catches paraphrases and
+//     languages the patterns miss (with ClassifierFirst, e.g. for a
+//     model-backed embedding, it is consulted before the patterns);
+//  7. ReAct.
 type Router struct {
 	React []*regexp.Regexp
 	Flow  []*regexp.Regexp
+	// Classifier is consulted before the patterns; nil disables it.
+	Classifier Classifier
+	// MinConfidence is the classifier margin required to decide
+	// (default DefaultMinConfidence).
+	MinConfidence float64
+	// ClassifierFirst consults the classifier before the patterns.
+	ClassifierFirst bool
 }
+
+// DefaultMinConfidence is the classifier margin the router trusts.
+const DefaultMinConfidence = 0.06
 
 // DefaultReactPatterns and DefaultFlowPatterns are the default values of
 // the router configuration (HARNESS_PLANNER_REACT_PATTERNS and
@@ -51,12 +64,14 @@ func NewRouter(react, flow []string) (*Router, error) {
 	return r, nil
 }
 
-// DefaultRouter uses the default pattern lists.
+// DefaultRouter uses the default pattern lists and the n-gram classifier
+// over DefaultExamples.
 func DefaultRouter() *Router {
 	r, err := NewRouter(DefaultReactPatterns, DefaultFlowPatterns)
 	if err != nil {
 		panic(err)
 	}
+	r.Classifier = NewNgramClassifier(DefaultExamples)
 	return r
 }
 
@@ -104,20 +119,44 @@ func (r *Router) Route(in Input, requested string) (string, string) {
 		return requested, "model requested " + requested
 	}
 	goal := strings.ToLower(strings.TrimSpace(in.Goal))
+	if name := mentionedAction(goal, in); name != "" {
+		return "flow", "goal names side-effecting tool " + name
+	}
+	if r.ClassifierFirst {
+		if mode, why := r.classify(goal); mode != "" {
+			return mode, why
+		}
+	}
 	for _, re := range r.React {
 		if re.MatchString(goal) {
 			return "react", "react pattern " + re.String()
 		}
-	}
-	if name := mentionedAction(goal, in); name != "" {
-		return "flow", "goal names side-effecting tool " + name
 	}
 	for _, re := range r.Flow {
 		if re.MatchString(goal) {
 			return "flow", "flow pattern " + re.String()
 		}
 	}
+	if !r.ClassifierFirst {
+		if mode, why := r.classify(goal); mode != "" {
+			return mode, why
+		}
+	}
 	return "react", "no signal"
+}
+
+func (r *Router) classify(goal string) (string, string) {
+	if r.Classifier == nil {
+		return "", ""
+	}
+	min := r.MinConfidence
+	if min <= 0 {
+		min = DefaultMinConfidence
+	}
+	if mode, conf := r.Classifier.Classify(goal); (mode == "flow" || mode == "react") && conf >= min {
+		return mode, fmt.Sprintf("classifier %s (margin %.2f)", mode, conf)
+	}
+	return "", ""
 }
 
 // mentionedAction returns a visible side-effecting tool whose name (or its

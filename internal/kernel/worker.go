@@ -101,6 +101,9 @@ type Config struct {
 	CapabilityMap CapabilityMapSource
 	// Planner generates the orchestration plan for an auto run (optional).
 	Planner Planner
+	// PlanMemory supplies plan exemplars and reasoning patterns to the
+	// planner (optional).
+	PlanMemory PlanMemorySource
 	// PlanApprovers is the default number of approvals for a generated plan;
 	// R3 plans always require at least two.
 	PlanApprovers int

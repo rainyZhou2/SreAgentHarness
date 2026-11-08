@@ -1,7 +1,9 @@
 package planner
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"go-sre-harness/internal/tools"
@@ -26,6 +28,17 @@ type Replan struct {
 	PreviousFallback  bool         `json:"previous_fallback,omitempty"`
 	Failure           string       `json:"failure"`
 	Nodes             []ReplanNode `json:"nodes,omitempty"`
+	// PreviousFlow is the failed graph, for the reviewer's diff.
+	PreviousFlow json.RawMessage `json:"previous_flow,omitempty"`
+}
+
+// Exemplar is a memory shown to the planner: a plan that worked for a
+// similar goal ("plan") or a distilled reasoning pattern ("pattern").
+type Exemplar struct {
+	MemoryID string `json:"memory_id"`
+	Kind     string `json:"kind"`
+	Title    string `json:"title"`
+	Content  string `json:"content"`
 }
 
 // ReplanNode is one node of the failed flow and what it produced.
@@ -41,9 +54,17 @@ type ReplanNode struct {
 
 const (
 	maxToolDescription = 240
-	maxHistoryMessage  = 600
+	maxHistoryMessage  = 1200
 	maxReplanDetail    = 400
 	maxReplanNodes     = 24
+	// History selection: the most recent messages are always shown, older
+	// ones only when they are relevant to the goal, within a total budget.
+	historyRecent    = 4
+	historyRelevant  = 4
+	historyBudget    = 6000
+	historyMinSim    = 0.08
+	maxExemplars     = 4
+	maxExemplarRunes = 1800
 )
 
 // sanitizeTools neutralizes tool descriptions and withholds those that look
@@ -68,8 +89,9 @@ func sanitizeTools(ds []tools.Descriptor) ([]tools.Descriptor, []InjectionFlag) 
 // section that carries text written by someone other than the operator of
 // this deployment is enclosed in an untrusted boundary.
 type promptInputs struct {
-	goal, session, capabilities, previous string
-	flags                                 []InjectionFlag
+	goal, session, capabilities, previous, exemplars string
+	flags                                            []InjectionFlag
+	exemplarIDs                                      []string
 }
 
 func renderInputs(in Input) promptInputs {
@@ -84,10 +106,34 @@ func renderInputs(in Input) promptInputs {
 	p.goal = wrap("goal", "source=goal role=task", strings.TrimSpace(in.Goal))
 	if len(in.History) > 0 {
 		var b strings.Builder
-		for _, m := range in.History {
+		picked, omitted := selectHistory(in.History, in.Goal)
+		if omitted > 0 {
+			fmt.Fprintf(&b, "(%d earlier messages omitted as unrelated to the goal)\n", omitted)
+		}
+		for _, m := range picked {
 			fmt.Fprintf(&b, "%s: %s\n", roleLabel(m.Role), truncate(m.Text, maxHistoryMessage))
 		}
 		p.session = wrap("session", "source=session", b.String())
+	}
+	if len(in.Exemplars) > 0 {
+		var b strings.Builder
+		for i, e := range in.Exemplars {
+			if i >= maxExemplars {
+				break
+			}
+			kind := "plan"
+			if e.Kind == "pattern" {
+				kind = "pattern"
+			}
+			// Structural fields come from the server; the body is memory
+			// written from earlier runs and stays inside a boundary.
+			fmt.Fprintf(&b, "- memory=%s kind=%s\n", e.MemoryID, kind)
+			b.WriteString(wrap("exemplar:"+e.MemoryID, "source=memory kind="+kind,
+				truncate(e.Title, 200)+"\n"+clipRunes(e.Content, maxExemplarRunes)))
+			b.WriteString("\n")
+			p.exemplarIDs = append(p.exemplarIDs, e.MemoryID)
+		}
+		p.exemplars = b.String()
 	}
 	if len(in.Capabilities) > 0 {
 		p.capabilities = wrap("capabilities", "source=capability_map", "- "+strings.Join(in.Capabilities, "\n- "))
@@ -132,4 +178,57 @@ func roleLabel(r string) string {
 		return strings.ToLower(r)
 	}
 	return "message"
+}
+
+// selectHistory keeps the most recent messages and the older ones most
+// similar to the goal, in their original order, within historyBudget
+// characters. It returns the kept messages and how many were dropped.
+func selectHistory(h []Message, goal string) ([]Message, int) {
+	if len(h) <= historyRecent {
+		return h, 0
+	}
+	keep := map[int]bool{}
+	for i := len(h) - historyRecent; i < len(h); i++ {
+		keep[i] = true
+	}
+	q := ngramRaw(goal)
+	normalize(q)
+	type cand struct {
+		i   int
+		sim float64
+	}
+	var cs []cand
+	for i := 0; i < len(h)-historyRecent; i++ {
+		v := ngramRaw(h[i].Text)
+		normalize(v)
+		if sim := dot(q, v); sim >= historyMinSim {
+			cs = append(cs, cand{i, sim})
+		}
+	}
+	sort.SliceStable(cs, func(a, b int) bool { return cs[a].sim > cs[b].sim })
+	for i, c := range cs {
+		if i >= historyRelevant {
+			break
+		}
+		keep[c.i] = true
+	}
+	// Enforce the budget, dropping the oldest relevant messages first and
+	// never the most recent ones.
+	size := func() int {
+		n := 0
+		for i := range keep {
+			n += len([]rune(truncate(h[i].Text, maxHistoryMessage)))
+		}
+		return n
+	}
+	for i := 0; i < len(h)-historyRecent && size() > historyBudget; i++ {
+		delete(keep, i)
+	}
+	var out []Message
+	for i, m := range h {
+		if keep[i] {
+			out = append(out, m)
+		}
+	}
+	return out, len(h) - len(out)
 }

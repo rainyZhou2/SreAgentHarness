@@ -67,6 +67,8 @@ type Metrics struct {
 	// CitedMemories are memories the model cited as evidence or support
 	// (not merely retrieved), without version.
 	CitedMemories []string `json:"cited_memories,omitempty"`
+	// Plan describes how the run was planned (nil: not planned).
+	Plan *PlanMetrics `json:"plan,omitempty"`
 }
 
 // HypothesisIDAttr is the thought attribute carrying the model's stable
