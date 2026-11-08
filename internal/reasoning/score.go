@@ -10,6 +10,7 @@ package reasoning
 import (
 	"encoding/json"
 	"math"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -45,10 +46,13 @@ type Metrics struct {
 	Unverified     int      `json:"unverified"`
 	Brier          *float64 `json:"brier,omitempty"`
 	CalibrationN   int      `json:"calibration_n"`
-	Grounded       int      `json:"grounded"`
-	Claims         int      `json:"claims"`
-	Grounding      float64  `json:"grounding"`
-	Redundancy     float64  `json:"redundancy"`
+	// CalibrationCoverage is the share of settled (VERIFIED/REFUTED)
+	// hypotheses that carried a confidence.
+	CalibrationCoverage float64 `json:"calibration_coverage"`
+	Grounded            int     `json:"grounded"`
+	Claims              int     `json:"claims"`
+	Grounding           float64 `json:"grounding"`
+	Redundancy          float64 `json:"redundancy"`
 	// StepsToVerdict counts reasoning steps until the first hypothesis was
 	// verified or refuted (0: never).
 	StepsToVerdict int `json:"steps_to_verdict"`
@@ -60,6 +64,39 @@ type Metrics struct {
 	Quality    float64 `json:"quality"`
 	// Structured is the share of thoughts that came from structured output.
 	Structured float64 `json:"structured"`
+	// CitedMemories are memories the model cited as evidence or support
+	// (not merely retrieved), without version.
+	CitedMemories []string `json:"cited_memories,omitempty"`
+}
+
+// HypothesisIDAttr is the thought attribute carrying the model's stable
+// hypothesis id.
+const HypothesisIDAttr = "hypothesis_id"
+
+// hypKey identifies a hypothesis across steps: the model's id when given,
+// otherwise the normalized statement.
+func hypKey(th domain.Thought) string {
+	if id, _ := th.Attrs[HypothesisIDAttr].(string); strings.TrimSpace(id) != "" {
+		return "id:" + strings.ToLower(strings.TrimSpace(id))
+	}
+	if k := normalize(th.Summary); k != "" {
+		return "s:" + k
+	}
+	return ""
+}
+
+// citedMemory returns the memory id of a citation ref ("memory:<id>@<v>").
+// Automatic "based_on" links from the plan to every retrieved memory are not
+// citations.
+func citedMemory(r domain.ThoughtRef) string {
+	if r.Relation == "based_on" || !strings.HasPrefix(r.Ref, "memory:") {
+		return ""
+	}
+	id := strings.TrimPrefix(r.Ref, "memory:")
+	if i := strings.LastIndexByte(id, '@'); i > 0 {
+		id = id[:i]
+	}
+	return id
 }
 
 // Composite weights (documented in the design; Quality is a convenience
@@ -83,6 +120,7 @@ func Score(t Trace) Metrics {
 	var order []string
 	seenCalls := map[string]bool{}
 	thoughts, structured := 0, 0
+	cited := map[string]bool{}
 	for _, s := range t.Steps {
 		if s.Tool != "" {
 			m.ToolCalls++
@@ -103,13 +141,19 @@ func Score(t Trace) Metrics {
 			if th.Structured {
 				structured++
 			}
+			for _, r := range th.Refs {
+				if id := citedMemory(r); id != "" && !cited[id] {
+					cited[id] = true
+					m.CitedMemories = append(m.CitedMemories, id)
+				}
+			}
 			switch th.Kind {
 			case domain.ThoughtHypothesis:
 				m.Claims++
 				if len(th.Refs) > 0 {
 					m.Grounded++
 				}
-				k := normalize(th.Summary)
+				k := hypKey(th)
 				if k == "" {
 					continue
 				}
@@ -144,7 +188,8 @@ func Score(t Trace) Metrics {
 			}
 		}
 	}
-	var sq float64
+	var sq, imputed float64
+	settled := 0
 	for _, k := range order {
 		h := hyps[k]
 		m.Hypotheses++
@@ -159,14 +204,28 @@ func Score(t Trace) Metrics {
 			m.Unverified++
 			continue
 		}
+		settled++
 		if h.confidence > 0 && h.confidence <= 1 {
-			sq += (h.confidence - y) * (h.confidence - y)
+			e := (h.confidence - y) * (h.confidence - y)
+			sq += e
+			imputed += e
 			m.CalibrationN++
+		} else {
+			// A settled hypothesis without a confidence is scored as the
+			// no-skill forecast 0.5 (Brier 0.25): below any useful forecast.
+			// Missing confidence is tracked by CalibrationCoverage.
+			imputed += 0.25
 		}
 	}
 	if m.CalibrationN > 0 {
 		b := round(sq / float64(m.CalibrationN))
 		m.Brier = &b
+	}
+	sort.Strings(m.CitedMemories)
+	calibration := 0.5 // nothing settled: no calibration evidence
+	if settled > 0 {
+		m.CalibrationCoverage = round(float64(m.CalibrationN) / float64(settled))
+		calibration = 1 - imputed/float64(settled)
 	}
 	if m.Claims > 0 {
 		m.Grounding = round(float64(m.Grounded) / float64(m.Claims))
@@ -177,15 +236,11 @@ func Score(t Trace) Metrics {
 	if thoughts > 0 {
 		m.Structured = round(float64(structured) / float64(thoughts))
 	}
-	m.Quality = quality(m)
+	m.Quality = quality(m, calibration)
 	return m
 }
 
-func quality(m Metrics) float64 {
-	calibration := 0.5 // no data: neutral
-	if m.Brier != nil {
-		calibration = 1 - *m.Brier
-	}
+func quality(m Metrics, calibration float64) float64 {
 	conclusion := 0.0
 	switch {
 	case m.Correct != nil && *m.Correct:
@@ -252,7 +307,11 @@ func DecisionThoughts(d domain.Decision) []domain.Thought {
 		for _, r := range h.Refutes {
 			refs = append(refs, domain.ThoughtRef{Ref: r, Relation: "refutes"})
 		}
+		n := len(out)
 		add(domain.ThoughtHypothesis, h.Statement, status, h.ConfidenceEstimate, refs)
+		if id := strings.TrimSpace(h.ID); id != "" && len(out) > n {
+			out[n].Attrs = map[string]any{HypothesisIDAttr: id}
+		}
 	}
 	if d.Kind == domain.DecisionFinal {
 		if d.Thought != nil && d.Thought.Verification != nil {

@@ -23,6 +23,12 @@ type Summary struct {
 	SuccessRate      float64  `json:"success_rate"`
 	CorrectN         int      `json:"feedback_n"`
 	CorrectRate      float64  `json:"feedback_correct_rate"`
+	// Structured is the mean share of structured thoughts per run.
+	Structured float64 `json:"structured"`
+	// Settled counts VERIFIED/REFUTED hypotheses; CalibrationCoverage is
+	// the share of them that carried a confidence (pooled).
+	Settled             int     `json:"settled_hypotheses"`
+	CalibrationCoverage float64 `json:"calibration_coverage"`
 }
 
 // Summarize aggregates metrics. Grounding and redundancy are pooled over
@@ -32,10 +38,14 @@ func Summarize(ms []Metrics) Summary {
 	if s.N == 0 {
 		return s
 	}
-	var quality, brier, stepsV float64
+	var quality, brier, stepsV, structured float64
 	var claims, grounded, calls, redundant, verified, unverified, verdictRuns, noVerdict, success, correct int
+	var calibrated int
 	for _, m := range ms {
 		quality += m.Quality
+		structured += m.Structured
+		s.Settled += m.Verified + m.Refuted
+		calibrated += m.CalibrationN
 		if m.Brier != nil {
 			brier += *m.Brier
 			s.CalibratedRuns++
@@ -89,6 +99,10 @@ func Summarize(ms []Metrics) Summary {
 	if s.CorrectN > 0 {
 		s.CorrectRate = round(float64(correct) / float64(s.CorrectN))
 	}
+	s.Structured = round(structured / n)
+	if s.Settled > 0 {
+		s.CalibrationCoverage = round(float64(calibrated) / float64(s.Settled))
+	}
 	return s
 }
 
@@ -115,11 +129,16 @@ type GateConfig struct {
 	MaxGroundingDrop      float64 `json:"max_grounding_drop"`
 	MaxRedundancyIncrease float64 `json:"max_redundancy_increase"`
 	MaxQualityDrop        float64 `json:"max_quality_drop"`
+	// MaxStructuredDrop and MaxCoverageDrop guard the structured trace the
+	// other checks depend on (0 = default 0.10).
+	MaxStructuredDrop float64 `json:"max_structured_drop,omitempty"`
+	MaxCoverageDrop   float64 `json:"max_coverage_drop,omitempty"`
 }
 
 // DefaultGate returns the default margins.
 func DefaultGate() GateConfig {
-	return GateConfig{MaxBrierIncrease: 0.05, MaxGroundingDrop: 0.10, MaxRedundancyIncrease: 0.10, MaxQualityDrop: 0.05}
+	return GateConfig{MaxBrierIncrease: 0.05, MaxGroundingDrop: 0.10, MaxRedundancyIncrease: 0.10, MaxQualityDrop: 0.05,
+		MaxStructuredDrop: 0.10, MaxCoverageDrop: 0.10}
 }
 
 // Gate returns the reasoning regressions of cand relative to base.
@@ -139,6 +158,20 @@ func Gate(base, cand Summary, cfg GateConfig) []string {
 	}
 	if base.MeanQuality-cand.MeanQuality > cfg.MaxQualityDrop {
 		f = append(f, fmt.Sprintf("reasoning quality dropped: %.3f → %.3f", base.MeanQuality, cand.MeanQuality))
+	}
+	sd, cd := cfg.MaxStructuredDrop, cfg.MaxCoverageDrop
+	if sd <= 0 {
+		sd = 0.10
+	}
+	if cd <= 0 {
+		cd = 0.10
+	}
+	if base.Structured-cand.Structured > sd {
+		f = append(f, fmt.Sprintf("structured trace share dropped: %.3f → %.3f", base.Structured, cand.Structured))
+	}
+	// Coverage is only comparable when both sides settled hypotheses.
+	if base.Settled > 0 && cand.Settled > 0 && base.CalibrationCoverage-cand.CalibrationCoverage > cd {
+		f = append(f, fmt.Sprintf("confidence coverage dropped: %.3f → %.3f", base.CalibrationCoverage, cand.CalibrationCoverage))
 	}
 	return f
 }
@@ -168,45 +201,153 @@ type ScoreFilter struct {
 }
 
 // PatternStat is the measured effectiveness of one memory.
+//
+// Raw rates are confounded by how hard a service is, so Effect compares the
+// runs that were exposed to the memory with the other runs of the same
+// service: Expected is the success count those runs would have had at their
+// service's baseline rate (computed without the exposed runs), Lift the
+// difference per run and Z its significance. Exposure is either retrieval
+// (Effect) or an explicit citation by the model (CitedEffect).
 type PatternStat struct {
-	MemoryID  string  `json:"memory_id"`
-	Uses      int     `json:"uses"`
-	Successes int     `json:"successes"`
-	Rate      float64 `json:"success_rate"`
-	Lower95   float64 `json:"success_wilson_lower_95"`
-	Quality   float64 `json:"mean_quality"`
+	MemoryID       string  `json:"memory_id"`
+	Uses           int     `json:"uses"`
+	Successes      int     `json:"successes"`
+	Rate           float64 `json:"success_rate"`
+	Lower95        float64 `json:"success_wilson_lower_95"`
+	Quality        float64 `json:"mean_quality"`
+	Cited          int     `json:"cited"`
+	CitedSuccesses int     `json:"cited_successes"`
+	Effect         *Effect `json:"effect,omitempty"`
+	CitedEffect    *Effect `json:"cited_effect,omitempty"`
 }
 
-// PatternStats measures every memory the scored runs retrieved.
+// Effect is the baseline-relative effect of an exposure.
+type Effect struct {
+	// N counts exposed runs whose service has unexposed runs to compare with.
+	N         int     `json:"n"`
+	Successes int     `json:"successes"`
+	Expected  float64 `json:"expected"`
+	Lift      float64 `json:"lift"`
+	Z         float64 `json:"z"`
+}
+
+// Decisive returns the effect to act on: citations when there are at least
+// minUses cited runs, otherwise retrievals. nil when neither has minUses
+// comparable runs.
+func (p PatternStat) Decisive(minUses int) (*Effect, string) {
+	if p.CitedEffect != nil && p.CitedEffect.N >= minUses {
+		return p.CitedEffect, "cited"
+	}
+	if p.Effect != nil && p.Effect.N >= minUses {
+		return p.Effect, "retrieved"
+	}
+	return nil, ""
+}
+
+// PatternStats measures every memory the scored runs retrieved or cited.
 func PatternStats(scores []RunScore) map[string]PatternStat {
 	acc := map[string]*PatternStat{}
-	for _, s := range scores {
-		seen := map[string]bool{}
-		for _, id := range s.MemoryIDs {
-			if id == "" || seen[id] {
-				continue
-			}
-			seen[id] = true
-			p := acc[id]
-			if p == nil {
-				p = &PatternStat{MemoryID: id}
-				acc[id] = p
-			}
+	get := func(id string) *PatternStat {
+		p := acc[id]
+		if p == nil {
+			p = &PatternStat{MemoryID: id}
+			acc[id] = p
+		}
+		return p
+	}
+	retrieved := make([]map[string]bool, len(scores))
+	cited := make([]map[string]bool, len(scores))
+	for i, s := range scores {
+		retrieved[i], cited[i] = set(s.MemoryIDs), set(s.Metrics.CitedMemories)
+		ok := s.Metrics.Success()
+		for id := range retrieved[i] {
+			p := get(id)
 			p.Uses++
 			p.Quality += s.Metrics.Quality
-			if s.Metrics.Success() {
+			if ok {
 				p.Successes++
+			}
+		}
+		for id := range cited[i] {
+			p := get(id)
+			p.Cited++
+			if ok {
+				p.CitedSuccesses++
 			}
 		}
 	}
 	out := make(map[string]PatternStat, len(acc))
 	for id, p := range acc {
-		p.Rate = round(float64(p.Successes) / float64(p.Uses))
-		p.Lower95 = round(WilsonLower(p.Successes, p.Uses))
-		p.Quality = round(p.Quality / float64(p.Uses))
+		if p.Uses > 0 {
+			p.Rate = round(float64(p.Successes) / float64(p.Uses))
+			p.Lower95 = round(WilsonLower(p.Successes, p.Uses))
+			p.Quality = round(p.Quality / float64(p.Uses))
+		}
+		p.Effect = effect(scores, func(i int) bool { return retrieved[i][id] })
+		p.CitedEffect = effect(scores, func(i int) bool { return cited[i][id] })
 		out[id] = *p
 	}
 	return out
+}
+
+// effect compares exposed runs with the unexposed runs of their service.
+// Baselines use a Beta(1,1) prior so a service with few comparison runs
+// does not produce a 0 or 1 baseline.
+func effect(scores []RunScore, exposed func(i int) bool) *Effect {
+	type agg struct{ n, ok int }
+	base := map[string]*agg{}
+	for i, s := range scores {
+		if exposed(i) {
+			continue
+		}
+		a := base[s.Service]
+		if a == nil {
+			a = &agg{}
+			base[s.Service] = a
+		}
+		a.n++
+		if s.Metrics.Success() {
+			a.ok++
+		}
+	}
+	e := Effect{}
+	var variance float64
+	for i, s := range scores {
+		if !exposed(i) {
+			continue
+		}
+		a := base[s.Service]
+		if a == nil || a.n == 0 {
+			continue // nothing to compare with
+		}
+		p := float64(a.ok+1) / float64(a.n+2)
+		e.N++
+		e.Expected += p
+		variance += p * (1 - p)
+		if s.Metrics.Success() {
+			e.Successes++
+		}
+	}
+	if e.N == 0 {
+		return nil
+	}
+	diff := float64(e.Successes) - e.Expected
+	e.Lift = round(diff / float64(e.N))
+	if variance > 0 {
+		e.Z = round(diff / math.Sqrt(variance))
+	}
+	e.Expected = round(e.Expected)
+	return &e
+}
+
+func set(xs []string) map[string]bool {
+	m := make(map[string]bool, len(xs))
+	for _, x := range xs {
+		if x != "" {
+			m[x] = true
+		}
+	}
+	return m
 }
 
 // SortedStats returns stats ordered by uses, then id.

@@ -28,6 +28,7 @@ import (
 	"go-sre-harness/internal/planner"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/reasoning"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/untrusted"
 )
@@ -446,7 +447,7 @@ func (w *Worker) execute(ctx context.Context, lease domain.Lease, st *execState)
 		if err != nil {
 			return domain.StepSuccess{}, err
 		}
-		mctx := domain.WithMemoryExclude(domain.WithMemoryTopK(ctx, rules.MemoryTopK), rules.MemoryExclude)
+		mctx := domain.WithMemoryExclude(domain.WithMemoryTopK(ctx, rules.MemoryTopK), rules.MemoryExcludeFor(lease.RunID))
 		return w.cfg.Memory.Retrieve(mctx, lease, g.Goal)
 	}
 	return domain.StepSuccess{}, fmt.Errorf("unknown step kind %q", lease.Kind)
@@ -1070,7 +1071,11 @@ func reasonTrace(d domain.Decision, in cognitive.ReasoningInput, tenantID string
 		for _, ref := range h.Refutes {
 			refs = append(refs, domain.ThoughtRef{Ref: ref, Relation: "refutes"})
 		}
+		n := len(out)
 		next(domain.ThoughtHypothesis, h.Statement, status, h.ConfidenceEstimate, refs)
+		if id := strings.TrimSpace(h.ID); id != "" && len(out) > n {
+			out[n].Attrs = map[string]any{reasoning.HypothesisIDAttr: truncate(id, 64)}
+		}
 	}
 	if d.Kind == domain.DecisionTool && d.Tool != nil {
 		var refs []domain.ThoughtRef

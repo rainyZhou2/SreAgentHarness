@@ -102,10 +102,12 @@ A scheduler job (`job: reasoning_improver`) runs per tenant and profile:
 3. Exclude runs that are the source of a holdout case, so the proposer never
    learns from the data the gate uses.
 4. Diagnose: weak dimensions (calibration, grounding, redundancy, unverified
-   conclusions, runs without any verdict) against configured thresholds, and patterns
-   with enough uses whose success lower bound is below `retire_below`.
+   conclusions, runs without any verdict, trace structure) against configured
+   thresholds, and plan pattern exclusions (section 4).
 5. Propose a profile patch touching only `reasoning`:
-   * `patterns_excluded`: add the weak patterns;
+   * `patterns_excluded`: retire, reinstate and prune patterns (section 4);
+   * `pattern_probe_rate`: set to `probe_rate` (default 0.05) when patterns
+     are excluded and the profile has no probe rate yet;
    * `playbook`: guidance for the weak dimensions, from fixed, domain-free
      templates merged into the current playbook (oldest guidance dropped
      first to stay within the limit). A model-written playbook is not
@@ -123,13 +125,75 @@ automatic rollback are the existing evolution pipeline.
 
 ### Safety envelope
 
-* Evolvable surface: `reasoning.playbook`, `reasoning.patterns_excluded`.
+* Evolvable surface: `reasoning.playbook`, `reasoning.patterns_excluded`,
+  `reasoning.pattern_probe_rate` (at most 0.2).
   Tools, policy, risk overrides, approval rules, strategy, flow and step
   limits stay frozen.
 * The playbook is rendered in the system prompt *before* the trust rules,
   labelled as learned guidance that never overrides trust rules or policy.
 * Every change is a new immutable profile version with lineage
   (candidate → evaluation → approval → rollout).
+
+## 4. Pattern exclusion lifecycle
+
+### Effect relative to the service baseline
+
+Raw success rates mostly measure how hard a service is. For every memory,
+`PatternStats` compares the runs exposed to it with the *unexposed* runs of
+the same service: each exposed run contributes its service's baseline
+success rate (Beta(1,1) prior) to `expected`; `lift` is
+(successes − expected) / n and `z` = (successes − expected) / √Σp(1−p).
+Exposed runs of a service without unexposed runs are not comparable and are
+left out (`n` counts comparable runs).
+
+Exposure is measured two ways. *Retrieved* means the memory was injected
+into the prompt. *Cited* means the model referenced `memory:<id>` in
+evidence refs, hypothesis supports or refutes (the plan's automatic
+`based_on` links do not count). The cited effect decides once it has
+`min_uses` comparable runs, because it is closer to "the pattern was used";
+otherwise the retrieval effect decides.
+
+### Retire, probe, reinstate
+
+* **Retire** an ACTIVE reasoning pattern when its decisive effect has
+  `z <= -retire_z` (default 1.96) *and* `lift <= -min_lift` (default 0.10):
+  significantly and materially worse than the baseline.
+* **Probe**: `reasoning.pattern_probe_rate` re-exposes each excluded memory
+  to that share of runs, chosen by a SHA-256 hash of run and memory id, so
+  retries of a run see the same memories. Runs of a version that excludes a
+  pattern only see it through probes, so the stats of the active version are
+  probe evidence.
+* **Reinstate** an excluded pattern whose probed runs reach
+  `z >= reinstate_z` (default 0: at least the baseline). Reinstating needs
+  much less evidence of harm to be absent than retiring needs evidence of
+  harm to be present, and `reinstate_z` must stay above `-retire_z`, so a
+  pattern does not flap.
+* **Prune** excluded ids whose memory is gone or no longer ACTIVE (retrieval
+  never returns them). Pruning rides along with a real change; it never
+  triggers a proposal by itself.
+* **Capacity**: the list holds at most 500 ids. Pruning frees space first;
+  if retirements still do not fit, the ones with the strongest evidence
+  (lowest z) are kept and the rest are reported as `deferred`.
+* **Manual**: `POST /v1/reasoning/patterns/{memory_id}/exclude` and
+  `/reinstate` (operator) propose the same kind of candidate on behalf of
+  the caller; a different human approves it.
+
+## 5. Trace structure
+
+* Hypotheses carry a stable `id` (the conclusion schema now requires `id`,
+  `statement`, `status` and `confidence_estimate`). The kernel stores it as
+  the `hypothesis_id` thought attribute; scoring deduplicates by id and falls
+  back to the normalized statement only when there is none.
+* `calibration_coverage` is the share of settled hypotheses that carried a
+  confidence. Brier stays defined over stated confidences; for the composite
+  quality score a settled hypothesis without confidence counts as the
+  no-skill forecast 0.5 (Brier 0.25).
+* Summaries report the mean structured share and pooled coverage. The gate
+  fails a candidate whose structured share or coverage drops by more than
+  0.10 (`max_structured_drop`, `max_coverage_drop`; 0 means the default, so
+  configurations written before these checks still get them). The improver
+  flags the `structure` dimension below `min_structured` (0.8) or
+  `min_coverage` (0.6) and adds guidance to fill the structured fields.
 
 ### Canary reasoning guardrails
 
@@ -153,7 +217,10 @@ default on its reconcile loop.
 
 * `GET /v1/reasoning/summary?profile_id=&version=&since=` – aggregate metrics.
 * `GET /v1/reasoning/runs/{run_id}` – one run's score.
-* `GET /v1/reasoning/patterns?service=` – reasoning patterns with stats.
+* `GET /v1/reasoning/patterns?service=&profile_id=` – reasoning patterns with
+  stats, baseline-relative effects and whether the profile excludes them.
+* `POST /v1/reasoning/patterns/{memory_id}/exclude|reinstate` (operator) –
+  propose an exclusion change.
 * `POST /v1/reasoning/improve` (admin) – run one improvement tick now.
 
 ## Configuration
@@ -170,7 +237,10 @@ plugins:
         window: 168h
         min_runs: 20
         min_uses: 5
-        retire_below: 0.3
+        retire_z: 1.96
+        min_lift: 0.10
+        reinstate_z: 0
+        probe_rate: 0.05
 ```
 
 The consolidator's recorder hook is on by default and can be turned off

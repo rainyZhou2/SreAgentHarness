@@ -2,6 +2,8 @@ package profile
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -34,8 +36,10 @@ type Rules struct {
 	MemoryTopK    int
 	CapabilityMap bool
 	// MemoryExclude lists memories hidden from retrieval
-	// (reasoning.patterns_excluded).
+	// (reasoning.patterns_excluded); use MemoryExcludeFor per run.
 	MemoryExclude []string
+	// MemoryProbeRate re-exposes excluded memories to a share of runs.
+	MemoryProbeRate float64
 
 	// Flow is the compiled orchestration plan when strategy is "flow".
 	Flow     *flow.Spec
@@ -63,6 +67,7 @@ func Compile(ref string, s Spec) (Rules, error) {
 		CapabilityMap: s.CapabilityMap}
 	if s.Reasoning != nil {
 		r.MemoryExclude = s.Reasoning.PatternsExcluded
+		r.MemoryProbeRate = s.Reasoning.PatternProbeRate
 	}
 	for _, t := range s.Tools {
 		if t == "" || (strings.Contains(t, "*") && t != "*" && !strings.HasSuffix(t, ".*")) || strings.Count(t, "*") > 1 {
@@ -240,4 +245,29 @@ func (c *RulesFor) Rules(ctx context.Context, tenantID, profileID string, versio
 	c.cache[key] = r
 	c.mu.Unlock()
 	return r, nil
+}
+
+// MemoryExcludeFor returns the memories hidden from one run: every excluded
+// memory except those this run probes. The choice is a stable hash of run
+// and memory, so retries of a run see the same memories.
+func (r Rules) MemoryExcludeFor(runID string) []string {
+	if r.MemoryProbeRate <= 0 || runID == "" {
+		return r.MemoryExclude
+	}
+	out := make([]string, 0, len(r.MemoryExclude))
+	for _, id := range r.MemoryExclude {
+		if !Probed(runID, id, r.MemoryProbeRate) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// Probed reports whether a run probes an excluded memory.
+func Probed(runID, memoryID string, rate float64) bool {
+	if rate <= 0 {
+		return false
+	}
+	sum := sha256.Sum256([]byte(runID + "|" + memoryID))
+	return float64(binary.BigEndian.Uint64(sum[:8])%1_000_000) < rate*1_000_000
 }
