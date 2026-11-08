@@ -4,6 +4,8 @@ English | [中文](README.zh-CN.md)
 
 A native desktop client for the SRE harness, built with [Wails v2](https://wails.io): Go plus the operating system's WebView, so there is no bundled browser (~9 MB on macOS). It is a separate Go module and talks to the server only through the public `/v1` API, using the same authentication and roles as any other client.
 
+<p align="center"><img src="../docs/images/desktop-diagnosis.png" alt="Desktop client: a diagnosis with its work log and hypotheses" width="860"></p>
+
 ## What it does
 
 It is a chat client in the style of Codex / Claude desktop, built on the harness's sessions and turns.

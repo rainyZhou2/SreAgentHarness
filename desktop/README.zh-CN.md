@@ -4,6 +4,8 @@
 
 SRE harness 的原生桌面客户端，基于 [Wails v2](https://wails.io)：Go + 操作系统自带的 WebView，不打包浏览器（macOS 上约 9 MB）。它是独立的 Go 模块，只通过公开的 `/v1` API 与服务端通信，认证和角色与其他客户端完全一致。
 
+<p align="center"><img src="../docs/images/desktop-diagnosis.png" alt="桌面客户端：一次排查的工作日志和假设" width="860"></p>
+
 ## 功能
 
 Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（session）和轮次（turn）。
