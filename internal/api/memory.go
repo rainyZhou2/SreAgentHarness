@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/domain"
@@ -26,6 +28,9 @@ type MemoryStore interface {
 	AppendIncidentEvent(ctx context.Context, tenantID, incidentID string, e pg.IncidentEvent, expected *int64) (int64, error)
 	ListIncidentEvents(ctx context.Context, tenantID, incidentID string, upTo int64) ([]pg.IncidentEvent, error)
 	CreateIncident(ctx context.Context, tenantID, serviceID, environment string) (string, error)
+	UpdateMemory(ctx context.Context, r memory.Revision) (memory.Memory, error)
+	LiveMemoryBySubject(ctx context.Context, tenantID, scope, scopeID, subject string) (memory.Memory, bool, error)
+	PersonalMemories(ctx context.Context, tenantID, userID string, limit int) ([]memory.Memory, error)
 }
 
 // MemoryAPI exposes the memory lifecycle, feedback and incident working memory.
@@ -39,6 +44,9 @@ func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
 		"POST /v1/memories":                              auth.Operator,
 		"POST /v1/memories/{memory_id}/transition":       auth.Approver,
+		"PATCH /v1/memories/{memory_id}":                 auth.Approver,
+		"PUT /v1/me/memories/{key}":                      auth.Viewer,
+		"DELETE /v1/me/memories/{key}":                   auth.Viewer,
 		"POST /v1/service-dependencies":                  auth.Admin,
 		"POST /v1/runs/{run_id}/feedback":                auth.Operator,
 		"POST /v1/incidents":                             auth.Operator,
@@ -51,6 +59,10 @@ func (m *MemoryAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/memories", m.list)
 	mux.HandleFunc("GET /v1/memories/{memory_id}", m.get)
 	mux.HandleFunc("POST /v1/memories/{memory_id}/transition", m.transition)
+	mux.HandleFunc("PATCH /v1/memories/{memory_id}", m.update)
+	mux.HandleFunc("GET /v1/me/memories", m.listMine)
+	mux.HandleFunc("PUT /v1/me/memories/{key}", m.putMine)
+	mux.HandleFunc("DELETE /v1/me/memories/{key}", m.deleteMine)
 	mux.HandleFunc("POST /v1/service-dependencies", m.putDependency)
 	mux.HandleFunc("POST /v1/runs/{run_id}/feedback", m.feedback)
 	mux.HandleFunc("GET /v1/runs/{run_id}/feedback", m.listFeedback)
@@ -79,6 +91,10 @@ func (m *MemoryAPI) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if b.Scope == "user" {
+		writeErr(w, http.StatusBadRequest, "invalid_scope", "personal memory is written with PUT /v1/me/memories/{key}")
 		return
 	}
 	nm := memory.NewMemory{TenantID: id.tenant, Scope: b.Scope, ScopeID: b.ScopeID, Type: b.Type, Subject: b.Subject,
@@ -123,7 +139,13 @@ func (m *MemoryAPI) list(w http.ResponseWriter, r *http.Request) {
 		m.Server.domainErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"memories": list})
+	visible := list[:0]
+	for _, mem := range list {
+		if canSeeMemory(r, id, mem) {
+			visible = append(visible, mem)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"memories": visible})
 }
 
 func (m *MemoryAPI) get(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +154,162 @@ func (m *MemoryAPI) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mem, err := m.Store.GetMemory(r.Context(), id.tenant, r.PathValue("memory_id"))
+	if err == nil && !canSeeMemory(r, id, mem) {
+		err = domain.ErrNotFound
+	}
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mem)
+}
+
+// canSeeMemory hides personal memories from everyone but their owner and
+// tenant admins.
+func canSeeMemory(r *http.Request, id identity, mem memory.Memory) bool {
+	if mem.Scope != "user" || mem.ScopeID == id.actor {
+		return true
+	}
+	p, _ := auth.FromContext(r.Context())
+	return p.Has(auth.Admin)
+}
+
+// update writes a new version of a memory's title and/or content. The
+// memory keeps its status; citations of the old version keep resolving.
+func (m *MemoryAPI) update(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		ExpectedVersion int64    `json:"expected_version"`
+		Title           string   `json:"title"`
+		Content         string   `json:"content"`
+		EvidenceRefs    []string `json:"evidence_refs"`
+		Reason          string   `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&b); err != nil || b.ExpectedVersion <= 0 ||
+		(b.Title == "" && b.Content == "") {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "expected_version and a title or content are required")
+		return
+	}
+	cur, err := m.Store.GetMemory(r.Context(), id.tenant, r.PathValue("memory_id"))
+	if err == nil && cur.Scope == "user" && cur.ScopeID != id.actor {
+		err = domain.ErrNotFound
+	}
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	m.revise(w, r, id, cur, b.ExpectedVersion, b.Title, b.Content, b.EvidenceRefs, b.Reason)
+}
+
+func (m *MemoryAPI) revise(w http.ResponseWriter, r *http.Request, id identity, cur memory.Memory, expected int64,
+	title, content string, evidence []string, reason string) {
+	prepared, err := m.Writer.PrepareRevision(r.Context(), cur, title, content, evidence, "user:"+id.actor)
+	if errors.Is(err, memory.ErrPoisoned) {
+		writeErr(w, http.StatusUnprocessableEntity, "memory_rejected_poisoning", err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_memory", err.Error())
+		return
+	}
+	mem, err := m.Store.UpdateMemory(r.Context(), memory.Revision{TenantID: id.tenant, ID: cur.ID, ExpectedVersion: expected,
+		Prepared: prepared, Actor: id.actor, Reason: reason})
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"memory": mem, "redactions": prepared.Redactions})
+}
+
+// listMine returns the caller's personal memory.
+func (m *MemoryAPI) listMine(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	list, err := m.Store.PersonalMemories(r.Context(), id.tenant, id.actor, 200)
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	if list == nil {
+		list = []memory.Memory{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"memories": list})
+}
+
+// putMine sets one of the caller's preferences: a new personal memory, or
+// a new version of the existing one with that key.
+func (m *MemoryAPI) putMine(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Value string `json:"value"`
+	}
+	key := strings.TrimSpace(r.PathValue("key"))
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&b); err != nil || key == "" ||
+		strings.TrimSpace(b.Value) == "" || utf8.RuneCountInString(key) > domain.MaxNoteKeyRunes ||
+		utf8.RuneCountInString(b.Value) > 4*domain.MaxNoteValueRunes {
+		writeErr(w, http.StatusBadRequest, "invalid_body", "a key (≤64 characters) and a value (≤2000) are required")
+		return
+	}
+	cur, found, err := m.Store.LiveMemoryBySubject(r.Context(), id.tenant, "user", id.actor, memory.PersonalSubject(key))
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	if found && cur.Status == "ACTIVE" {
+		m.revise(w, r, id, cur, cur.Version, key, b.Value, nil, "set by the user")
+		return
+	}
+	prepared, err := m.Writer.Prepare(r.Context(), memory.NewMemory{TenantID: id.tenant, Scope: "user", ScopeID: id.actor,
+		Type: "semantic", Status: "ACTIVE", Subject: memory.PersonalSubject(key), Title: key, Content: b.Value,
+		SourceRefs: []string{"user:" + id.actor}, Trust: "T2", Sensitivity: "restricted", CreatedBy: id.actor})
+	if errors.Is(err, memory.ErrPoisoned) {
+		writeErr(w, http.StatusUnprocessableEntity, "memory_rejected_poisoning", err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_memory", err.Error())
+		return
+	}
+	mem, created, err := m.Store.CreateMemory(r.Context(), prepared)
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+	}
+	writeJSON(w, code, map[string]any{"memory": mem, "created": created, "redactions": prepared.Redactions})
+}
+
+// deleteMine archives one of the caller's preferences.
+func (m *MemoryAPI) deleteMine(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	cur, found, err := m.Store.LiveMemoryBySubject(r.Context(), id.tenant, "user", id.actor,
+		memory.PersonalSubject(r.PathValue("key")))
+	if err == nil && !found {
+		err = domain.ErrNotFound
+	}
+	if err != nil {
+		m.Server.domainErr(w, err)
+		return
+	}
+	to := "ARCHIVED"
+	if cur.Status != "ACTIVE" {
+		to = "REJECTED"
+	}
+	mem, err := m.Store.TransitionMemory(r.Context(), id.tenant, cur.ID, cur.Status, to, id.actor, "deleted by the user")
 	if err != nil {
 		m.Server.domainErr(w, err)
 		return
@@ -151,6 +329,10 @@ func (m *MemoryAPI) transition(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&b); err != nil || b.To == "" || b.From == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body", "expected_status and to are required")
+		return
+	}
+	if cur, err := m.Store.GetMemory(r.Context(), id.tenant, r.PathValue("memory_id")); err != nil || !canSeeMemory(r, id, cur) {
+		m.Server.domainErr(w, domain.ErrNotFound)
 		return
 	}
 	mem, err := m.Store.TransitionMemory(r.Context(), id.tenant, r.PathValue("memory_id"), b.From, b.To, id.actor, b.Reason)

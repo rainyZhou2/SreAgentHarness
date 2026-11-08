@@ -208,7 +208,8 @@ func (s *Store) SnapshotContext(ctx context.Context, tenantID, runID, snapshotID
 			continue
 		}
 		out.Memories = append(out.Memories, cognitive.MemoryRef{ID: h.MemoryID, Version: h.Version,
-			Kind: m.Mem.Type, Title: m.Mem.Title, Content: m.Mem.Content, Trust: m.Mem.Trust, Score: h.Score})
+			Kind: m.Mem.Type, Title: m.Mem.Title, Content: m.Mem.Content, Trust: m.Mem.Trust, Score: h.Score,
+			Scope: m.Mem.Scope})
 	}
 	return out, nil
 }

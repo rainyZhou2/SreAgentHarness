@@ -297,6 +297,8 @@ type Decision struct {
 	Thought           *ThoughtChain `json:"thought,omitempty"`
 	// Consistency is set when the conclusion was sampled several times.
 	Consistency *Consistency `json:"consistency,omitempty"`
+	// Notes are the agent's memory writes in this step (see NoteOp).
+	Notes []NoteOp `json:"notes,omitempty"`
 }
 
 // RunUsage is the model spend of a run so far.

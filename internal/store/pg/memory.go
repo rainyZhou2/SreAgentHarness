@@ -91,7 +91,7 @@ func (s *Store) pinnedMemories(ctx context.Context, tenantID, runID, _ string, b
 	rows, err := s.pool.Query(ctx, `WITH last AS (
 			SELECT id FROM agent_steps WHERE run_id=$1 AND tenant_id=$2 AND kind='retrieve_memory' AND status='SUCCEEDED'
 			AND seq < $3 ORDER BY seq DESC LIMIT 1)
-		SELECT m.id, h.memory_version, m.memory_type, m.title,
+		SELECT m.id, h.memory_version, m.memory_type, m.scope, m.title,
 			CASE WHEN m.current_version = h.memory_version THEN m.content_text
 			     ELSE '[memory changed after retrieval; pinned version ' || h.memory_version || ' content not inlined]' END,
 			m.trust, h.score
@@ -105,7 +105,7 @@ func (s *Store) pinnedMemories(ctx context.Context, tenantID, runID, _ string, b
 	var out []cognitive.MemoryRef
 	for rows.Next() {
 		var m cognitive.MemoryRef
-		if err := rows.Scan(&m.ID, &m.Version, &m.Kind, &m.Title, &m.Content, &m.Trust, &m.Score); err != nil {
+		if err := rows.Scan(&m.ID, &m.Version, &m.Kind, &m.Scope, &m.Title, &m.Content, &m.Trust, &m.Score); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -150,14 +150,15 @@ var _ memory.ConsolidationStore = (*Store)(nil)
 
 const memoryCols = `id, tenant_id, scope, scope_id, memory_type, status, current_version, subject, title, content_text,
 	content_ref, content_hash, source_refs, evidence_refs, trust, sensitivity, confidence, verified_by, environment,
-	superseded_by, expires_at, created_by, created_at, updated_at`
+	superseded_by, expires_at, created_by, created_at, updated_at, reinforcements, last_reinforced_at`
 
 func scanMemory(row pgx.Row, extra ...any) (memory.Memory, error) {
 	var m memory.Memory
 	var src, ev []byte
 	dest := []any{&m.ID, &m.TenantID, &m.Scope, &m.ScopeID, &m.Type, &m.Status, &m.Version, &m.Subject, &m.Title,
 		&m.Content, &m.ContentRef, &m.ContentHash, &src, &ev, &m.Trust, &m.Sensitivity, &m.Confidence, &m.VerifiedBy,
-		&m.Environment, &m.SupersededBy, &m.ExpiresAt, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt}
+		&m.Environment, &m.SupersededBy, &m.ExpiresAt, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt, &m.Reinforcements,
+		&m.LastReinforcedAt}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return m, domain.ErrNotFound
@@ -176,6 +177,12 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 	var out memory.Memory
 	created := false
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if dup, ok, err := nearDuplicate(ctx, tx, m); err != nil {
+			return err
+		} else if ok {
+			out, err = reinforce(ctx, tx, dup, m.SourceRefs)
+			return err
+		}
 		id := newID()
 		var inserted string
 		err := tx.QueryRow(ctx, `INSERT INTO agent_memories (id, tenant_id, scope, scope_id, memory_type, status, subject,
@@ -187,9 +194,13 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 			m.ContentRef, m.ContentHash, jsonb(nonNil(m.SourceRefs)), jsonb(nonNil(m.EvidenceRefs)), m.Trust, m.Sensitivity,
 			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy, m.SearchTerms).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
-			out, err = scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
-				AND scope_id=$3 AND content_hash=$4 AND status NOT IN ('REJECTED','ARCHIVED')`, m.TenantID, m.Scope, m.ScopeID,
+			cur, err := scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
+				AND scope_id=$3 AND content_hash=$4 AND status NOT IN ('REJECTED','ARCHIVED') FOR UPDATE`, m.TenantID, m.Scope, m.ScopeID,
 				m.ContentHash))
+			if err != nil {
+				return err
+			}
+			out, err = reinforce(ctx, tx, cur, m.SourceRefs)
 			return err
 		}
 		if err != nil {
@@ -223,6 +234,50 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		return err
 	})
 	return out, created, err
+}
+
+// nearDuplicate finds a live memory with the same scope and subject that
+// says the same thing (memory.NearDuplicate) and is at least as validated.
+func nearDuplicate(ctx context.Context, tx pgx.Tx, m memory.NewMemory) (memory.Memory, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT `+prefixCols("m.", memoryCols)+`, e.embedding FROM agent_memories m
+		LEFT JOIN memory_embeddings e ON e.memory_id = m.id AND e.memory_version = m.current_version AND e.embedding_model = $5
+		WHERE m.tenant_id=$1 AND m.scope=$2 AND m.scope_id=$3 AND m.subject=$4
+		AND m.status IN ('ACTIVE','VALIDATING','CANDIDATE') ORDER BY m.updated_at DESC LIMIT 20`,
+		m.TenantID, m.Scope, m.ScopeID, m.Subject, m.EmbeddingModel)
+	if err != nil {
+		return memory.Memory{}, false, err
+	}
+	var found *memory.Memory
+	for rows.Next() {
+		var emb []float32
+		cur, err := scanMemory(rows, &emb)
+		if err != nil {
+			rows.Close()
+			return memory.Memory{}, false, err
+		}
+		if found == nil && cur.ContentHash != m.ContentHash && memory.StatusRank(cur.Status) >= memory.StatusRank(m.Status) &&
+			memory.NearDuplicate(m, cur, emb) {
+			c := cur
+			found = &c
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || found == nil {
+		return memory.Memory{}, false, err
+	}
+	return *found, true, nil
+}
+
+// reinforce counts a repeated write on an existing memory when it comes
+// from a source the memory does not have yet.
+func reinforce(ctx context.Context, tx pgx.Tx, cur memory.Memory, sources []string) (memory.Memory, error) {
+	merged, changed := memory.MergeSources(cur.SourceRefs, sources)
+	if !changed {
+		return cur, nil
+	}
+	return scanMemory(tx.QueryRow(ctx, `UPDATE agent_memories SET reinforcements = reinforcements + 1,
+		last_reinforced_at = now(), source_refs = $3 WHERE tenant_id=$1 AND id=$2 RETURNING `+memoryCols,
+		cur.TenantID, cur.ID, jsonb(merged)))
 }
 
 func memoryShards(m memory.NewMemory) []domain.MemoryShard {
@@ -314,6 +369,118 @@ func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, ac
 		return err
 	})
 	return out, err
+}
+
+var _ memory.Updater = (*Store)(nil)
+var _ memory.PersonalStore = (*Store)(nil)
+
+// LiveMemoryBySubject returns the most validated live memory with this
+// scope and subject.
+func (s *Store) LiveMemoryBySubject(ctx context.Context, tenantID, scope, scopeID, subject string) (memory.Memory, bool, error) {
+	m, err := scanMemory(s.pool.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
+		AND scope_id=$3 AND subject=$4 AND status IN ('ACTIVE','VALIDATING','CANDIDATE')
+		ORDER BY CASE status WHEN 'ACTIVE' THEN 0 WHEN 'VALIDATING' THEN 1 ELSE 2 END, updated_at DESC LIMIT 1`,
+		tenantID, scope, scopeID, subject))
+	if errors.Is(err, domain.ErrNotFound) {
+		return m, false, nil
+	}
+	return m, err == nil, err
+}
+
+// UpdateMemory writes a new version of a live memory's content. Earlier
+// versions stay in agent_memory_versions, so citations pinned to them keep
+// resolving; embeddings and search terms follow the new version.
+func (s *Store) UpdateMemory(ctx context.Context, r memory.Revision) (memory.Memory, error) {
+	var out memory.Memory
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		cur, err := scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
+			r.TenantID, r.ID))
+		if err != nil {
+			return err
+		}
+		if r.ExpectedVersion > 0 && cur.Version != r.ExpectedVersion {
+			return domain.ErrVersionConflict
+		}
+		if memory.StatusRank(cur.Status) < 0 && cur.Status != "STALE" {
+			return &domain.RejectedError{Reason: "memory_not_live_" + strings.ToLower(cur.Status)}
+		}
+		p := r.Prepared
+		if p.ContentHash == cur.ContentHash && p.Title == cur.Title {
+			out = cur
+			return nil
+		}
+		var clash string
+		err = tx.QueryRow(ctx, `SELECT id FROM agent_memories WHERE tenant_id=$1 AND scope=$2 AND scope_id=$3
+			AND content_hash=$4 AND id<>$5 AND status NOT IN ('REJECTED','ARCHIVED') LIMIT 1`, cur.TenantID, cur.Scope,
+			cur.ScopeID, p.ContentHash, cur.ID).Scan(&clash)
+		if err == nil {
+			return &domain.RejectedError{Reason: "duplicate_content_of_" + clash}
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		next := cur.Version + 1
+		if _, err := tx.Exec(ctx, `UPDATE agent_memories SET title=$3, content_text=$4, content_ref=$5, content_hash=$6,
+			source_refs=$7, evidence_refs=$8, search_terms=$9, search_terms_v=1, current_version=$10, updated_at=now()
+			WHERE tenant_id=$1 AND id=$2`, cur.TenantID, cur.ID, p.Title, p.Content, p.ContentRef, p.ContentHash,
+			jsonb(nonNil(p.SourceRefs)), jsonb(nonNil(p.EvidenceRefs)), p.SearchTerms, next); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_memory_versions (tenant_id, memory_id, version, content_ref, content_hash,
+			status, provenance) VALUES ($1,$2,$3,$4,$5,$6,$7)`, cur.TenantID, cur.ID, next, p.ContentRef, p.ContentHash,
+			cur.Status, jsonb(map[string]any{"updated_by": r.Actor, "reason": r.Reason, "previous_version": cur.Version,
+				"redactions": p.Redactions})); err != nil {
+			return err
+		}
+		if len(p.Embedding) > 0 && p.EmbeddingModel != "" {
+			if _, err := tx.Exec(ctx, `INSERT INTO memory_embeddings (tenant_id, memory_id, memory_version, embedding_model,
+				dims, embedding) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, cur.TenantID, cur.ID, next,
+				p.EmbeddingModel, len(p.Embedding), p.Embedding); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO security_audit_log (id, tenant_id, actor_type, actor_id, action, resource_type,
+			resource_id, outcome, details) VALUES ($1,$2,'user',$3,'memory.update','memory',$4,'applied',$5)`, newID(),
+			cur.TenantID, r.Actor, cur.ID, jsonb(map[string]any{"from_version": cur.Version, "to_version": next,
+				"reason": r.Reason})); err != nil {
+			return err
+		}
+		out, err = scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE id=$1`, cur.ID))
+		return err
+	})
+	return out, err
+}
+
+// RunInitiator returns the user who started the run ("" for other initiators).
+func (s *Store) RunInitiator(ctx context.Context, tenantID, runID string) (string, error) {
+	var typ string
+	var id *string
+	err := s.pool.QueryRow(ctx, `SELECT initiator_type, initiator_id FROM agent_runs WHERE tenant_id=$1 AND id=$2`,
+		tenantID, runID).Scan(&typ, &id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", domain.ErrNotFound
+		}
+		return "", err
+	}
+	if typ != "user" || id == nil {
+		return "", nil
+	}
+	return *id, nil
+}
+
+// PersonalMemories returns a user's ACTIVE personal memories.
+func (s *Store) PersonalMemories(ctx context.Context, tenantID, userID string, limit int) ([]memory.Memory, error) {
+	if limit <= 0 || limit > 200 {
+		limit = memory.MaxPersonalMemories
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope='user'
+		AND scope_id=$2 AND status='ACTIVE' AND (expires_at IS NULL OR expires_at > now())
+		ORDER BY updated_at DESC LIMIT $3`, tenantID, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (memory.Memory, error) { return scanMemory(row) })
 }
 
 func (s *Store) GetMemory(ctx context.Context, tenantID, id string) (memory.Memory, error) {

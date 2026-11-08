@@ -189,7 +189,7 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 		if affinity > 1 {
 			affinity = 1
 		}
-		fused[id] = score * (1 + 0.25*affinity)
+		fused[id] = score * (1 + 0.25*affinity) * ReinforcementBoost(byID[id].Reinforcements)
 	}
 	ids := make([]string, 0, len(fused))
 	for id := range fused {
@@ -232,6 +232,30 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 		Kept: kept, Scores: fused, Branches: branches, Conflicts: conflicts}, nil
 }
 
+// personal returns the run initiator's personal memories (none when the
+// store keeps none or the run was not started by a user).
+func (r *Retriever) personal(ctx context.Context, tenantID, runID string) []Memory {
+	ps, ok := r.Store.(PersonalStore)
+	if !ok || runID == "" {
+		return nil
+	}
+	user, err := ps.RunInitiator(ctx, tenantID, runID)
+	if err != nil || user == "" {
+		return nil
+	}
+	mems, err := ps.PersonalMemories(ctx, tenantID, user, MaxPersonalMemories)
+	if err != nil {
+		return nil
+	}
+	out := mems[:0]
+	for _, m := range mems {
+		if m.Scope == "user" && m.ScopeID == user && m.Trust != "T4" && !domain.MemoryExcluded(ctx, m.ID) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal string) (domain.StepSuccess, error) {
 	res, err := r.Search(ctx, lease.TenantID, lease.RunID, goal, nil, 0)
 	if err != nil {
@@ -244,8 +268,18 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 		views = append(views, hitView{MemoryID: m.ID, Version: m.Version, Title: m.Title, Scope: m.Scope + ":" + m.ScopeID,
 			Trust: m.Trust, Score: res.Scores[m.ID], Branches: res.Branches[m.ID]})
 	}
+	// Personal memory of the user who started the run is pinned with the
+	// rest, so every step and retry of the run sees the same preferences.
+	personal := 0
+	for _, m := range r.personal(ctx, lease.TenantID, lease.RunID) {
+		personal++
+		hits = append(hits, domain.MemoryHit{MemoryID: m.ID, Version: m.Version, Rank: len(hits) + 1})
+		views = append(views, hitView{MemoryID: m.ID, Version: m.Version, Title: m.Title, Scope: "user", Trust: m.Trust,
+			Branches: []string{"personal"}})
+	}
 	out := map[string]any{"query": goal, "service": res.Service, "dependencies": res.Deps, "shards": res.Shards,
-		"candidates": res.Candidates, "embedding_model": r.Embedder.Model(), "hits": views, "conflicts": res.Conflicts}
+		"candidates": res.Candidates, "embedding_model": r.Embedder.Model(), "hits": views, "conflicts": res.Conflicts,
+		"personal": personal}
 	data, _ := json.Marshal(out)
 	ref, h, err := r.Artifacts.Put(ctx, lease.TenantID, "memory-retrieval", data)
 	if err != nil {
