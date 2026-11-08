@@ -495,6 +495,39 @@ func (s *Store) PrepareEffect(ctx context.Context, lease domain.Lease, target st
 	}
 }
 
+// RecordEffectResult confirms a dispatched side effect ahead of the step
+// commit, so a lost commit is retried by reusing the result (see store/pg).
+func (s *Store) RecordEffectResult(ctx context.Context, lease domain.Lease, target, resultRef string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.runs[lease.RunID]
+	if !ok || r.Status != domain.RunRunning || r.FenceToken != lease.FenceToken || r.LeaseOwner == nil ||
+		*r.LeaseOwner != lease.WorkerID || r.LeaseUntil == nil || !r.LeaseUntil.After(now()) {
+		return domain.ErrLeaseLost
+	}
+	e, ok := s.effects[lease.IdempotencyKey]
+	if !ok || e.State != "DISPATCHED" {
+		return fmt.Errorf("effect %s is not awaiting a result", lease.IdempotencyKey)
+	}
+	e.State, e.ResultRef, e.LastCheckAt = "CONFIRMED", resultRef, now()
+	s.saveEffect(e)
+	s.appendEvent(r.TenantID, r.ID, lease.StepID, lease.AttemptID, "effect.confirmed", "worker", lease.WorkerID,
+		map[string]string{"target": target, "result_ref": resultRef})
+	return nil
+}
+
+// AttemptStatus reports the lease's attempt status while it carries the
+// lease's fence (see store/pg).
+func (s *Store) AttemptStatus(ctx context.Context, lease domain.Lease) (domain.AttemptStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.attempts[lease.AttemptID]
+	if !ok || a.FenceToken != lease.FenceToken {
+		return "", domain.ErrNotFound
+	}
+	return domain.AttemptStatus(a.Status), nil
+}
+
 func (s *Store) History(ctx context.Context, tenantID, runID string, beforeSeq int64) ([]domain.Step, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

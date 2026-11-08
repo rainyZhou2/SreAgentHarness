@@ -46,6 +46,19 @@ type StateStore interface {
 	KVDataAt(ctx context.Context, key domain.KVKey, version int64) ([]byte, error)
 }
 
+// EffectRecorder is implemented by stores that can confirm a side effect
+// ahead of the step commit. With it, a commit lost after a successful effect
+// is recovered by reusing the recorded result instead of NEEDS_HUMAN.
+type EffectRecorder interface {
+	RecordEffectResult(ctx context.Context, lease domain.Lease, target, resultRef string) error
+}
+
+// AttemptInspector is implemented by stores that can report whether an
+// attempt was finished by its fence holder; it settles ambiguous commits.
+type AttemptInspector interface {
+	AttemptStatus(ctx context.Context, lease domain.Lease) (domain.AttemptStatus, error)
+}
+
 // ConversationReader is implemented by stores that persist conversation
 // turns; the worker renders earlier turns of the branch into the context.
 type ConversationReader interface {
@@ -70,7 +83,16 @@ type Config struct {
 	LeaseTTL          time.Duration
 	HeartbeatInterval time.Duration
 	StepTimeout       time.Duration
-	CommitTimeout     time.Duration
+	CommitTimeout     time.Duration // per commit try
+	// CommitRetryBudget bounds how long a failed step commit is retried
+	// (the lease stays renewed meanwhile). 0 = default 30s, <0 = one try.
+	CommitRetryBudget time.Duration
+	// LeaseSafetyMargin is subtracted, on top of one heartbeat interval, from
+	// the lease the worker believes it holds: it covers clock-rate drift
+	// between worker and database. The worker stops executing, and refuses
+	// to dispatch side effects, once that conservative lease runs out.
+	// 0 = default 2s; capped so the usable lease is at least half the TTL.
+	LeaseSafetyMargin time.Duration
 	MaxLocalSteps     int // steps executed back-to-back for one wake-up before yielding
 	MaxReasonInflight int // resource-class pools (§37.3)
 	MaxToolInflight   int
@@ -245,6 +267,12 @@ func (c *Config) defaults() {
 	if c.CommitTimeout == 0 {
 		c.CommitTimeout = 10 * time.Second
 	}
+	if c.CommitRetryBudget == 0 {
+		c.CommitRetryBudget = 30 * time.Second
+	}
+	if c.LeaseSafetyMargin == 0 {
+		c.LeaseSafetyMargin = 2 * time.Second
+	}
 	if c.MaxLocalSteps == 0 {
 		c.MaxLocalSteps = 20
 	}
@@ -339,6 +367,9 @@ func (w *Worker) HandleNotification(ctx context.Context, runID string) Dispositi
 // ExecuteOne runs exactly one step: claim (short tx) → execute outside any
 // transaction under lease heartbeat → fenced commit (short tx).
 func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
+	// The database starts the lease when it receives the claim, so the
+	// worker's conservative view of it starts before sending.
+	claimSent := time.Now()
 	lease, err := w.store.ClaimStep(ctx, runID, w.cfg.ID, w.cfg.LeaseTTL)
 	if err != nil {
 		w.cfg.Observer.ObserveClaim(claimResult(err))
@@ -374,35 +405,101 @@ func (w *Worker) ExecuteOne(ctx context.Context, runID string) (err error) {
 
 	execCtx, cancel := context.WithDeadline(ctx, lease.Deadline)
 	defer cancel()
-	hb := w.startHeartbeat(lease, cancel)
+	hb := w.startHeartbeat(lease, cancel, claimSent)
+	// The heartbeat keeps the lease alive through commit retries too.
+	defer hb.stop()
+	st.hb = hb
 
 	res, execErr := w.execute(execCtx, lease, st)
-	hb.stop()
 
-	if hb.lost.Load() {
+	if hb.confirmedLost.Load() {
+		// The database says another holder may own the step: our result
+		// cannot commit. A side effect we confirmed is reused by its retry.
 		log.Warn("lease lost during execution; dropping result")
 		outcome = "lease_lost"
 		return domain.ErrLeaseLost
 	}
-	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), w.cfg.CommitTimeout)
-	defer commitCancel()
+	// A self-fenced worker (renewals failing) still tries to commit: the
+	// fenced commit lets the database decide whether the lease is ours.
 
 	if execErr == nil && w.cfg.Checkpoints && !res.Complete {
 		w.attachCheckpoint(ctx, lease, &res)
 	}
+	commitBase := context.WithoutCancel(ctx)
 	if execErr != nil {
 		deadline := errors.Is(execCtx.Err(), context.DeadlineExceeded)
 		// The worker's own context ended (process shutdown), not the step.
 		shutdown := ctx.Err() != nil && !deadline
-		f := classify(execErr, st, hb.cancelRequested.Load(), deadline, shutdown)
+		f := classify(execErr, st, hb.cancelRequested.Load(), deadline, shutdown, hb.selfFenced.Load())
 		log.Info("step failed", "class", f.Class, "code", f.Code, "err", execErr)
 		outcome = failureOutcome(f.Class)
 		defer st.phases.since("commit", time.Now())
-		return w.store.CommitFailure(commitCtx, lease, f)
+		return w.commitWithRetry(commitBase, lease, hb, log, func(c context.Context) error {
+			return w.store.CommitFailure(c, lease, f)
+		})
 	}
 	res.Summary = withTimings(res.Summary, st.phases.millis())
 	defer st.phases.since("commit", time.Now())
-	return w.store.CommitSuccess(commitCtx, lease, res)
+	return w.commitWithRetry(commitBase, lease, hb, log, func(c context.Context) error {
+		return w.store.CommitSuccess(c, lease, res)
+	})
+}
+
+// commitWithRetry retries a fenced step commit through transient database
+// failures for up to CommitRetryBudget. Retrying is safe: a commit applies
+// only while the attempt is RUNNING under our fence, so at most one try
+// lands. When a try fails ambiguously (e.g. connection lost during COMMIT)
+// and a later one finds the lease gone, the attempt row tells whether the
+// earlier try landed.
+func (w *Worker) commitWithRetry(base context.Context, lease domain.Lease, hb *heartbeat, log *slog.Logger,
+	commit func(context.Context) error) error {
+	stop := time.Now().Add(max(w.cfg.CommitRetryBudget, 0))
+	backoff := 100 * time.Millisecond
+	var err error
+	for try := 0; ; try++ {
+		c, cancel := context.WithTimeout(base, w.cfg.CommitTimeout)
+		err = commit(c)
+		cancel()
+		switch {
+		case err == nil:
+			if try > 0 {
+				log.Info("step commit succeeded after retry", "tries", try+1)
+			}
+			return nil
+		case errors.Is(err, domain.ErrLeaseLost), hb.confirmedLost.Load():
+			// Our own landed commit releases the lease, so "lease lost" may
+			// mean success: the fenced attempt row decides.
+			if w.commitLanded(base, lease) {
+				log.Info("step commit landed on an earlier try", "tries", try+1)
+				return nil
+			}
+			return domain.ErrLeaseLost
+		case errors.Is(err, domain.ErrNotFound), base.Err() != nil, !time.Now().Add(backoff).Before(stop):
+			return err
+		}
+		log.Warn("step commit failed; retrying", "try", try+1, "err", err)
+		t := time.NewTimer(backoff)
+		select {
+		case <-base.Done():
+			t.Stop()
+			return err
+		case <-t.C:
+		}
+		backoff = min(backoff*2, 2*time.Second)
+	}
+}
+
+// commitLanded reports whether our attempt was finished by a commit of ours.
+// LOST means recovery took it; RUNNING means nothing landed.
+func (w *Worker) commitLanded(ctx context.Context, lease domain.Lease) bool {
+	insp, ok := w.store.(AttemptInspector)
+	if !ok {
+		return false
+	}
+	c, cancel := context.WithTimeout(ctx, w.cfg.CommitTimeout)
+	defer cancel()
+	st, err := insp.AttemptStatus(c, lease)
+	return err == nil && st != "" && st != domain.AttemptRunning && st != domain.AttemptLost
 }
 
 // withTimings adds the step's phase times (ms) to its summary.
@@ -421,14 +518,20 @@ func withTimings(summary json.RawMessage, ms map[string]int64) json.RawMessage {
 type execState struct {
 	dispatched bool // a side-effecting call may have reached the external system
 	phases     phases
+	hb         *heartbeat // nil when a step runs outside ExecuteOne
 }
 
-func classify(err error, st *execState, cancelRequested, deadline, shutdown bool) domain.StepFailure {
+func classify(err error, st *execState, cancelRequested, deadline, shutdown, selfFenced bool) domain.StepFailure {
 	msg := err.Error()
 	var re *domain.RetryableError
 	switch {
 	case errors.Is(err, domain.ErrUnknownEffect):
 		return domain.StepFailure{Class: domain.FailUnknownEffect, Code: "EFFECT_UNKNOWN", Message: msg}
+	case selfFenced && st.dispatched:
+		// We stopped because we could no longer prove we held the lease.
+		return domain.StepFailure{Class: domain.FailUnknownEffect, Code: "LEASE_UNCERTAIN_AFTER_DISPATCH", Message: msg}
+	case selfFenced:
+		return domain.StepFailure{Class: domain.FailRetryable, Code: "LEASE_UNCERTAIN", Message: msg}
 	case shutdown && st.dispatched:
 		return domain.StepFailure{Class: domain.FailUnknownEffect, Code: "SHUTDOWN_AFTER_DISPATCH", Message: msg}
 	case shutdown && !cancelRequested:
@@ -457,54 +560,114 @@ func classify(err error, st *execState, cancelRequested, deadline, shutdown bool
 // ---------- heartbeat ----------
 
 type heartbeat struct {
-	lost            atomic.Bool
+	// confirmedLost: the database rejected a renewal (another holder may
+	// own the step). selfFenced: renewals kept failing until our
+	// conservative view of the lease ran out; the database may still
+	// consider it ours, so a fenced commit is still attempted.
+	confirmedLost   atomic.Bool
+	selfFenced      atomic.Bool
 	cancelRequested atomic.Bool
 	done            chan struct{}
 	wg              sync.WaitGroup
+	once            sync.Once
+
+	w      *Worker
+	lease  domain.Lease
+	cancel context.CancelFunc
+
+	mu        sync.Mutex
+	lastRenew time.Time // send time of the newest successful renewal (or claim)
+	renewMu   sync.Mutex
 }
 
 func (h *heartbeat) stop() {
-	close(h.done)
-	h.wg.Wait()
+	h.once.Do(func() {
+		close(h.done)
+		h.wg.Wait()
+	})
+}
+
+// usableLease is how long the worker may still assume it holds the lease:
+// the TTL counted from when the last successful renewal was *sent* (the
+// database may have stamped it any time after), minus one heartbeat interval
+// and the drift margin.
+func (w *Worker) leaseSafety() time.Duration {
+	return min(w.cfg.HeartbeatInterval+w.cfg.LeaseSafetyMargin, w.cfg.LeaseTTL/2)
+}
+
+func (h *heartbeat) remaining() time.Duration {
+	h.mu.Lock()
+	last := h.lastRenew
+	h.mu.Unlock()
+	return time.Until(last.Add(h.w.cfg.LeaseTTL - h.w.leaseSafety()))
+}
+
+// renew extends the lease once. Concurrent callers are serialized so a slow
+// renewal cannot overwrite a newer send time.
+func (h *heartbeat) renew() {
+	h.renewMu.Lock()
+	defer h.renewMu.Unlock()
+	if h.confirmedLost.Load() {
+		return
+	}
+	sent := time.Now()
+	ctx, c := context.WithTimeout(context.Background(), h.w.cfg.HeartbeatInterval)
+	desired, err := h.w.store.RenewLease(ctx, h.lease, h.w.cfg.LeaseTTL)
+	c()
+	switch {
+	case errors.Is(err, domain.ErrLeaseLost):
+		h.confirmedLost.Store(true)
+		h.cancel()
+	case err != nil:
+		// Transient DB error: keep trying, but never outlive our own lease.
+		if h.remaining() <= 0 && !h.selfFenced.Swap(true) {
+			h.cancel()
+		}
+	default:
+		h.mu.Lock()
+		if sent.After(h.lastRenew) {
+			h.lastRenew = sent
+		}
+		h.mu.Unlock()
+		if desired == domain.DesiredCancelled && !h.cancelRequested.Swap(true) {
+			h.cancel()
+		}
+	}
+}
+
+// ensure makes sure at least min of usable lease is left, renewing
+// synchronously if needed. Side effects are dispatched only after it
+// succeeds, so a worker that cannot reach the database never starts one.
+func (h *heartbeat) ensure(min time.Duration) bool {
+	if h.confirmedLost.Load() || h.selfFenced.Load() {
+		return false
+	}
+	if h.remaining() >= min {
+		return true
+	}
+	h.renew()
+	return !h.confirmedLost.Load() && !h.selfFenced.Load() && h.remaining() >= min
 }
 
 // startHeartbeat renews the lease; on loss it cancels execution so the
 // executor stops early, and on a cancel request it cancels cooperatively.
-func (w *Worker) startHeartbeat(lease domain.Lease, cancel context.CancelFunc) *heartbeat {
-	h := &heartbeat{done: make(chan struct{})}
+// validFrom is when the claim was sent.
+func (w *Worker) startHeartbeat(lease domain.Lease, cancel context.CancelFunc, validFrom time.Time) *heartbeat {
+	h := &heartbeat{done: make(chan struct{}), w: w, lease: lease, cancel: cancel, lastRenew: validFrom}
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
 		t := time.NewTicker(w.cfg.HeartbeatInterval)
 		defer t.Stop()
-		lastRenew := time.Now()
 		for {
 			select {
 			case <-h.done:
 				return
 			case <-t.C:
 			}
-			ctx, c := context.WithTimeout(context.Background(), w.cfg.HeartbeatInterval)
-			desired, err := w.store.RenewLease(ctx, lease, w.cfg.LeaseTTL)
-			c()
-			switch {
-			case errors.Is(err, domain.ErrLeaseLost):
-				h.lost.Store(true)
-				cancel()
+			h.renew()
+			if h.confirmedLost.Load() {
 				return
-			case err != nil:
-				// Transient DB error: keep trying, but never outlive our own lease.
-				if time.Since(lastRenew) > w.cfg.LeaseTTL-w.cfg.HeartbeatInterval {
-					h.lost.Store(true)
-					cancel()
-					return
-				}
-			default:
-				lastRenew = time.Now()
-				if desired == domain.DesiredCancelled && !h.cancelRequested.Load() {
-					h.cancelRequested.Store(true)
-					cancel()
-				}
 			}
 		}
 	}()
@@ -1244,6 +1407,12 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	}
 
 	if sideEffect {
+		// Dispatch only with a provably live lease: a worker that cannot
+		// renew must not start an effect another holder might repeat.
+		if st.hb != nil && !st.hb.ensure(w.cfg.HeartbeatInterval) {
+			return domain.StepSuccess{}, domain.Retryable(
+				fmt.Errorf("lease cannot be confirmed; %q not dispatched", call.Name), 0)
+		}
 		state, priorRef, err := w.store.PrepareEffect(ctx, lease, target)
 		if err != nil {
 			return domain.StepSuccess{}, err // ErrUnknownEffect: do not call the tool again
@@ -1343,6 +1512,9 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		}
 		return domain.StepSuccess{}, err
 	}
+	if sideEffect {
+		w.recordEffect(ctx, lease, target, ref)
+	}
 	summary := map[string]any{"tool": call.Name, "risk": desc.Risk}
 	if obs.Artifact != nil {
 		summary["offloaded_bytes"] = obs.Artifact.Bytes
@@ -1365,6 +1537,21 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	thoughts, caps := toolTrace(call.Name, desc, true)
 	return domain.StepSuccess{OutputRef: ref, OutputHash: h, ArtifactKind: "observation", SideEffect: sideEffect,
 		Plan: plan, Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(summary)}, nil
+}
+
+// recordEffect confirms an applied side effect before the step commit, so
+// losing that commit does not turn a known outcome into an unknown one. It is
+// best effort: on failure the commit still confirms the effect, as before.
+func (w *Worker) recordEffect(ctx context.Context, lease domain.Lease, target, ref string) {
+	rec, ok := w.store.(EffectRecorder)
+	if !ok {
+		return
+	}
+	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.cfg.CommitTimeout)
+	defer cancel()
+	if err := rec.RecordEffectResult(c, lease, target, ref); err != nil {
+		w.log.Warn("record effect result", "run_id", lease.RunID, "step_seq", lease.StepSeq, "err", err)
+	}
 }
 
 // withVerify puts a planned verification first. A verification waiting for

@@ -66,10 +66,26 @@ type Config struct {
 	// RequireDistinctApprover forbids the run's initiator from approving its
 	// own tool actions (separation of duties, §19).
 	RequireDistinctApprover bool
+	// Kernel transactions (claim, commit, effect ledger, lease recovery) run
+	// with these per-transaction limits so one stuck lock holder cannot stall
+	// the execution plane (0 = default, <0 = leave the server setting).
+	LockTimeout      time.Duration
+	StatementTimeout time.Duration
+	// TxRetries is how many extra times a kernel transaction is re-run after
+	// a failure PostgreSQL guarantees rolled it back (serialization failure,
+	// deadlock, lock timeout, error before send). 0 = default, <0 = none.
+	TxRetries int
 }
 
+const (
+	DefaultLockTimeout      = 2 * time.Second
+	DefaultStatementTimeout = 10 * time.Second
+	DefaultTxRetries        = 3
+)
+
 func DefaultConfig() Config {
-	return Config{MaxStepsPerRun: 100, MaxAttempts: 3, DefaultRetryDelay: 2 * time.Second, ApprovalTTL: 30 * time.Minute}
+	return Config{MaxStepsPerRun: 100, MaxAttempts: 3, DefaultRetryDelay: 2 * time.Second, ApprovalTTL: 30 * time.Minute,
+		LockTimeout: DefaultLockTimeout, StatementTimeout: DefaultStatementTimeout, TxRetries: DefaultTxRetries}
 }
 
 type Store struct {
@@ -82,6 +98,15 @@ type Store struct {
 func New(pool *pgxpool.Pool, cfg Config) *Store {
 	if cfg.MaxStepsPerRun == 0 {
 		cfg = DefaultConfig()
+	}
+	if cfg.LockTimeout == 0 {
+		cfg.LockTimeout = DefaultLockTimeout
+	}
+	if cfg.StatementTimeout == 0 {
+		cfg.StatementTimeout = DefaultStatementTimeout
+	}
+	if cfg.TxRetries == 0 {
+		cfg.TxRetries = DefaultTxRetries
 	}
 	return &Store{pool: pool, cfg: cfg}
 }
@@ -128,6 +153,69 @@ func ptr[T any](v T) *T { return &v }
 
 func (s *Store) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return pgx.BeginFunc(ctx, s.pool, fn)
+}
+
+// inKernelTx runs a kernel-plane transaction: bounded lock and statement
+// waits, and a transparent re-run when PostgreSQL guarantees the attempt was
+// rolled back. fn must be safe to re-run: it may only assign (not accumulate)
+// captured variables. Ambiguous failures (connection lost during COMMIT) are
+// returned to the caller, which settles them against the fenced attempt row.
+func (s *Store) inKernelTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	retries := max(s.cfg.TxRetries, 0)
+	for i := 0; ; i++ {
+		err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+			if err := s.applyTxLimits(ctx, tx); err != nil {
+				return err
+			}
+			return fn(tx)
+		})
+		if err == nil || i >= retries || ctx.Err() != nil || !RetryableTxError(err) {
+			return err
+		}
+		delay := time.Duration(25<<i) * time.Millisecond
+		delay += time.Duration(time.Now().UnixNano() % int64(delay)) // jitter
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return err
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Store) applyTxLimits(ctx context.Context, tx pgx.Tx) error {
+	lock, stmt := pgMillis(s.cfg.LockTimeout), pgMillis(s.cfg.StatementTimeout)
+	if lock == "" && stmt == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true) WHERE $1 <> '' UNION ALL
+		SELECT set_config('statement_timeout', $2, true) WHERE $2 <> ''`, lock, stmt)
+	return err
+}
+
+func pgMillis(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%dms", max(d.Milliseconds(), 1))
+}
+
+// RetryableTxError reports whether err guarantees the transaction did not
+// commit, so running it again cannot apply it twice.
+func RetryableTxError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "40001", // serialization_failure
+			"40P01", // deadlock_detected
+			"55P03", // lock_not_available (lock_timeout)
+			"57014": // query_canceled (statement_timeout; caller cancellation is checked first)
+			return true
+		}
+		return false
+	}
+	return pgconn.SafeToRetry(err)
 }
 
 // ---------- run row locking and mutation ----------

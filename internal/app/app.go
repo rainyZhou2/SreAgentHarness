@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
@@ -108,6 +109,15 @@ func Run(ctx context.Context, mode string, getenv func(string) string, log *slog
 		return err
 	}
 	pg.ConfigureRLS(pcfg)
+	// A session left idle inside a transaction holds its row locks (often a
+	// run row) until the server ends it; cap that (0 disables).
+	if idle := e.dur("HARNESS_DB_IDLE_TX_TIMEOUT", time.Minute); idle > 0 {
+		pcfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+			_, err := c.Exec(ctx, `SELECT set_config('idle_in_transaction_session_timeout', $1, false)`,
+				fmt.Sprintf("%dms", idle.Milliseconds()))
+			return err
+		}
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		return err
@@ -167,6 +177,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	cfg.MemoryRetrieval = e.bool("HARNESS_MEMORY_RETRIEVAL", true) && len(specs["memory_retriever"].Enabled()) > 0
 	cfg.MaxRunningPerTenant = e.int("HARNESS_MAX_RUNNING_PER_TENANT", 0)
 	cfg.RequireDistinctApprover = e.bool("HARNESS_REQUIRE_DISTINCT_APPROVER", false)
+	cfg.LockTimeout = e.dur("HARNESS_DB_LOCK_TIMEOUT", cfg.LockTimeout)
+	cfg.StatementTimeout = e.dur("HARNESS_DB_STATEMENT_TIMEOUT", cfg.StatementTimeout)
+	cfg.TxRetries = e.int("HARNESS_DB_TX_RETRIES", cfg.TxRetries)
 	store := pg.New(pool, cfg)
 	metrics.Reg.Collect("harness_runs", "Non-terminal runs by status.", func(ctx context.Context, emit func(string, map[string]string, float64)) {
 		if m, err := store.RunsByStatus(ctx); err == nil {
@@ -518,6 +531,8 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			ID:                  e.str("HARNESS_WORKER_ID", fmt.Sprintf("%s-%d", hostname, os.Getpid())),
 			LeaseTTL:            e.dur("HARNESS_LEASE_TTL", 45*time.Second),
 			StepTimeout:         e.dur("HARNESS_STEP_TIMEOUT", 2*time.Minute),
+			CommitRetryBudget:   e.dur("HARNESS_COMMIT_RETRY_BUDGET", 0),
+			LeaseSafetyMargin:   e.dur("HARNESS_LEASE_SAFETY_MARGIN", 0),
 			Checkpoints:         e.bool("HARNESS_CHECKPOINTS", true),
 			Memory:              retriever,
 			PlanMemory:          planMemory,

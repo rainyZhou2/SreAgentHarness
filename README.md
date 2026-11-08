@@ -24,7 +24,7 @@ A cognitive agent runtime for SRE: every reasoning step and tool call runs as a 
 
 | Area | Capability |
 |---|---|
-| **Durable execution** | Run/Step/Attempt state machine, step-level leases + fence tokens, resume after a crash |
+| **Durable execution** | Run/Step/Attempt state machine, step-level leases + fence tokens, resume after a crash; side-effect results are recorded before the step commit, so a lost commit never turns a known outcome into a human escalation |
 | **Safe execution** | R0–R3 risk classes, approvals bound to `action_hash`, single-use grants, side-effect ledger; unknown outcomes go to `NEEDS_HUMAN` and are never replayed |
 | **Conversations** | Session / Turn / Branch, single-writer queue, branch fork, replayable messages and events |
 | **Model gateway** | Alias → hard filters → soft-score routing, circuit breakers, budget and concurrency admission, fallback only while "not yet sent"; Claude, OpenAI-compatible and Gemini |
@@ -290,6 +290,10 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_COMPACT_TOKENS` | compact history when uncompacted tool results exceed about this many tokens (default 16000; negative: step count only) |
 | `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | model alias for routine investigation steps and for the steps that decide the outcome (default: the strategy's alias) |
 | `HARNESS_SPECULATIVE_TOOLS` | start allowed read-only calls while the model is still streaming and reuse the result in the tool step (default `false`) |
+| `HARNESS_LEASE_SAFETY_MARGIN` | drift margin the worker subtracts (on top of one heartbeat interval) from its lease; it stops executing, and never dispatches a side effect, once that conservative lease runs out (default `2s`) |
+| `HARNESS_COMMIT_RETRY_BUDGET` | how long a failed step commit is retried while the lease is kept alive (default `30s`; negative: one try). A commit that failed ambiguously is settled from the fenced attempt row |
+| `HARNESS_DB_LOCK_TIMEOUT` / `HARNESS_DB_STATEMENT_TIMEOUT` / `HARNESS_DB_TX_RETRIES` | per-transaction limits for kernel transactions (claim, commit, effect ledger, lease recovery; defaults `2s` / `10s`) and re-runs after failures PostgreSQL guarantees rolled back (serialization, deadlock, lock timeout; default 3) |
+| `HARNESS_DB_IDLE_TX_TIMEOUT` | `idle_in_transaction_session_timeout` for every pool connection (default `1m`; `0` disables) |
 | `HARNESS_SHORT_TERM_MESSAGES` | earlier conversation messages rendered verbatim (default 12; older ones are condensed into a digest; negative: all) |
 | `HARNESS_EMBEDDING_BASE_URL` / `_MODEL` / `_DIMENSIONS` / `_API_KEY_ENV` | desktop runtime: use an OpenAI-compatible embeddings endpoint instead of the hashing embedder; the key is read from the variable named by `_API_KEY_ENV` (default `HARNESS_EMBEDDING_API_KEY`). The server configures `embedder: {name: http, …}` in `HARNESS_CONFIG` |
 

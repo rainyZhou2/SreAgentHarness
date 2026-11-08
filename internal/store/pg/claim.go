@@ -22,7 +22,7 @@ import (
 func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.Duration) (domain.Lease, error) {
 	var lease domain.Lease
 	var outcome error
-	err := s.inTx(ctx, func(tx pgx.Tx) error {
+	err := s.inKernelTx(ctx, func(tx pgx.Tx) error {
 		r, err := s.lockRun(ctx, tx, "", runID)
 		if err != nil {
 			return err

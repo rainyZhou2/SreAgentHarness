@@ -26,7 +26,9 @@ func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error
 	n := 0
 	var errs []error
 	for _, id := range ids {
-		err := s.inTx(ctx, func(tx pgx.Tx) error {
+		recovered := false
+		err := s.inKernelTx(ctx, func(tx pgx.Tx) error {
+			recovered = false
 			r, err := s.lockRun(ctx, tx, "", id)
 			if err != nil {
 				return err
@@ -40,11 +42,13 @@ func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error
 			if err := r.settle(ctx); err != nil {
 				return err
 			}
-			n++
+			recovered = true
 			return r.save(ctx)
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("run %s: %w", id, err))
+		} else if recovered {
+			n++
 		}
 	}
 	return n, errors.Join(errs...)
