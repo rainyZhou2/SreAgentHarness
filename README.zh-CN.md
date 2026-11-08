@@ -24,7 +24,7 @@
 
 | 领域 | 能力 |
 |---|---|
-| **持久执行** | Run/Step/Attempt 状态机，Step 级租约 + Fence Token，进程崩溃后从断点恢复 |
+| **持久执行** | Run/Step/Attempt 状态机，Step 级租约 + Fence Token，进程崩溃后从断点恢复；副作用结果先于步骤提交落账，提交丢失也不会把已知结果变成人工处理 |
 | **安全执行** | R0–R3 风险分级、审批绑定 `action_hash`、一次性授权、副作用账本；结果未知进入 `NEEDS_HUMAN`，绝不自动重放 |
 | **对话** | Session / Turn / Branch，单写者队列，分支 fork，消息与事件可回放 |
 | **模型网关** | Alias → 硬过滤 → 软评分路由，熔断、预算与并发准入，仅在"未发送"时 fallback；支持 Claude、OpenAI 兼容、Gemini |
@@ -290,6 +290,10 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_COMPACT_TOKENS` | 未压缩的工具结果超过约这么多 token 时压缩历史（默认 16000；负数只按步数） |
 | `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | 常规调查步使用的模型 alias，以及决定结果的步骤使用的 alias（默认沿用策略自身的 alias） |
 | `HARNESS_SPECULATIVE_TOOLS` | 模型仍在流式输出时提前执行允许的只读调用，工具步直接复用结果（默认 `false`） |
+| `HARNESS_LEASE_SAFETY_MARGIN` | worker 在心跳间隔之外，再从租约中扣除的时钟漂移余量；按这个保守估计租约耗尽后即停止执行，也绝不派发副作用（默认 `2s`） |
+| `HARNESS_COMMIT_RETRY_BUDGET` | 步骤提交失败后、在保持租约的同时重试的时长（默认 `30s`；负数只试一次）。结果不明的提交由带 Fence 的 attempt 行判定是否已落库 |
+| `HARNESS_DB_LOCK_TIMEOUT` / `HARNESS_DB_STATEMENT_TIMEOUT` / `HARNESS_DB_TX_RETRIES` | 内核事务（领取、提交、副作用账本、租约恢复）的单事务锁等待与语句超时（默认 `2s` / `10s`），以及在 PostgreSQL 保证已回滚的失败（序列化冲突、死锁、锁超时）后的重跑次数（默认 3） |
+| `HARNESS_DB_IDLE_TX_TIMEOUT` | 连接池每个连接的 `idle_in_transaction_session_timeout`（默认 `1m`；`0` 关闭） |
 | `HARNESS_SHORT_TERM_MESSAGES` | 原样保留的历史对话消息数（默认 12；更早的消息压缩为摘要；负数全部保留） |
 | `HARNESS_EMBEDDING_BASE_URL` / `_MODEL` / `_DIMENSIONS` / `_API_KEY_ENV` | 桌面运行时：使用 OpenAI 兼容的 embeddings 接口替代哈希 embedder；密钥从 `_API_KEY_ENV` 指定的变量读取（默认 `HARNESS_EMBEDDING_API_KEY`）。服务端在 `HARNESS_CONFIG` 中配置 `embedder: {name: http, …}` |
 

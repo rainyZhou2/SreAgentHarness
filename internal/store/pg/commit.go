@@ -15,7 +15,7 @@ import (
 // cognitive artifact, run-private KV, effect confirmation, events, next steps,
 // lease release and wake-up — one transaction. A stale worker gets ErrLeaseLost.
 func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepSuccess) error {
-	return s.inTx(ctx, func(tx pgx.Tx) error {
+	return s.inKernelTx(ctx, func(tx pgx.Tx) error {
 		r, err := s.lockLeased(ctx, tx, lease)
 		if err != nil {
 			return err
@@ -288,15 +288,16 @@ func lowerStatus(st domain.AttemptStatus) string {
 
 // CommitFailure records a failed attempt with the correct recovery semantics.
 func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFailure) error {
-	return s.inTx(ctx, func(tx pgx.Tx) error {
+	return s.inKernelTx(ctx, func(tx pgx.Tx) error {
 		r, err := s.lockLeased(ctx, tx, lease)
 		if err != nil {
 			return err
 		}
-		class := f.Class
+		// Locals only: inKernelTx may re-run this function.
+		class, msg := f.Class, f.Message
 		if class == FailRetryable && lease.AttemptNo >= s.cfg.MaxAttempts {
 			class = FailPermanent
-			f.Message = "attempts exhausted: " + f.Message
+			msg = "attempts exhausted: " + msg
 		}
 		attemptStatus := domain.AttemptFailed
 		switch {
@@ -307,7 +308,7 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFai
 		case class == FailUnknownEffect:
 			attemptStatus = domain.AttemptUnknown
 		}
-		if err := s.finishAttempt(ctx, r, lease, attemptStatus, f.Code, f.Message); err != nil {
+		if err := s.finishAttempt(ctx, r, lease, attemptStatus, f.Code, msg); err != nil {
 			return err
 		}
 		r.releaseLease()
@@ -338,10 +339,10 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFai
 				return err
 			}
 			if err := r.event(ctx, "step.failed", "worker", lease.WorkerID, &lease.StepID, &lease.AttemptID,
-				map[string]string{"error_code": f.Code, "message": f.Message}); err != nil {
+				map[string]string{"error_code": f.Code, "message": msg}); err != nil {
 				return err
 			}
-			if err := r.fail(ctx, f.Code+": "+f.Message); err != nil {
+			if err := r.fail(ctx, f.Code+": "+msg); err != nil {
 				return err
 			}
 		case FailUnknownEffect:
@@ -351,7 +352,7 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFai
 			effectState = "UNKNOWN"
 			r.setStatus(domain.RunNeedsHuman)
 			if err := r.event(ctx, "step.unknown", "worker", lease.WorkerID, &lease.StepID, &lease.AttemptID,
-				map[string]string{"error_code": f.Code, "message": f.Message}); err != nil {
+				map[string]string{"error_code": f.Code, "message": msg}); err != nil {
 				return err
 			}
 		case FailCancelled:
@@ -384,7 +385,7 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFai
 			}
 		}
 		if lease.ParentRunID != "" && class == FailUnknownEffect {
-			if err := s.flowChildFinished(ctx, r, lease, "FAILED", "", f.Message); err != nil {
+			if err := s.flowChildFinished(ctx, r, lease, "FAILED", "", msg); err != nil {
 				return err
 			}
 		}
@@ -398,7 +399,7 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f StepFai
 func (s *Store) PrepareEffect(ctx context.Context, lease domain.Lease, target string) (EffectState, string, error) {
 	var state EffectState
 	var resultRef *string
-	err := s.inTx(ctx, func(tx pgx.Tx) error {
+	err := s.inKernelTx(ctx, func(tx pgx.Tx) error {
 		if _, err := s.lockLeased(ctx, tx, lease); err != nil {
 			return err
 		}
@@ -431,6 +432,48 @@ func (s *Store) PrepareEffect(ctx context.Context, lease domain.Lease, target st
 		ref = *resultRef
 	}
 	return state, ref, err
+}
+
+// RecordEffectResult confirms a dispatched side effect as soon as the tool
+// returned and its observation is stored, ahead of the step commit. If that
+// commit is then lost (database failover, worker crash), recovery finds the
+// effect CONFIRMED and the retried step reuses resultRef instead of parking
+// the run for a human. Fenced like every other worker write.
+func (s *Store) RecordEffectResult(ctx context.Context, lease domain.Lease, target, resultRef string) error {
+	return s.inKernelTx(ctx, func(tx pgx.Tx) error {
+		r, err := s.lockLeased(ctx, tx, lease)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE external_tool_effects SET state='CONFIRMED', result_ref=$4, last_check_at=now()
+			WHERE tenant_id=$1 AND idempotency_key=$2 AND target=$3 AND state='DISPATCHED'`,
+			lease.TenantID, lease.IdempotencyKey, target, resultRef)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("effect %s is not awaiting a result", lease.IdempotencyKey)
+		}
+		if err := r.event(ctx, "effect.confirmed", "worker", lease.WorkerID, &lease.StepID, &lease.AttemptID,
+			map[string]string{"target": target, "result_ref": resultRef}); err != nil {
+			return err
+		}
+		return r.save(ctx)
+	})
+}
+
+// AttemptStatus reports the status of the lease's attempt, provided it still
+// carries the lease's fence. A worker whose commit failed ambiguously uses it
+// to learn whether that commit landed: only the fence holder can move its
+// attempt out of RUNNING other than to LOST.
+func (s *Store) AttemptStatus(ctx context.Context, lease domain.Lease) (domain.AttemptStatus, error) {
+	var st domain.AttemptStatus
+	err := s.pool.QueryRow(ctx, `SELECT status FROM step_attempts WHERE id=$1 AND tenant_id=$2 AND fence_token=$3`,
+		lease.AttemptID, lease.TenantID, lease.FenceToken).Scan(&st)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", domain.ErrNotFound
+	}
+	return st, err
 }
 
 // checkpoint records a resumable boundary after a committed step (§29.4).
