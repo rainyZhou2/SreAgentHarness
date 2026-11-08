@@ -283,6 +283,19 @@ type Decision struct {
 	DeferredToolCalls []ToolCall    `json:"deferred_tool_calls,omitempty"`
 	MemoryRefs        []string      `json:"memory_refs,omitempty"`
 	Thought           *ThoughtChain `json:"thought,omitempty"`
+	// Consistency is set when the conclusion was sampled several times.
+	Consistency *Consistency `json:"consistency,omitempty"`
+}
+
+// Consistency records a self-consistency vote over sampled conclusions.
+type Consistency struct {
+	Samples int `json:"samples"`
+	// Agreement is the share of samples in the chosen conclusion's cluster.
+	Agreement float64 `json:"agreement"`
+	// Alternatives summarizes the conclusions of the other clusters.
+	Alternatives []string `json:"alternatives,omitempty"`
+	// ModelRequestIDs are the extra samples' ledger requests.
+	ModelRequestIDs []string `json:"model_request_ids,omitempty"`
 }
 
 // Observation is a tool result (or a policy/approval outcome) fed back to reasoning.

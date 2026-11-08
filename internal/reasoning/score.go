@@ -80,8 +80,65 @@ type Metrics struct {
 	// counted as unverified.
 	UnsupportedVerdicts   int  `json:"unsupported_verdicts"`
 	UnsupportedConclusion bool `json:"unsupported_conclusion,omitempty"`
+	// Independent is the last independent verifier verdict (SUPPORTED,
+	// CONTRADICTED, INSUFFICIENT; "" when none ran). Backtracks counts
+	// conclusions the verifier handed back before the final one.
+	Independent string `json:"independent,omitempty"`
+	Backtracks  int    `json:"backtracks,omitempty"`
+	// Agreement is the self-consistency agreement of the final conclusion
+	// (0: not sampled).
+	Agreement float64 `json:"agreement,omitempty"`
+	// Forecasts are the hypotheses' first stated confidences and how they
+	// settled, for post-hoc calibration (at most MaxForecasts).
+	Forecasts []Forecast `json:"forecasts,omitempty"`
+	// CalibratedBrier is the Brier score of the calibrated confidences the
+	// kernel recorded (nil: no calibrator was applied).
+	CalibratedBrier *float64 `json:"calibrated_brier,omitempty"`
+	// Digest is a bounded, content-light description of the run for
+	// failure analysis (nil for runs without reasoning steps).
+	Digest *Digest `json:"digest,omitempty"`
 	// Plan describes how the run was planned (nil: not planned).
 	Plan *PlanMetrics `json:"plan,omitempty"`
+}
+
+// Thought attributes written by the kernel.
+const (
+	// CheckerAttr marks a verification thought written by a checker other
+	// than the agent; IndependentChecker is the independent verifier.
+	CheckerAttr        = "checker"
+	IndependentChecker = "independent"
+	// TrackingAttr marks hypotheses the agent listed while investigating
+	// (not claims of a conclusion).
+	TrackingAttr = "tracking"
+	// CalibratedAttr is the calibrated confidence of a hypothesis.
+	CalibratedAttr = "calibrated_confidence"
+	// MaxForecasts bounds Metrics.Forecasts.
+	MaxForecasts = 32
+)
+
+// Forecast is one stated confidence and its outcome.
+type Forecast struct {
+	P float64 `json:"p"`
+	Y int     `json:"y"`
+	// Independent is set when the independent verifier judged the
+	// hypothesis; its verdict decided Y.
+	Independent bool `json:"independent,omitempty"`
+}
+
+// Digest describes a run by its reasoning structure.
+type Digest struct {
+	Hypotheses []DigestHypothesis `json:"hypotheses,omitempty"`
+	Tools      []string           `json:"tools,omitempty"`
+	Issues     []string           `json:"issues,omitempty"`
+}
+
+// DigestHypothesis is one hypothesis of a digest.
+type DigestHypothesis struct {
+	Statement  string  `json:"statement"`
+	Status     string  `json:"status"`
+	Confidence float64 `json:"confidence,omitempty"`
+	// Verdict is the independent verifier's verdict on it, if any.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // HypothesisIDAttr is the thought attribute carrying the model's stable
@@ -127,6 +184,43 @@ type hyp struct {
 	status     domain.ThoughtStatus
 	confidence float64
 	supported  bool // some version cited a resolved ref
+	// first is the confidence stated before the hypothesis settled (the
+	// forecast); calibrated the last calibrated confidence.
+	first, calibrated float64
+	id, statement     string
+}
+
+// attrString reads a string thought attribute.
+func attrString(th domain.Thought, k string) string {
+	s, _ := th.Attrs[k].(string)
+	return s
+}
+
+// independentClaims reads the per-claim verdicts of an independent
+// verification thought (fresh maps or decoded JSON).
+func independentClaims(th domain.Thought) map[string]string {
+	out := map[string]string{}
+	add := func(m map[string]any) {
+		id, _ := m["id"].(string)
+		v, _ := m["verdict"].(string)
+		kind, _ := m["kind"].(string)
+		if id != "" && v != "" && kind == "hypothesis" {
+			out[strings.ToLower(strings.TrimSpace(id))] = v
+		}
+	}
+	switch cs := th.Attrs["claims"].(type) {
+	case []map[string]any:
+		for _, c := range cs {
+			add(c)
+		}
+	case []any:
+		for _, c := range cs {
+			if m, ok := c.(map[string]any); ok {
+				add(m)
+			}
+		}
+	}
+	return out
 }
 
 // isCitation reports whether a ref is a model citation (not a server link
@@ -158,7 +252,13 @@ func Score(t Trace) Metrics {
 	thoughts, structured := 0, 0
 	cited := map[string]bool{}
 	verificationSupported := false
+	claimVerdicts := map[string]string{}
+	var issues []string
+	var tools []string
 	for _, s := range t.Steps {
+		if s.Tool != "" && len(tools) < 12 {
+			tools = append(tools, s.Tool)
+		}
 		stepRefs := map[string]bool{}
 		if s.Tool != "" {
 			m.ToolCalls++
@@ -173,6 +273,23 @@ func Score(t Trace) Metrics {
 		}
 		for _, th := range s.Thoughts {
 			if th.Kind == domain.ThoughtObservation {
+				continue
+			}
+			if th.Kind == domain.ThoughtVerification && attrString(th, CheckerAttr) == IndependentChecker {
+				v := attrString(th, "verdict")
+				if m.Independent != "" && m.Independent != "SUPPORTED" {
+					m.Backtracks++
+				}
+				m.Independent = v
+				if a, ok := th.Attrs["agreement"].(float64); ok {
+					m.Agreement = a
+				}
+				for id, cv := range independentClaims(th) {
+					claimVerdicts[id] = cv
+				}
+				if v != "SUPPORTED" && len(issues) < 6 {
+					issues = append(issues, clip(oneLine(th.Summary), 300))
+				}
 				continue
 			}
 			thoughts++
@@ -197,10 +314,12 @@ func Score(t Trace) Metrics {
 			}
 			switch th.Kind {
 			case domain.ThoughtHypothesis:
-				m.Claims++
 				grounded := hasResolvedCitation(th)
-				if grounded {
-					m.Grounded++
+				if th.Attrs[TrackingAttr] != true {
+					m.Claims++
+					if grounded {
+						m.Grounded++
+					}
 				}
 				k := hypKey(th)
 				if k == "" {
@@ -210,9 +329,19 @@ func Score(t Trace) Metrics {
 					order = append(order, k)
 				}
 				prev := hyps[k]
-				h := hyp{status: th.Status, confidence: th.Confidence, supported: prev.supported || grounded}
+				h := hyp{status: th.Status, confidence: th.Confidence, supported: prev.supported || grounded,
+					first: prev.first, calibrated: prev.calibrated, id: prev.id, statement: strings.TrimSpace(th.Summary)}
 				if h.confidence == 0 {
 					h.confidence = prev.confidence
+				}
+				if h.first == 0 {
+					h.first = th.Confidence
+				}
+				if c, ok := th.Attrs[CalibratedAttr].(float64); ok && c > 0 {
+					h.calibrated = c
+				}
+				if id := attrString(th, HypothesisIDAttr); id != "" {
+					h.id = strings.ToLower(strings.TrimSpace(id))
 				}
 				hyps[k] = h
 				if m.StepsToVerdict == 0 && (th.Status == domain.ThoughtVerified || th.Status == domain.ThoughtRefuted) {
@@ -238,12 +367,29 @@ func Score(t Trace) Metrics {
 			}
 		}
 	}
-	var sq, imputed float64
-	settled := 0
+	var sq, imputed, calSq float64
+	settled, calN := 0, 0
 	verifiedSupported := false
+	digest := &Digest{Tools: tools, Issues: issues}
 	for _, k := range order {
 		h := hyps[k]
 		m.Hypotheses++
+		verdict := ""
+		if h.id != "" {
+			verdict = claimVerdicts[h.id]
+		}
+		if len(digest.Hypotheses) < 8 {
+			digest.Hypotheses = append(digest.Hypotheses, DigestHypothesis{Statement: clip(oneLine(h.statement), 200),
+				Status: string(h.status), Confidence: h.confidence, Verdict: verdict})
+		}
+		if f, ok := forecastOf(h, verdict); ok && len(m.Forecasts) < MaxForecasts {
+			m.Forecasts = append(m.Forecasts, f)
+			if h.calibrated > 0 && h.calibrated <= 1 {
+				d := h.calibrated - float64(f.Y)
+				calSq += d * d
+				calN++
+			}
+		}
 		if h.status == domain.ThoughtVerified || h.status == domain.ThoughtRefuted {
 			if !h.supported {
 				m.UnsupportedVerdicts++
@@ -279,6 +425,13 @@ func Score(t Trace) Metrics {
 		b := round(sq / float64(m.CalibrationN))
 		m.Brier = &b
 	}
+	if calN > 0 {
+		b := round(calSq / float64(calN))
+		m.CalibratedBrier = &b
+	}
+	if len(digest.Hypotheses) > 0 || len(digest.Tools) > 0 || len(digest.Issues) > 0 {
+		m.Digest = digest
+	}
 	sort.Strings(m.CitedMemories)
 	calibration := 0.5 // nothing settled: no calibration evidence
 	if settled > 0 {
@@ -305,12 +458,42 @@ func Score(t Trace) Metrics {
 	return m
 }
 
+// forecastOf turns a settled hypothesis into a calibration sample. The
+// independent verifier's verdict, when there is one, decides the outcome:
+// a contradicted hypothesis counts against its own status, an insufficient
+// one is no sample.
+func forecastOf(h hyp, verdict string) (Forecast, bool) {
+	if h.first <= 0 || h.first > 1 {
+		return Forecast{}, false
+	}
+	var y int
+	switch h.status {
+	case domain.ThoughtVerified:
+		y = 1
+	case domain.ThoughtRefuted:
+		y = 0
+	default:
+		return Forecast{}, false
+	}
+	switch verdict {
+	case "":
+		return Forecast{P: round(h.first), Y: y}, true
+	case "SUPPORTED":
+		return Forecast{P: round(h.first), Y: y, Independent: true}, true
+	case "CONTRADICTED":
+		return Forecast{P: round(h.first), Y: 1 - y, Independent: true}, true
+	}
+	return Forecast{}, false
+}
+
 func quality(m Metrics, calibration float64) float64 {
 	conclusion := 0.0
 	switch {
 	case m.Correct != nil && *m.Correct:
 		conclusion = 1
 	case m.Correct != nil:
+		conclusion = 0
+	case m.Independent == "CONTRADICTED":
 		conclusion = 0
 	case m.VerifiedConclusion():
 		conclusion = 1
@@ -327,7 +510,8 @@ func quality(m Metrics, calibration float64) float64 {
 // VerifiedConclusion reports a VERIFIED conclusion backed by at least one
 // resolved citation.
 func (m Metrics) VerifiedConclusion() bool {
-	return m.Conclusion == string(domain.ThoughtVerified) && !m.UnsupportedConclusion
+	return m.Conclusion == string(domain.ThoughtVerified) && !m.UnsupportedConclusion &&
+		(m.Independent == "" || m.Independent == "SUPPORTED")
 }
 
 // Success reports whether a scored run counts as a success for pattern

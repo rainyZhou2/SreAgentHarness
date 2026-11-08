@@ -37,6 +37,20 @@ type Summary struct {
 	CitationValidity          float64 `json:"citation_validity"`
 	UnsupportedVerdictRate    float64 `json:"unsupported_verdict_rate"`
 	UnsupportedConclusionRate float64 `json:"unsupported_conclusion_rate"`
+	// ECE is the expected calibration error of the pooled forecasts (nil
+	// below 20 forecasts); CalibratedBrier the mean Brier of calibrated
+	// confidences.
+	ECE             *float64 `json:"ece,omitempty"`
+	Forecasts       int      `json:"forecasts"`
+	CalibratedBrier *float64 `json:"calibrated_brier,omitempty"`
+	// Independent verifier outcomes: the share of runs it checked, and of
+	// those the share it contradicted or found insufficient; the mean
+	// number of backtracks; the mean self-consistency agreement.
+	IndependentRate  float64 `json:"independent_rate"`
+	ContradictedRate float64 `json:"contradicted_rate"`
+	InsufficientRate float64 `json:"insufficient_rate"`
+	MeanBacktracks   float64 `json:"mean_backtracks"`
+	MeanAgreement    float64 `json:"mean_agreement,omitempty"`
 	// Plan aggregates the planned runs (nil: none was planned).
 	Plan *PlanSummary `json:"plan,omitempty"`
 }
@@ -51,7 +65,29 @@ func Summarize(ms []Metrics) Summary {
 	var quality, brier, stepsV, structured float64
 	var claims, grounded, calls, redundant, verified, unverified, verdictRuns, noVerdict, success, correct int
 	var calibrated, unresolved, unsupportedVerdicts, unsupportedConclusions int
+	var forecasts []Forecast
+	var calBrier, agreement, backtracks float64
+	var calRuns, independent, contradicted, insufficient, agreed int
 	for _, m := range ms {
+		forecasts = append(forecasts, m.Forecasts...)
+		if m.CalibratedBrier != nil {
+			calBrier += *m.CalibratedBrier
+			calRuns++
+		}
+		if m.Independent != "" {
+			independent++
+			switch m.Independent {
+			case "CONTRADICTED":
+				contradicted++
+			case "INSUFFICIENT":
+				insufficient++
+			}
+		}
+		backtracks += float64(m.Backtracks)
+		if m.Agreement > 0 {
+			agreement += m.Agreement
+			agreed++
+		}
 		s.Citations += m.Citations
 		unresolved += m.Unresolved
 		unsupportedVerdicts += m.UnsupportedVerdicts
@@ -129,6 +165,24 @@ func Summarize(ms []Metrics) Summary {
 		s.UnsupportedVerdictRate = round(float64(unsupportedVerdicts) / float64(s.Settled))
 	}
 	s.UnsupportedConclusionRate = round(float64(unsupportedConclusions) / n)
+	s.Forecasts = len(forecasts)
+	if len(forecasts) >= 20 {
+		_, e := Buckets(forecasts)
+		s.ECE = &e
+	}
+	if calRuns > 0 {
+		b := round(calBrier / float64(calRuns))
+		s.CalibratedBrier = &b
+	}
+	s.IndependentRate = round(float64(independent) / n)
+	if independent > 0 {
+		s.ContradictedRate = round(float64(contradicted) / float64(independent))
+		s.InsufficientRate = round(float64(insufficient) / float64(independent))
+	}
+	s.MeanBacktracks = round(backtracks / n)
+	if agreed > 0 {
+		s.MeanAgreement = round(agreement / float64(agreed))
+	}
 	s.Plan = SummarizePlans(ms)
 	return s
 }
@@ -165,6 +219,10 @@ type GateConfig struct {
 	// share of settled hypotheses and conclusions without one.
 	MaxCitationValidityDrop float64 `json:"max_citation_validity_drop,omitempty"`
 	MaxUnsupportedIncrease  float64 `json:"max_unsupported_increase,omitempty"`
+	// MaxECEIncrease and MaxContradictedIncrease guard calibration error
+	// and the independent verifier's contradiction rate (0 = 0.05 / 0.10).
+	MaxECEIncrease          float64 `json:"max_ece_increase,omitempty"`
+	MaxContradictedIncrease float64 `json:"max_contradicted_increase,omitempty"`
 	// Plan bounds planning regressions (zero values: DefaultPlanGate).
 	Plan PlanGateConfig `json:"plan,omitempty"`
 }
@@ -222,6 +280,19 @@ func Gate(base, cand Summary, cfg GateConfig) []string {
 	}
 	if cand.UnsupportedConclusionRate-base.UnsupportedConclusionRate > ui {
 		f = append(f, fmt.Sprintf("unsupported conclusions rose: %.3f → %.3f", base.UnsupportedConclusionRate, cand.UnsupportedConclusionRate))
+	}
+	ei, ci := cfg.MaxECEIncrease, cfg.MaxContradictedIncrease
+	if ei <= 0 {
+		ei = 0.05
+	}
+	if ci <= 0 {
+		ci = 0.10
+	}
+	if base.ECE != nil && cand.ECE != nil && *cand.ECE-*base.ECE > ei {
+		f = append(f, fmt.Sprintf("calibration error rose: ECE %.3f → %.3f", *base.ECE, *cand.ECE))
+	}
+	if base.IndependentRate > 0 && cand.IndependentRate > 0 && cand.ContradictedRate-base.ContradictedRate > ci {
+		f = append(f, fmt.Sprintf("independently contradicted conclusions rose: %.3f → %.3f", base.ContradictedRate, cand.ContradictedRate))
 	}
 	return append(f, PlanGate(base.Plan, cand.Plan, cfg.Plan)...)
 }

@@ -165,6 +165,12 @@ type Diagnosis struct {
 	Patterns     ExclusionPlan     `json:"patterns"`
 	FailureCases []string          `json:"failure_digests,omitempty"`
 	Excluded     int               `json:"excluded_holdout_runs"`
+	// PlaybookSource is template or induced; Induced the accepted induced
+	// lines; InducedRejected the rejected ones with reasons.
+	PlaybookSource  string   `json:"playbook_source,omitempty"`
+	Induced         []string `json:"induced,omitempty"`
+	InducedRejected []string `json:"induced_rejected,omitempty"`
+	InduceError     string   `json:"induce_error,omitempty"`
 }
 
 // Outcome reports one tick for one tenant.
@@ -183,8 +189,11 @@ type Improver struct {
 	Config    Config
 	Store     Store
 	Evolution Evolution
-	Log       *slog.Logger
-	Now       func() time.Time
+	// Inducer, when set, writes playbook guidance from failure cases; the
+	// template guidance is the fallback.
+	Inducer Inducer
+	Log     *slog.Logger
+	Now     func() time.Time
 }
 
 // Run ticks every interval until ctx is cancelled.
@@ -290,7 +299,23 @@ func (im *Improver) TickTenant(ctx context.Context, tenant string) Outcome {
 		next.PatternProbeRate = cfg.ProbeRate
 	}
 	if len(d.Weak) > 0 {
-		next.Playbook = StatsPlaybook(d.Weak, next.Playbook)
+		d.PlaybookSource = "template"
+		if im.Inducer != nil {
+			cases := failureCases(kept, 8)
+			lines, err := im.Inducer.Induce(ctx, tenant, d.Weak, cases, next.Playbook)
+			if err != nil {
+				d.InduceError = err.Error()
+			}
+			accepted, rejected := InduceLines(lines, next.Playbook, cases)
+			d.InducedRejected = rejected
+			if len(accepted) > 0 {
+				next.Playbook = MergePlaybook(next.Playbook, accepted, profile.MaxPlaybookRunes)
+				d.PlaybookSource, d.Induced = "induced", accepted
+			}
+		}
+		if d.PlaybookSource == "template" {
+			next.Playbook = StatsPlaybook(d.Weak, next.Playbook)
+		}
 	}
 	if err := next.Validate(); err != nil {
 		return fail(fmt.Errorf("proposed reasoning layer is invalid: %w", err))
@@ -300,7 +325,8 @@ func (im *Improver) TickTenant(ctx context.Context, tenant string) Outcome {
 	}
 	patch, _ := json.Marshal(map[string]any{"reasoning": next})
 	rationale, _ := json.Marshal(map[string]any{"weak_dimensions": d.Weak, "summary": d.Summary,
-		"patterns": d.Patterns, "excluded_holdout_runs": d.Excluded})
+		"patterns": d.Patterns, "excluded_holdout_runs": d.Excluded, "playbook_source": d.PlaybookSource,
+		"induced": d.Induced, "induced_rejected": d.InducedRejected})
 	c, err := im.Evolution.Propose(ctx, tenant, cfg.ProfileID, base, patch, string(rationale), Actor)
 	if err != nil {
 		return fail(err)

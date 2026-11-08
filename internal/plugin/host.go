@@ -41,9 +41,12 @@ type Host struct {
 	Network   netguard.NetPolicy
 	Policy    policy.Gate
 	Gateway   *gw.Gateway
-	Embedder  memory.Embedder
-	Eval      *eval.Service // set before the job and api phases
-	Server    *api.Server   // set before the api phase
+	// OfflineGateway serves model calls that belong to no run (offline
+	// replay, playbook induction): same routes, in-memory ledger.
+	OfflineGateway *gw.Gateway
+	Embedder       memory.Embedder
+	Eval           *eval.Service // set before the job and api phases
+	Server         *api.Server   // set before the api phase
 	// Extensions holds the tenants' runtime MCP servers, HTTP tools and
 	// skills (set after the tools phase).
 	Extensions *extensions.Runtime

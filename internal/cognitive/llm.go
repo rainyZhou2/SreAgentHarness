@@ -62,9 +62,9 @@ func (l *LLM) Decide(ctx context.Context, in ReasoningInput) (domain.Decision, e
 	d.ModelRequestID, d.ManifestRef, d.RenderedRequestHash = resp.ModelRequestID, manRef, man.RenderedRequestHash
 	d.Model = resp.ResolvedModel
 	d.MemoryRefs = man.MemoryRefs
-	if len(d.EvidenceRefs) == 0 {
-		d.EvidenceRefs = man.EvidenceRefs
-	}
+	// EvidenceRefs are the model's own citations only; the evidence it was
+	// shown is recorded in the manifest. Filling them in would let an
+	// uncited conclusion pass the citation and verifier checks.
 	return d, nil
 }
 
