@@ -1040,6 +1040,9 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 			if call.Name == LoadToolsName && o.Outcome != "error" {
 				in.LoadedTools = append(in.LoadedTools, loadedTools(o.Content)...)
 			}
+			if call.Name == domain.MemorySearchToolName && o.Outcome != "error" {
+				in.RecalledMemories = append(in.RecalledMemories, recalledMemories(o.Content)...)
+			}
 			obs.Outcome, obs.Content = "ok", o.Content
 			if o.Outcome != "" {
 				obs.Outcome = o.Outcome
@@ -1157,6 +1160,8 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 	if err != nil {
 		return domain.StepSuccess{}, err
 	}
+	// Memory a profile retired stays out of in-run memory searches too.
+	ctx = domain.WithMemoryExclude(ctx, rules.MemoryExcludeFor(lease.RunID))
 	if !rules.AllowsTool(call.Name) {
 		// Defense in depth: planning already denies this; nothing was sent.
 		return domain.StepSuccess{}, fmt.Errorf("tool %q is not allowed by profile %s: %w", call.Name, rules.Ref, domain.ErrNotDispatched)

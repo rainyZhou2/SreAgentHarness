@@ -19,7 +19,7 @@ import (
 //	obs:step<N>        tool result of step N (shown, or summarized by compaction)
 //	obs:step<N>.<K>    result of call K of a parallel batch step N
 //	kv:<key>@<version> operator evidence
-//	memory:<id>@<version>
+//	memory:<id>@<version> (pinned, or returned by an in-run memory search)
 type RefSet struct {
 	obs       map[int64]string         // step → tool
 	parts     map[int64]map[int]string // batch step → part → tool
@@ -69,6 +69,11 @@ func NewRefSet(in ReasoningInput) *RefSet {
 	}
 	for _, m := range in.Memories {
 		r.memories[m.ID] = m.Version
+	}
+	for _, m := range in.RecalledMemories {
+		if _, pinned := r.memories[m.ID]; !pinned {
+			r.memories[m.ID] = m.Version
+		}
 	}
 	return r
 }

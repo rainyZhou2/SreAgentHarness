@@ -137,6 +137,10 @@ const (
 // {"observations":[...]}, one per call with Part set.
 const BatchToolName = "harness.parallel"
 
+// MemorySearchToolName is the builtin that searches long-term memory
+// during a run. Its hits are citable as memory:<id>@<version>.
+const MemorySearchToolName = "harness.memory_search"
+
 // ToolFollowup marks a tool step the kernel planned after an action. The
 // expectation and polling bounds are re-read from the registry at execution
 // time; the artifact only identifies the action.

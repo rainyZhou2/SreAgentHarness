@@ -17,6 +17,9 @@ import (
 // JSON, so the plain value is enough.
 type memoryRec struct {
 	Mem memory.Memory `json:"mem"`
+	// Embeddings are keyed by embedding model (Memory.Embedding is not
+	// serialized), so they survive restarts and a model switch.
+	Embeddings map[string][]float32 `json:"embeddings,omitempty"`
 }
 
 type incidentRec struct {
@@ -30,6 +33,9 @@ type incidentRec struct {
 }
 
 func (s *Store) saveMemory(rec memoryRec) {
+	if rec.Embeddings == nil {
+		rec.Embeddings = s.memories[rec.Mem.ID].Embeddings // status changes keep the vectors
+	}
 	s.memories[rec.Mem.ID] = rec
 	s.put("memory", rec.Mem.ID, rec.Mem.TenantID, 0, rec)
 }
@@ -74,7 +80,11 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		Trust: m.Trust, Sensitivity: m.Sensitivity, Confidence: m.Confidence, VerifiedBy: m.VerifiedBy,
 		Environment: m.Environment, ExpiresAt: m.ExpiresAt, CreatedBy: m.CreatedBy, CreatedAt: now, UpdatedAt: now,
 		Embedding: m.Embedding, EmbeddingModel: m.EmbeddingModel}
-	s.saveMemory(memoryRec{Mem: mem})
+	rec := memoryRec{Mem: mem}
+	if len(m.Embedding) > 0 && m.EmbeddingModel != "" {
+		rec.Embeddings = map[string][]float32{m.EmbeddingModel: m.Embedding}
+	}
+	s.saveMemory(rec)
 	shards := stringShards(m)
 	s.shards[mem.ID] = shards
 	s.put("shard", mem.ID, mem.TenantID, 0, shards)
@@ -216,6 +226,8 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 		shards[sh] = true
 	}
 	text := strings.ToLower(strings.TrimSpace(q.Text))
+	// Tokenize splits CJK text into bigrams, so Chinese queries match by part.
+	terms := uniqueTerms(memory.Tokenize(text), 32)
 	var out []memory.Candidate
 	for _, rec := range s.memories {
 		m := rec.Mem
@@ -250,12 +262,13 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 		rank := 0.0
 		if text != "" {
 			hay := strings.ToLower(m.Title + "\n" + m.Content + "\n" + m.Subject)
-			for _, term := range strings.Fields(text) {
+			for _, term := range terms {
 				if strings.Contains(hay, term) {
 					rank++
 				}
 			}
 		}
+		m.Embedding = rec.Embeddings[q.EmbeddingModel]
 		out = append(out, memory.Candidate{Memory: m, FTSRank: rank, ShardWeight: shardWeight})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -516,3 +529,68 @@ func containsString(xs []string, want string) bool {
 }
 
 var _ = json.Marshal
+
+func uniqueTerms(in []string, max int) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range in {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+			if len(out) == max {
+				break
+			}
+		}
+	}
+	return out
+}
+
+var _ memory.IndexStore = (*Store)(nil)
+
+// MemoriesToIndex returns live memories without an embedding of the given
+// model. Local full-text search tokenizes at query time, so no search
+// terms are stored.
+func (s *Store) MemoriesToIndex(_ context.Context, model string, limit int) ([]memory.IndexItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if model == "" {
+		return nil, nil
+	}
+	var out []memory.IndexItem
+	for _, rec := range s.memories {
+		m := rec.Mem
+		switch m.Status {
+		case "ACTIVE", "CANDIDATE", "VALIDATING", "STALE":
+		default:
+			continue
+		}
+		if _, ok := rec.Embeddings[model]; ok {
+			continue
+		}
+		out = append(out, memory.IndexItem{TenantID: m.TenantID, ID: m.ID, Version: m.Version, Title: m.Title,
+			Content: m.Content, Subject: m.Subject, NeedEmbedding: true})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *Store) PutMemoryIndex(_ context.Context, it memory.IndexItem, model string, emb []float32, _ string) error {
+	if len(emb) == 0 || model == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.memories[it.ID]
+	if !ok || rec.Mem.TenantID != it.TenantID {
+		return nil
+	}
+	if rec.Embeddings == nil {
+		rec.Embeddings = map[string][]float32{}
+	}
+	rec.Embeddings[model] = emb
+	s.saveMemory(rec)
+	return nil
+}

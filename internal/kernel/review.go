@@ -81,22 +81,36 @@ func conclusionEvidence(in cognitive.ReasoningInput) map[string]verify.Evidence 
 		if o.Note != "" {
 			text = strings.TrimSpace(text + "\nnote: " + o.Note)
 		}
-		ev[cognitive.ObsRef(o.StepSeq)] = verify.Evidence{Ref: cognitive.ObsRef(o.StepSeq), Kind: "observation",
-			OK: o.Outcome == "ok", Text: o.Tool + " → " + text}
+		r := cognitive.ObsPartRef(o.StepSeq, o.Part)
+		ev[r] = verify.Evidence{Ref: r, Kind: "observation", OK: o.Outcome == "ok", Text: o.Tool + " → " + text}
+		if o.Part > 0 {
+			// A batch step cited as a whole: all of its calls, ok if any is.
+			whole := cognitive.ObsRef(o.StepSeq)
+			cur := ev[whole]
+			cur.Ref, cur.Kind = whole, "observation"
+			cur.OK = cur.OK || o.Outcome == "ok"
+			cur.Text = strings.TrimSpace(cur.Text + "\n[" + r + "] " + o.Tool + " → " + text)
+			ev[whole] = cur
+		}
 	}
 	for i := int64(1); i < in.CompactedBefore; i++ {
-		r := cognitive.ObsRef(i)
-		if _, ok := ev[r]; !ok {
-			ev[r] = verify.Evidence{Ref: r, Kind: "observation", OK: true, Text: "(summarized) " + in.Summary}
+		// Compacted steps (and their batch parts) are judged on the summary.
+		for k := 0; k <= MaxBatchParts; k++ {
+			r := cognitive.ObsPartRef(i, k)
+			if _, ok := ev[r]; !ok {
+				ev[r] = verify.Evidence{Ref: r, Kind: "observation", OK: true, Text: "(summarized) " + in.Summary}
+			}
 		}
 	}
 	for _, e := range in.Evidence {
 		r := fmt.Sprintf("kv:%s@%d", e.Key, e.Version)
 		ev[r] = verify.Evidence{Ref: r, Kind: "evidence", OK: true, Text: e.Content}
 	}
-	for _, m := range in.Memories {
+	for _, m := range append(append([]cognitive.MemoryRef(nil), in.Memories...), in.RecalledMemories...) {
 		r := fmt.Sprintf("memory:%s@%d", m.ID, m.Version)
-		ev[r] = verify.Evidence{Ref: r, Kind: "memory", OK: true, Text: m.Title + "\n" + m.Content}
+		if _, ok := ev[r]; !ok {
+			ev[r] = verify.Evidence{Ref: r, Kind: "memory", OK: true, Text: strings.TrimSpace(m.Title + "\n" + m.Content)}
+		}
 	}
 	return ev
 }

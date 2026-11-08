@@ -180,12 +180,12 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		var inserted string
 		err := tx.QueryRow(ctx, `INSERT INTO agent_memories (id, tenant_id, scope, scope_id, memory_type, status, subject,
 			title, content_text, content_ref, content_hash, source_refs, evidence_refs, trust, sensitivity, confidence,
-			verified_by, environment, expires_at, created_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			verified_by, environment, expires_at, created_by, search_terms, search_terms_v)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1)
 			ON CONFLICT (tenant_id, scope, scope_id, content_hash) WHERE status NOT IN ('REJECTED','ARCHIVED') DO NOTHING
 			RETURNING id`, id, m.TenantID, m.Scope, m.ScopeID, m.Type, m.Status, m.Subject, m.Title, m.Content,
 			m.ContentRef, m.ContentHash, jsonb(nonNil(m.SourceRefs)), jsonb(nonNil(m.EvidenceRefs)), m.Trust, m.Sensitivity,
-			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy).Scan(&inserted)
+			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy, m.SearchTerms).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			out, err = scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
 				AND scope_id=$3 AND content_hash=$4 AND status NOT IN ('REJECTED','ARCHIVED')`, m.TenantID, m.Scope, m.ScopeID,
@@ -653,5 +653,59 @@ func (s *Store) ListIncidentEvents(ctx context.Context, tenantID, incidentID str
 		var e IncidentEvent
 		err := row.Scan(&e.Version, &e.EventType, &e.RunID, &e.StepID, &e.ActorType, &e.ActorID, &e.Payload, &e.Trust, &e.CreatedAt)
 		return e, err
+	})
+}
+
+// ---------- search index backfill ----------
+
+var _ memory.IndexStore = (*Store)(nil)
+
+// MemoriesToIndex returns live memories without search terms or without an
+// embedding of the given model for their current version (all tenants:
+// the indexer is a background job).
+func (s *Store) MemoriesToIndex(ctx context.Context, model string, limit int) ([]memory.IndexItem, error) {
+	rows, err := s.pool.Query(ctx, `SELECT m.tenant_id, m.id, m.current_version, m.title, m.content_text, m.subject,
+		m.search_terms_v < 1,
+		$1 <> '' AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id
+			AND e.memory_version = m.current_version AND e.embedding_model = $1)
+		FROM agent_memories m
+		WHERE m.status IN ('ACTIVE','CANDIDATE','VALIDATING','STALE')
+		AND (m.search_terms_v < 1 OR ($1 <> '' AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id
+			AND e.memory_version = m.current_version AND e.embedding_model = $1)))
+		ORDER BY (m.status = 'ACTIVE') DESC, m.updated_at DESC LIMIT $2`, model, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []memory.IndexItem
+	for rows.Next() {
+		var it memory.IndexItem
+		if err := rows.Scan(&it.TenantID, &it.ID, &it.Version, &it.Title, &it.Content, &it.Subject, &it.NeedTerms,
+			&it.NeedEmbedding); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// PutMemoryIndex stores a memory's search terms and/or embedding. It is
+// idempotent, so concurrent indexers do no harm.
+func (s *Store) PutMemoryIndex(ctx context.Context, it memory.IndexItem, model string, emb []float32, terms string) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if it.NeedTerms {
+			if _, err := tx.Exec(ctx, `UPDATE agent_memories SET search_terms=$3, search_terms_v=1
+				WHERE tenant_id=$1 AND id=$2`, it.TenantID, it.ID, terms); err != nil {
+				return err
+			}
+		}
+		if len(emb) > 0 && model != "" {
+			if _, err := tx.Exec(ctx, `INSERT INTO memory_embeddings (tenant_id, memory_id, memory_version, embedding_model,
+				dims, embedding) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, it.TenantID, it.ID, it.Version, model,
+				len(emb), emb); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }

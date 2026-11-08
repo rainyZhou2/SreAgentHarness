@@ -130,7 +130,9 @@ type Embedder interface {
 // model-backed Embedder behind the same interface.
 type HashingEmbedder struct{ Dims int }
 
-func (h HashingEmbedder) Model() string { return "hash-uni-bigram-v1-" + itoa(h.dims()) }
+// Model names the embedding space; v2 tokenizes CJK text into bigrams, so
+// v1 vectors are not comparable and are re-embedded by the indexer.
+func (h HashingEmbedder) Model() string { return "hash-uni-bigram-v2-" + itoa(h.dims()) }
 
 func (h HashingEmbedder) dims() int {
 	if h.Dims <= 0 {
@@ -175,18 +177,91 @@ func (h HashingEmbedder) Embed(text string) []float32 {
 var stop = map[string]bool{"the": true, "a": true, "an": true, "of": true, "and": true, "or": true, "to": true,
 	"in": true, "on": true, "for": true, "is": true, "was": true, "with": true, "by": true, "at": true, "be": true}
 
-// Tokenize lower-cases and splits on non-alphanumerics, dropping stop words.
+// Tokenize lower-cases and splits on non-alphanumerics, dropping stop
+// words. Runs of CJK characters, which carry no spaces, become overlapping
+// character bigrams (a single character stays as is), so Chinese and
+// Japanese text matches by its parts.
 func Tokenize(s string) []string {
-	f := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-'
-	})
-	out := f[:0]
-	for _, t := range f {
-		if len(t) > 1 && !stop[t] {
-			out = append(out, t)
+	var out, cjk []string
+	var word []rune
+	flushWord := func() {
+		if len(word) > 1 {
+			if t := string(word); !stop[t] {
+				out = append(out, t)
+			}
+		}
+		word = word[:0]
+	}
+	var run []rune
+	flushCJK := func() {
+		cjk = cjkGrams(run, cjk[:0])
+		out = append(out, cjk...)
+		run = run[:0]
+	}
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case isCJK(r):
+			flushWord()
+			run = append(run, r)
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-':
+			flushCJK()
+			word = append(word, r)
+		default:
+			flushWord()
+			flushCJK()
 		}
 	}
+	flushWord()
+	flushCJK()
 	return out
+}
+
+func isCJK(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Hangul, r)
+}
+
+func cjkGrams(run []rune, out []string) []string {
+	if len(run) == 1 {
+		return append(out, string(run))
+	}
+	for i := 0; i+1 < len(run); i++ {
+		out = append(out, string(run[i:i+2]))
+	}
+	return out
+}
+
+// SearchTerms returns the CJK bigrams of a text, space-separated, for
+// full-text indexes whose parser does not segment CJK text. Other words
+// are left to the index's own parser.
+func SearchTerms(texts ...string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range texts {
+		var run []rune
+		emit := func() {
+			for _, g := range cjkGrams(run, nil) {
+				if !seen[g] {
+					seen[g] = true
+					out = append(out, g)
+				}
+			}
+			run = run[:0]
+		}
+		for _, r := range strings.ToLower(t) {
+			if isCJK(r) {
+				run = append(run, r)
+				continue
+			}
+			if len(run) > 0 {
+				emit()
+			}
+		}
+		if len(run) > 0 {
+			emit()
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 func Cosine(a, b []float32) float64 {

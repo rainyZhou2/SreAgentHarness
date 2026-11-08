@@ -26,6 +26,9 @@ const (
 	DefaultStallSteps       = 4
 	DefaultMaxParallelTools = 4
 	DefaultMaxOutputRepairs = 2
+	// MaxBatchParts bounds the calls of one batch step (the profile's
+	// max_parallel_tools is validated against the same limit).
+	MaxBatchParts = 16
 	// budgetSoftRatio is the share of a run budget after which the agent is
 	// told to conclude.
 	budgetSoftRatio = 0.8
@@ -83,6 +86,9 @@ func (w *Worker) loopLimits(rules profile.Rules) loopLimits {
 	}
 	if l.parallel < 1 {
 		l.parallel = 1
+	}
+	if l.parallel > MaxBatchParts {
+		l.parallel = MaxBatchParts // HARNESS_MAX_PARALLEL_TOOLS is not validated
 	}
 	return l
 }
@@ -522,7 +528,11 @@ func (w *Worker) loopAdvisories(in *cognitive.ReasoningInput, b budgetState, ls 
 			mustConclude = fmt.Sprintf("no new information in the last %d tool results", ls.stall)
 			in.ForceConclude = true
 		}
-		in.Advisories = append(in.Advisories, fmt.Sprintf("The last %d tool results brought nothing new (repeats, errors or identical output). Change approach — a different tool, scope or hypothesis — or conclude.", ls.stall))
+		hint := ""
+		if visibleTool(in.Tools, domain.MemorySearchToolName) {
+			hint = " Past incidents may help: search them with " + domain.MemorySearchToolName + "."
+		}
+		in.Advisories = append(in.Advisories, fmt.Sprintf("The last %d tool results brought nothing new (repeats, errors or identical output). Change approach — a different tool, scope or hypothesis — or conclude.%s", ls.stall, hint))
 	}
 	return "", mustConclude
 }

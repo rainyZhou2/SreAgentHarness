@@ -165,6 +165,7 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_COMPACT_TOKENS` | 未压缩的工具结果超过约这么多 token 时压缩历史（默认 16000；负数只按步数） |
 | `HARNESS_MODEL_ROUTINE_ALIAS` / `HARNESS_MODEL_ESCALATED_ALIAS` | 常规调查步使用的模型 alias，以及决定结果的步骤使用的 alias（默认沿用策略自身的 alias） |
 | `HARNESS_SPECULATIVE_TOOLS` | 模型仍在流式输出时提前执行允许的只读调用，工具步直接复用结果（默认 `false`） |
+| `HARNESS_EMBEDDING_BASE_URL` / `_MODEL` / `_DIMENSIONS` / `_API_KEY_ENV` | 桌面运行时：使用 OpenAI 兼容的 embeddings 接口替代哈希 embedder；密钥从 `_API_KEY_ENV` 指定的变量读取（默认 `HARNESS_EMBEDDING_API_KEY`）。服务端在 `HARNESS_CONFIG` 中配置 `embedder: {name: http, …}` |
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
@@ -191,6 +192,12 @@ docker compose -f deploy/docker-compose.yml up --build
 - **按 token 预算压缩**：除每 N 个工具步压缩一次外，未压缩结果超过 `HARNESS_COMPACT_TOKENS` 时也会压缩（此时只保留最新一个结果原文）。默认压缩器（`deterministic-v2`）每条结果一行、以可引用的 ref 开头，大的 JSON 对象按顶层字段呈现；被压缩的 ref（包括批量步骤的子调用）仍可引用。
 - **只读调用提前执行**（`HARNESS_SPECULATIVE_TOOLS`）：模型流中每个工具调用一完成，若它可见、只读、无需审批且不是重复调用，就立即开始执行；执行同一调用（版本、风险、参数都相同）的工具步直接取用结果。未被使用的结果两分钟后过期；有副作用的调用从不提前执行。
 - **可观测性**：每个步骤摘要带 `timings_ms`（queue、context、model、review、tool），并与提交耗时一起导出为 `harness_step_phase_seconds{kind,phase}`；`harness_agent_loop_events_total{event}` 统计修复、循环防护、提示、批量、收敛、路由、压缩、提前执行和 artifact 缓存命中。Run 结果中带 `loop`（步数、模型请求数、token、花费）。
+
+## 记忆检索
+
+- **运行中检索**：第一个推理步看到的是按目标检索出的记忆。`harness.memory_search`（R0，参数 `query`，可选 `service`、`top_k` ≤ 10）用 agent 之后掌握的信息（假设、报错信息、组件）走同一条检索流水线（硬过滤、全文/向量/依赖图三路召回、RRF、信任与 profile 排除、冲突消解）。结果作为"需验证的过往经验"返回，带 `memory:<id>@<v>` ref；这些 ref 可被引用，并作为记忆证据交给独立验证器。工具可见时，停滞提示会建议检索记忆。
+- **模型 embedding**：`http` embedder 调用任意 OpenAI 兼容的 `/embeddings` 接口（`base_url`、`model`、`api_key_env`、`dimensions`、`timeout`），带小型查询缓存；调用失败时检索跳过向量分支。向量只在同一 embedding 模型内比较，因此切换模型后由 consolidator 的 indexer（`index`，默认开启；`index_batch`，默认 50）按批为存活记忆重新生成向量，ACTIVE 优先。
+- **中日韩文本**：分词把 CJK 连续字符切成重叠的二字组，全文检索（Postgres 写入 `search_terms` 并纳入 `search_tsv`）、本地存储的匹配和哈希 embedder（`hash-uni-bigram-v2`）都能在不依赖分词器的情况下命中 CJK 片段。migration 0018 之前写入的记忆由 indexer 补齐检索词。
 
 ## 触发器、策略规则与动作闭环
 

@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go-sre-harness/internal/memory"
+	"go-sre-harness/internal/tools/memsearch"
 	"log/slog"
 	"net/http"
 	"os"
@@ -345,6 +347,13 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		if retriever, err = plugin.BuildOne(ctx, plugin.MemoryRetriever, h, specs["memory_retriever"]); err != nil {
 			return nil, err
 		}
+	}
+	if r, ok := retriever.(*memory.Retriever); ok {
+		// In-run memory search uses the same pipeline as the first retrieval.
+		if _, dup := h.Tools.Lookup(memsearch.Name); dup {
+			return nil, fmt.Errorf("tool %q is reserved for the harness", memsearch.Name)
+		}
+		h.Tools.Register(memsearch.Tool{Retriever: r})
 	}
 	// context assembly and compaction
 	assembler, err := optionalOne(ctx, plugin.ContextAssembler, h, specs["context_assembler"])
