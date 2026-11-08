@@ -108,6 +108,10 @@ type Config struct {
 	// always or never. It is enforced here as well as in the planner so a
 	// planner bug cannot skip the gate.
 	PlanApprovalMode string
+	// PlanMaxReplans bounds how many times a failed generated flow is
+	// replaced by a new plan within one run (0 = DefaultPlanMaxReplans,
+	// <0 = never replan).
+	PlanMaxReplans int
 	// Context gathers environment facts on a run's first reason step; they
 	// are pinned in run KV (optional).
 	Context ContextGatherer
@@ -203,6 +207,9 @@ func (c *Config) defaults() {
 	}
 	if c.PlanApprovalMode == "" {
 		c.PlanApprovalMode = "auto"
+	}
+	if c.PlanMaxReplans == 0 {
+		c.PlanMaxReplans = DefaultPlanMaxReplans
 	}
 	if c.OutputOffloadBytes == 0 {
 		c.OutputOffloadBytes = DefaultOffloadBytes

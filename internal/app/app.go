@@ -454,6 +454,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			Planner:            plannerSvc,
 			PlanApprovers:      e.int("HARNESS_PLAN_APPROVERS", 1),
 			PlanApprovalMode:   e.str("HARNESS_PLAN_APPROVAL", "auto"),
+			PlanMaxReplans:     e.int("HARNESS_PLAN_MAX_REPLANS", kernel.DefaultPlanMaxReplans),
 			Strategies:         &profile.Resolver{Loader: store, Factory: sel.liveFactory()},
 			Observer:           observers,
 			Context:            gatherer,

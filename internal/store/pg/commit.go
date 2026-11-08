@@ -173,15 +173,20 @@ func (s *Store) applyFlowCommit(ctx context.Context, r *runTx, lease domain.Leas
 	}
 	var actualID string
 	if err := r.tx.QueryRow(ctx, `INSERT INTO flow_runs
-		(id, tenant_id, run_id, compiled_ref, compiled_hash, state, status, current_node, depth, child_runs)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		(id, tenant_id, run_id, compiled_ref, compiled_hash, state, status, current_node, depth, child_runs, generation)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (tenant_id, run_id) DO UPDATE SET
 		  compiled_ref=EXCLUDED.compiled_ref, compiled_hash=EXCLUDED.compiled_hash,
 		  state=EXCLUDED.state, status=EXCLUDED.status, current_node=EXCLUDED.current_node,
-		  child_runs=GREATEST(flow_runs.child_runs, EXCLUDED.child_runs), updated_at=now()
+		  child_runs=GREATEST(flow_runs.child_runs, EXCLUDED.child_runs),
+		  generation=EXCLUDED.generation, updated_at=now()
+		WHERE flow_runs.generation <= EXCLUDED.generation
 		RETURNING id`,
 		flowRunID, r.run.TenantID, r.run.ID, fc.CompiledRef, fc.CompiledHash, jsonb(state), status,
-		fc.CurrentNode, r.run.FlowDepth, fc.ChildRuns).Scan(&actualID); err != nil {
+		fc.CurrentNode, r.run.FlowDepth, fc.ChildRuns, fc.Generation).Scan(&actualID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("flow commit for generation %d is older than the stored flow", fc.Generation)
+		}
 		return err
 	}
 	for _, child := range fc.Children {
@@ -210,11 +215,11 @@ func (s *Store) applyFlowCommit(ctx context.Context, r *runTx, lease domain.Leas
 			}
 		}
 		if _, err := r.tx.Exec(ctx, `INSERT INTO flow_node_runs
-			(id, tenant_id, flow_run_id, node_id, node_type, child_run_id, status, attempt)
-			VALUES ($1,$2,$3,$4,$5,$6,'RUNNING',$7)
-			ON CONFLICT (tenant_id, flow_run_id, node_id, attempt) DO UPDATE SET
+			(id, tenant_id, flow_run_id, node_id, node_type, child_run_id, status, attempt, generation)
+			VALUES ($1,$2,$3,$4,$5,$6,'RUNNING',$7,$8)
+			ON CONFLICT (tenant_id, flow_run_id, generation, node_id, attempt) DO UPDATE SET
 			  child_run_id=EXCLUDED.child_run_id, status='RUNNING', updated_at=now()`,
-			newID(), r.run.TenantID, actualID, child.NodeID, child.NodeType, cr.run.ID, attempt); err != nil {
+			newID(), r.run.TenantID, actualID, child.NodeID, child.NodeType, cr.run.ID, attempt, fc.Generation); err != nil {
 			return err
 		}
 	}

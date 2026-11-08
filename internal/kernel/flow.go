@@ -52,9 +52,9 @@ func (w *Worker) executeFlow(ctx context.Context, lease domain.Lease) (domain.St
 			}
 			planHash := plan.PlanHash
 			if planHash == "" {
-				planHash = planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input)
+				planHash = planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input, plan.Generation)
 			}
-			if got := planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input); got != planHash {
+			if got := planner.PlanHash(plan.Mode, plan.FlowHash, plan.Input, plan.Generation); got != planHash {
 				return domain.StepSuccess{}, fmt.Errorf("generated flow plan content does not match its plan hash")
 			}
 			spec = &fs
@@ -71,10 +71,24 @@ func (w *Worker) executeFlow(ctx context.Context, lease domain.Lease) (domain.St
 	}
 
 	snap, err := fs.LoadFlow(ctx, lease.TenantID, lease.RunID)
+	fresh := errors.Is(err, domain.ErrNotFound)
+	if err == nil && generated && generatedPlan != nil && snap.Generation != generatedPlan.Generation {
+		// A replanned graph starts a new generation of the same flow row:
+		// fresh state, and none of the replaced generation's node results.
+		if snap.Generation > generatedPlan.Generation {
+			return domain.StepSuccess{}, fmt.Errorf("flow step for plan generation %d is older than flow generation %d",
+				generatedPlan.Generation, snap.Generation)
+		}
+		snap = domain.FlowSnapshot{ID: snap.ID, RunID: snap.RunID}
+		fresh = true
+	}
+	if fresh && generatedPlan != nil {
+		snap.Generation = generatedPlan.Generation
+	}
 	var st flow.State
 	firstExecution := false
 	switch {
-	case errors.Is(err, domain.ErrNotFound):
+	case fresh:
 		if spec == nil {
 			return domain.StepSuccess{}, fmt.Errorf("flow step without a flow spec")
 		}
@@ -177,8 +191,13 @@ func (w *Worker) executeFlow(ctx context.Context, lease domain.Lease) (domain.St
 	if flowKey == "" {
 		flowKey = lease.RunID
 	}
+	if snap.Generation > 0 {
+		// Child idempotency keys must not collide with the replaced graph's.
+		flowKey = fmt.Sprintf("%s:g%d", flowKey, snap.Generation)
+	}
 	commit := &domain.FlowCommit{FlowRunID: snap.ID, CompiledRef: planRef, CompiledHash: planHash,
-		State: stateJSON, Status: "RUNNING", CurrentNode: st.Current, ChildRuns: st.ChildRuns}
+		State: stateJSON, Status: "RUNNING", CurrentNode: st.Current, ChildRuns: st.ChildRuns,
+		Generation: snap.Generation}
 	var planEvents []domain.EmittedEvent
 	if firstExecution && generatedPlan != nil {
 		payload := map[string]any{"mode": "flow", "plan_hash": generatedPlanHash, "flow_hash": generatedPlan.FlowHash,
@@ -240,6 +259,13 @@ func (w *Worker) executeFlow(ctx context.Context, lease domain.Lease) (domain.St
 			Events: planEvents}, nil
 
 	case flow.ActionFail:
+		out, replanned, err := w.replanAfterFailure(ctx, lease, spec, &st, snap, results, action.Error, commit, planEvents)
+		if err != nil {
+			return domain.StepSuccess{}, err
+		}
+		if replanned {
+			return out, nil
+		}
 		return domain.StepSuccess{}, fmt.Errorf("flow: %s", action.Error)
 	}
 	return domain.StepSuccess{}, fmt.Errorf("flow: unknown action %q", action.Kind)

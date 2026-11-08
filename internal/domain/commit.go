@@ -40,6 +40,9 @@ type FlowCommit struct {
 	CurrentNode  string
 	ChildRuns    int
 	Children     []ChildRunSpec
+	// Generation is the plan generation of State. A higher generation than
+	// the stored one starts a fresh set of node attempts (a replan).
+	Generation int
 }
 
 // ChildRunSpec creates one child run in the same transaction as the parent
