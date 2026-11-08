@@ -41,6 +41,9 @@ type Spec struct {
 	// models, fallbacks, and budgets/approval that only tighten the
 	// process configuration (see PlannerSpec).
 	Planner *PlannerSpec `json:"planner,omitempty"`
+	// RunLimits bounds one run's spend and loop behaviour; values only
+	// tighten the process configuration (see RunLimits).
+	RunLimits *RunLimits `json:"run_limits,omitempty"`
 	// Flow is the optional orchestration DSL. It is frozen with the profile
 	// version and only valid together with strategy "flow".
 	Flow json.RawMessage `json:"flow,omitempty"`
@@ -132,6 +135,9 @@ func ApplyPatch(base Spec, patch json.RawMessage) (Spec, []string, error) {
 		return base, nil, err
 	}
 	if err := out.Planner.Validate(base.AllowedAliases); err != nil {
+		return base, nil, err
+	}
+	if err := out.RunLimits.Validate(); err != nil {
 		return base, nil, err
 	}
 	if out.MemoryTopK < 0 || out.MemoryTopK > 20 || out.CompactEvery < 0 || out.CompactEvery > 50 ||
@@ -358,6 +364,46 @@ func (p *PlannerSpec) Validate(allowed []string) error {
 				return fmt.Errorf("planner.fallbacks[%d].goal_pattern: %w", i, err)
 			}
 		}
+	}
+	return nil
+}
+
+// RunLimits bounds one run of the agent loop. Zero values leave the process
+// default; a profile can only tighten it (the smaller limit wins).
+type RunLimits struct {
+	// MaxCostUSD and MaxTokens bound the model spend of one run (input +
+	// output tokens). Past SoftRatio of either, the agent is told to
+	// conclude; at the limit the kernel concludes for it.
+	MaxCostUSD float64 `json:"max_cost_usd,omitempty"`
+	MaxTokens  int64   `json:"max_tokens,omitempty"`
+	// MaxRepeats is how often an identical tool call may run again
+	// (default 1: a third identical call is refused).
+	MaxRepeats *int `json:"max_repeats,omitempty"`
+	// StallSteps is how many consecutive tool results may bring nothing new
+	// before the agent is told to change approach; twice that and the
+	// kernel concludes (default 4).
+	StallSteps int `json:"stall_steps,omitempty"`
+	// MaxParallelTools bounds the read-only calls executed together from
+	// one model response (default 4; 1 disables batching).
+	MaxParallelTools int `json:"max_parallel_tools,omitempty"`
+}
+
+// Validate bounds the limits.
+func (l *RunLimits) Validate() error {
+	if l == nil {
+		return nil
+	}
+	switch {
+	case l.MaxCostUSD < 0 || l.MaxCostUSD > 1000:
+		return fmt.Errorf("run_limits.max_cost_usd must be between 0 and 1000")
+	case l.MaxTokens < 0:
+		return fmt.Errorf("run_limits.max_tokens must not be negative")
+	case l.MaxRepeats != nil && (*l.MaxRepeats < 0 || *l.MaxRepeats > 10):
+		return fmt.Errorf("run_limits.max_repeats must be between 0 and 10")
+	case l.StallSteps < 0 || l.StallSteps > 50:
+		return fmt.Errorf("run_limits.stall_steps must be between 0 and 50")
+	case l.MaxParallelTools < 0 || l.MaxParallelTools > 16:
+		return fmt.Errorf("run_limits.max_parallel_tools must be between 0 and 16")
 	}
 	return nil
 }

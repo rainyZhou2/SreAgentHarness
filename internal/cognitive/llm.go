@@ -56,8 +56,10 @@ func (l *LLM) Decide(ctx context.Context, in ReasoningInput) (domain.Decision, e
 	}
 	d, err := decisionFromResponse(resp)
 	if err != nil {
-		// Structurally unusable output: re-ask (bounded by the step's attempts).
-		return domain.Decision{}, domain.Retryable(err, 0)
+		// Structurally unusable output: the kernel sends the problem back to
+		// the model; past its repair budget it re-asks (bounded by the
+		// step's attempts).
+		return domain.Decision{}, domain.Retryable(&InvalidOutputError{Err: err}, 0)
 	}
 	d.ModelRequestID, d.ManifestRef, d.RenderedRequestHash = resp.ModelRequestID, manRef, man.RenderedRequestHash
 	d.Model = resp.ResolvedModel
@@ -67,6 +69,13 @@ func (l *LLM) Decide(ctx context.Context, in ReasoningInput) (domain.Decision, e
 	// uncited conclusion pass the citation and verifier checks.
 	return d, nil
 }
+
+// InvalidOutputError is a model response the kernel cannot turn into a
+// decision (no tool call, unparseable arguments, unknown shape).
+type InvalidOutputError struct{ Err error }
+
+func (e *InvalidOutputError) Error() string { return "unusable response: " + e.Err.Error() }
+func (e *InvalidOutputError) Unwrap() error { return e.Err }
 
 // mapGatewayError turns gateway failures into kernel failure classes. A model
 // call has no external side effect, so anything retryable is a plain retry.

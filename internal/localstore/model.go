@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"go-sre-harness/internal/domain"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/store/pg"
 )
@@ -208,3 +209,13 @@ func (s *Store) TenantCost(ctx context.Context, tenantID string, since time.Time
 }
 
 var _ gw.Ledger = (*Store)(nil)
+
+// RunUsage is the run's model spend for the kernel's run budget.
+func (s *Store) RunUsage(ctx context.Context, tenantID, runID string) (domain.RunUsage, error) {
+	c, err := s.RunCost(ctx, tenantID, runID)
+	if err != nil {
+		return domain.RunUsage{}, err
+	}
+	return domain.RunUsage{Requests: c.Requests, InputTokens: c.InputTokens, OutputTokens: c.OutputTokens,
+		CostMicros: c.CostMicros}, nil
+}

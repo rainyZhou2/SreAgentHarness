@@ -76,6 +76,25 @@ func (r *Recorder) AfterRun(ctx context.Context, rec memory.RunRecord, quality s
 			if data, err := r.Artifacts.Get(ctx, run.TenantID, st.InputRef); err == nil && json.Unmarshal(data, &call) == nil {
 				s.Tool, s.Args = call.Name, call.Args
 			}
+			if s.Tool == domain.BatchToolName {
+				// One trace step per call of a parallel batch.
+				var ba struct {
+					Calls []struct {
+						Name string          `json:"name"`
+						Args json.RawMessage `json:"args"`
+					} `json:"calls"`
+				}
+				if json.Unmarshal(s.Args, &ba) == nil && len(ba.Calls) > 0 {
+					for i, c := range ba.Calls {
+						part := Step{Seq: st.Seq, Tool: c.Name, Args: c.Args}
+						if i == 0 {
+							part.Thoughts = s.Thoughts
+						}
+						trace.Steps = append(trace.Steps, part)
+					}
+					continue
+				}
+			}
 		}
 		if s.Reason || s.Tool != "" || len(s.Thoughts) > 0 {
 			trace.Steps = append(trace.Steps, s)

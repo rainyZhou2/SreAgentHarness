@@ -108,6 +108,7 @@ func Run(ctx context.Context, cfg Config) error {
 	reg := tools.NewRegistry(tools.DemoTools()...)
 	reg.Register(artifactq.New(arts))
 	reg.Register(verify.ReviewTool{})
+	reg.Register(kernel.BatchTool{})
 	if len(local.ToolOverlays) > 0 {
 		reg.SetOverlays(local.ToolOverlays)
 	}

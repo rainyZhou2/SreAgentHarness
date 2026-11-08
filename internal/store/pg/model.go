@@ -306,3 +306,13 @@ func (s *Store) ListStreamSegments(ctx context.Context, tenantID, runID string) 
 		return v, err
 	})
 }
+
+// RunUsage is the run's model spend for the kernel's run budget.
+func (s *Store) RunUsage(ctx context.Context, tenantID, runID string) (domain.RunUsage, error) {
+	c, err := s.RunCost(ctx, tenantID, runID)
+	if err != nil {
+		return domain.RunUsage{}, err
+	}
+	return domain.RunUsage{Requests: c.Requests, InputTokens: c.InputTokens, OutputTokens: c.OutputTokens,
+		CostMicros: c.CostMicros}, nil
+}
