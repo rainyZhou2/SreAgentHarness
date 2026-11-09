@@ -24,5 +24,10 @@ coverage.*
 /GoAgentHarness.md
 /GoAgentHarness.zh-CN.md
 /SreAgentHarness_v2.md
+
+# superpowers plans/specs and v2 design doc stay local
+/docs/superpowers/
+/docs/v2-control-plane.md
+
 # workspace-local MCP/IDE config
 /.comate/
