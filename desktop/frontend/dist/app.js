@@ -1597,7 +1597,7 @@ function renderWorkList(page, loading) {
       h("div", { class: "ext-main" },
         h("div", { class: "ext-title" }, badge(w.status), h("span", {}, w.title || w.id)),
         h("div", { class: "muted small" },
-          t(w.kind || "general"), " · ",
+          t(w.kind || "general"), " · ", queueChip(w), " ",
           st && !WORK_TERMINAL.has(w.status) ? t("stage {n}/{total}: {id}", { n: w.stage + 1, total: stages.length, id: st.id }) + " · " : "",
           ((w.goal && w.goal.subject_refs) || []).slice(0, 3).join(", ")),
         w.reason ? h("div", { class: "muted small work-reason" }, w.reason) : null),
@@ -1617,7 +1617,7 @@ function renderWorkDetail(page, loading) {
     h("div", { class: "work-head" },
       h("h1", {}, w.title || w.id),
       h("div", { class: "work-meta muted small" },
-        badge(w.status), " ", t(w.kind || "general"), " · ", t("generation {n}", { n: w.generation }),
+        badge(w.status), " ", t(w.kind || "general"), " · ", queueChip(w), " · ", t("generation {n}", { n: w.generation }),
         " · ", t("opened {time}", { time: new Date(w.created_at).toLocaleString(locale()) }),
         w.closed_at ? " · " + t("closed after {d}", { d: dur(w.created_at, w.closed_at) }) : ""),
       w.reason ? h("div", { class: "work-reason" }, w.reason) : null,
@@ -1663,6 +1663,12 @@ function workControls(w, cur) {
   if (w.status === "SUSPENDED") out.push(btn("Resume", () => cmd("resume"), "btn approve"));
   if (!WORK_TERMINAL.has(w.status)) {
     out.push(btn("Check now", () => cmd("wake")));
+    if (w.queue !== "critical-mitigation") out.push(btn("Escalate to mitigation", async () => {
+      const r = await ask({ title: t("Move this Work to the critical-mitigation queue?"), text: t("It is scheduled ahead of all other Works. Approval and risk rules do not change."), label: t("Reason"), ok: t("Escalate") });
+      if (r == null) return;
+      await cmd("set_queue", { queue: "critical-mitigation" }, r);
+    }));
+    else out.push(btn("Return to investigation", () => cmd("set_queue", { queue: "incident-investigate" })));
     out.push(btn("Cancel Work", async () => {
       const r = await ask({ title: t("Cancel this Work?"), text: t("Running investigations stop. Changes already made are not undone."), label: t("Reason"), ok: t("Cancel Work"), danger: true });
       if (r == null) return;
@@ -1683,6 +1689,12 @@ function workControls(w, cur) {
     }));
   }
   return h("div", { class: "work-controls" }, out);
+}
+
+// queueChip shows the scheduling queue of a Work.
+function queueChip(w) {
+  const q = w.queue || "routine-work";
+  return h("span", { class: "queue-chip q-" + q, title: t("Scheduling queue") }, t(q));
 }
 
 // ---- outcome cards ----

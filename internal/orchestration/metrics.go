@@ -40,6 +40,8 @@ type Metrics struct {
 	guardDenials   obs.Counter
 	breakGlass     obs.Counter
 	effectsBlocked obs.Counter
+	queueClaimed   obs.Counter
+	poolDeferrals  obs.Counter
 }
 
 var (
@@ -94,6 +96,9 @@ func NewMetrics(reg *obs.Registry, store *cpsql.Store) *Metrics {
 		breakGlass: reg.Counter("harness_action_break_glass_total", "Actions released through break-glass."),
 		effectsBlocked: reg.Counter("harness_action_blocked_by_kernel_effect_total",
 			"Action dispatches deferred by an unresolved kernel tool effect."),
+		queueClaimed: reg.Counter("harness_work_queue_claimed_total", "Works claimed for processing, by scheduling queue.", "queue"),
+		poolDeferrals: reg.Counter("harness_pool_deferred_total",
+			"Work steps postponed because a resource pool was full (model_runs, actions).", "pool"),
 	}
 	if store != nil {
 		registerBacklog(reg, store)
@@ -110,6 +115,32 @@ func NewMetrics(reg *obs.Registry, store *cpsql.Store) *Metrics {
 		})
 	}
 	return m
+}
+
+func (m *Metrics) claimed(queue string) {
+	if m == nil {
+		return
+	}
+	m.queueClaimed.Inc(queue)
+}
+
+func (m *Metrics) poolDeferred(pool string) {
+	if m == nil {
+		return
+	}
+	m.poolDeferrals.Inc(pool)
+}
+
+// RegisterPools exports the in-flight slots of the per-replica pools.
+func (m *Metrics) RegisterPools(reg *obs.Registry, p *Pools) {
+	if reg == nil || p == nil {
+		return
+	}
+	reg.Collect("harness_pool_inflight", "Held slots of the per-replica resource pools (actions, snapshots).",
+		func(_ context.Context, emit func(string, map[string]string, float64)) {
+			emit("harness_pool_inflight", map[string]string{"pool": "actions"}, float64(p.Actions.InFlight()))
+			emit("harness_pool_inflight", map[string]string{"pool": "snapshots"}, float64(p.Snapshots.InFlight()))
+		})
 }
 
 func (m *Metrics) tick(result string) {
@@ -294,6 +325,8 @@ func registerBacklog(reg *obs.Registry, store *cpsql.Store) {
 		"harness_watch_overdue":                 "Active watches due for more than a minute (the reconciler is not progressing).",
 		"harness_watch_overdue_oldest_seconds":  "How long the most overdue watch has been due.",
 		"harness_action_unapproved_dispatch":    "Dispatched actions that required approval but have neither an approval nor break-glass (must be 0).",
+		"harness_work_queue_due":                "Works due for processing and not leased, by scheduling queue.",
+		"harness_work_queue_due_oldest_seconds": "How long the oldest due Work of each queue has waited.",
 	}
 	for n, h := range gauges {
 		reg.Describe(n, h)
@@ -314,6 +347,11 @@ func registerBacklog(reg *obs.Registry, store *cpsql.Store) {
 			[]string{"WAITING_APPROVAL", "READY", "DISPATCHED", "EFFECT_UNKNOWN", "MANUAL_RECOVERY", "VERIFYING", "DEGRADED", "COMPENSATION_PENDING"})
 		emitItems("harness_work_waiting", "harness_work_waiting_oldest_seconds", "status", b.Works,
 			[]string{"WAITING", "BLOCKED", "SUSPENDED"})
+		queues := make([]string, len(work.Queues))
+		for i, q := range work.Queues {
+			queues[i] = string(q)
+		}
+		emitItems("harness_work_queue_due", "harness_work_queue_due_oldest_seconds", "queue", b.Due, queues)
 		emitItems("harness_event_inbox_backlog", "harness_event_inbox_oldest_seconds", "state", b.Inbox,
 			[]string{"NEW", "FAILED", "DEAD"})
 		emit("harness_watch_overdue", nil, float64(b.OverdueWatches.Count))

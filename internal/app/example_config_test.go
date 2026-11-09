@@ -132,7 +132,8 @@ func strictJSON(raw json.RawMessage, v any) error {
 func TestLoadFileKeepsWorkSection(t *testing.T) {
 	path := t.TempDir() + "/harness.json"
 	body := `{"work":{"templates":[{"id":"t","version":1,"kind":"incident","stages":[{"id":"c","type":"confirm"}]}],
-	  "correlation_rules":[{"name":"r","match":{"event_types":["alert.firing"]},"key":"dedup_key","template":"t","work_kind":"incident","title":"${type} on ${subject} (${HARNESS_TEST_UNSET_VAR})"}]}}`
+	  "correlation_rules":[{"name":"r","match":{"event_types":["alert.firing"]},"key":"dedup_key","template":"t","work_kind":"incident","title":"${type} on ${subject} (${HARNESS_TEST_UNSET_VAR})"}],
+	  "queues":{"routine-work":{"concurrency":3}},"pools":{"actions":2}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +146,9 @@ func TestLoadFileKeepsWorkSection(t *testing.T) {
 	}
 	// Template placeholders survive environment expansion; unset upper-case
 	// variables still expand to empty.
+	if f.Work.Queues["routine-work"].Concurrency != 3 || f.Work.Pools == nil || f.Work.Pools.Actions != 2 {
+		t.Fatalf("queues/pools dropped: %+v %+v", f.Work.Queues, f.Work.Pools)
+	}
 	if got := f.Work.CorrelationRules[0].Title; got != "${type} on ${subject} ()" {
 		t.Fatalf("title: %q", got)
 	}

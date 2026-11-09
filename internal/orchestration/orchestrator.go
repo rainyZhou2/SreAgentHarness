@@ -53,10 +53,13 @@ type Orchestrator struct {
 	// stage re-reads its runs (default 5s).
 	Poll    time.Duration
 	RunPoll time.Duration
-	// Batch is how many Works one tick claims (default 16); Concurrency how
-	// many are processed in parallel (default 4).
-	Batch       int
-	Concurrency int
+	// Queues bounds each scheduling queue (default DefaultQueueLimits):
+	// Run gives every queue its own claim loop and concurrency, so a flood
+	// of routine or background Works never delays a mitigation (§20.2).
+	Queues map[work.Queue]QueueLimit
+	// Pools are the shared resource pools (model runs, production actions,
+	// world snapshots); nil means unlimited.
+	Pools *Pools
 	// MaxStepsPerClaim bounds immediate transitions in one pass (default 8).
 	MaxStepsPerClaim int
 	// MaxDataClass is the most sensitive data class the model provider may
@@ -140,55 +143,106 @@ func (o *Orchestrator) defaults() {
 	if o.RunPoll <= 0 {
 		o.RunPoll = 5 * time.Second
 	}
-	if o.Batch <= 0 {
-		o.Batch = 16
-	}
-	if o.Concurrency <= 0 {
-		o.Concurrency = 4
+	if o.Queues == nil {
+		o.Queues = DefaultQueueLimits()
 	}
 	if o.MaxStepsPerClaim <= 0 {
 		o.MaxStepsPerClaim = 8
 	}
 }
 
-// Run claims and processes due Works until ctx ends.
+// limit is the effective limit of a queue.
+func (o *Orchestrator) limit(q work.Queue) QueueLimit {
+	l := o.Queues[q]
+	if l.Concurrency <= 0 {
+		l.Concurrency = 1
+	}
+	if l.Batch <= 0 {
+		l.Batch = 4
+	}
+	return l
+}
+
+// Run claims and processes due Works until ctx ends: one loop per queue,
+// each with its own concurrency, so queues never wait on each other.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	o.defaults()
+	var wg sync.WaitGroup
+	for _, q := range work.Queues {
+		wg.Add(1)
+		go func(q work.Queue) {
+			defer wg.Done()
+			o.runQueue(ctx, q)
+		}(q)
+	}
+	wg.Wait()
+	return nil
+}
+
+// runQueue keeps up to the queue's concurrency Works in flight; a slow Work
+// holds one slot of its own queue only.
+func (o *Orchestrator) runQueue(ctx context.Context, q work.Queue) {
+	lim := o.limit(q)
+	slots := make(chan struct{}, lim.Concurrency)
+	var inflight sync.WaitGroup
+	defer inflight.Wait()
 	t := time.NewTicker(o.Poll)
 	defer t.Stop()
 	for {
-		if _, err := o.Tick(ctx); err != nil && ctx.Err() == nil {
-			o.log().Warn("work orchestrator tick failed", "err", err)
+		if free := cap(slots) - len(slots); free > 0 {
+			works, err := o.Store.ClaimQueue(ctx, o.Owner, q, o.now(), o.Lease, min(free, lim.Batch))
+			if err != nil && ctx.Err() == nil {
+				o.log().Warn("work orchestrator claim failed", "queue", q, "err", err)
+			}
+			for _, w := range works {
+				slots <- struct{}{}
+				inflight.Add(1)
+				o.Metrics.claimed(string(q))
+				go func(w work.Work) {
+					defer inflight.Done()
+					defer func() { <-slots }()
+					o.process(ctx, w)
+				}(w)
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-t.C:
 		}
 	}
 }
 
-// Tick claims due Works once and processes them; it returns how many were
-// claimed.
+// Tick claims due Works of every queue once (most urgent first) and
+// processes them, each queue within its own concurrency; it returns how
+// many were claimed. Run is the production loop; Tick serves tests, the
+// Work bench and single-shot callers.
 func (o *Orchestrator) Tick(ctx context.Context) (int, error) {
 	o.defaults()
-	works, err := o.Store.ClaimDueWorks(ctx, o.Owner, o.now(), o.Lease, o.Batch)
-	if err != nil {
-		return 0, err
-	}
-	sem := make(chan struct{}, o.Concurrency)
 	var wg sync.WaitGroup
-	for _, w := range works {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(w work.Work) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			o.process(ctx, w)
-		}(w)
+	total := 0
+	for _, q := range work.Queues {
+		lim := o.limit(q)
+		works, err := o.Store.ClaimQueue(ctx, o.Owner, q, o.now(), o.Lease, lim.Batch)
+		if err != nil {
+			wg.Wait()
+			return total, err
+		}
+		total += len(works)
+		sem := make(chan struct{}, lim.Concurrency)
+		for _, w := range works {
+			o.Metrics.claimed(string(q))
+			wg.Add(1)
+			go func(w work.Work) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				o.process(ctx, w)
+			}(w)
+		}
 	}
 	wg.Wait()
-	return len(works), nil
+	return total, nil
 }
 
 func (o *Orchestrator) process(ctx context.Context, w work.Work) {
@@ -208,9 +262,15 @@ func (o *Orchestrator) process(ctx context.Context, w work.Work) {
 		}
 	}()
 	err := d.run(ctx)
+	var def *errDeferred
 	switch {
 	case err == nil:
 		o.Metrics.tick("ok")
+	case errors.As(err, &def):
+		// A resource pool is full: retry later without noise.
+		o.Metrics.tick("deferred")
+		o.Metrics.poolDeferred(def.pool)
+		_ = o.Store.ReleaseWork(context.WithoutCancel(ctx), w.TenantID, w.ID, o.Owner, o.now().Add(def.after))
 	case errors.Is(err, work.ErrLeaseLost), errors.Is(err, work.ErrVersionConflict):
 		// Someone else changed the Work (a command, another replica). Its
 		// own wake decides what happens next; drop our lease if we still
@@ -473,6 +533,52 @@ func (d *driver) waitFor(st stageState, reason string, wake *time.Time) step {
 	return step{m: m, wake: wake}
 }
 
+// queued postpones the current step because a resource pool is full. The
+// reason is recorded once (visible on the Work); later attempts are quiet
+// deferrals without writes.
+func (d *driver) queued(pool, reason string, after time.Duration) (step, error) {
+	if d.w.Reason != reason {
+		wake := d.o.now().Add(after)
+		return step{m: work.Mutation{Reason: strPtr(reason)}, wake: &wake}, nil
+	}
+	return step{}, deferred(pool, after)
+}
+
+// runBudget checks the tenant's model-run budget before n runs start: the
+// queue's own cap, then the pool total (critical-mitigation is exempt from
+// the total). A stage larger than a cap may start when nothing else runs.
+// The count is cluster-wide but not reserved, so concurrent replicas may
+// overshoot by at most their in-flight stages.
+func (o *Orchestrator) runBudget(ctx context.Context, w *work.Work, n int) (string, error) {
+	qcap := o.limit(w.Queue).ModelRunsPerTenant
+	total := 0
+	if o.Pools != nil && w.Queue != work.QueueCritical {
+		total = o.Pools.Limits.ModelRunsPerTenant
+	}
+	if qcap <= 0 && total <= 0 {
+		return "", nil
+	}
+	counts, err := o.Store.ActiveWorkRuns(ctx, w.TenantID)
+	if err != nil {
+		return "", err
+	}
+	if cur := counts[w.Queue]; qcap > 0 && cur > 0 && cur+n > qcap {
+		return fmt.Sprintf("queued: %s model run budget (%d of %d active)", w.Queue, cur, qcap), nil
+	}
+	if total > 0 {
+		cur := 0
+		for q, c := range counts {
+			if q != work.QueueCritical {
+				cur += c
+			}
+		}
+		if cur > 0 && cur+n > total {
+			return fmt.Sprintf("queued: tenant model run budget (%d of %d active)", cur, total), nil
+		}
+	}
+	return "", nil
+}
+
 // ---- run / agents ----
 
 func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) (step, error) {
@@ -489,6 +595,11 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		}
 		if w.RunsStarted+len(specs) > w.Template.Limits.MaxRuns {
 			return d.terminate(work.StatusFailed, "max_runs_exceeded"), nil
+		}
+		if reason, err := d.o.runBudget(ctx, w, len(specs)); err != nil {
+			return step{}, err
+		} else if reason != "" {
+			return d.queued("model_runs", reason, 10*time.Second)
 		}
 		summaries, err := d.summaries(ctx)
 		if err != nil {
@@ -882,7 +993,12 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 		}
 		return d.waitFor(st, fmt.Sprintf("awaiting approval of %s on %s", rec.ActionName, rec.TargetRef), &deadline), nil
 	case action.StateReady:
+		release, ok := d.o.Pools.actionSlot(w.TenantID)
+		if !ok {
+			return d.queued("actions", "queued: production action pool is full", 5*time.Second)
+		}
 		res, err := rt.Execute(ctx, w.TenantID, rec.ID)
+		release()
 		switch {
 		case errors.Is(err, action.ErrTargetBusy):
 			wake := now.Add(30 * time.Second)
@@ -904,7 +1020,13 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 			Payload: map[string]any{"action_id": res.ID, "state": res.State, "error": res.LastError}}}}}, nil
 	case action.StateDispatched:
 		if rec.DispatchedAt != nil && now.Sub(*rec.DispatchedAt) > 2*time.Minute {
-			if _, err := rt.Reconcile(ctx, w.TenantID, rec.ID); err != nil {
+			release, ok := d.o.Pools.actionSlot(w.TenantID)
+			if !ok {
+				return d.queued("actions", "queued: production action pool is full", 5*time.Second)
+			}
+			_, err := rt.Reconcile(ctx, w.TenantID, rec.ID)
+			release()
+			if err != nil {
 				return step{}, err
 			}
 			return step{again: true}, nil

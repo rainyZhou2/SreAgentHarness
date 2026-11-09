@@ -19,24 +19,24 @@ var _ work.Store = (*Store)(nil)
 
 const workCols = `id, tenant_id, kind, status, title, goal, goal_hash, template, generation, stage, stage_state,
 	replans, runs_started, cost_micros, reason, priority, owner_actor, source_event, version, last_event_seq,
-	wake_at, lease_owner, lease_until, created_at, updated_at, closed_at`
+	wake_at, lease_owner, lease_until, created_at, updated_at, closed_at, queue`
 
 func scanWork(r rowScanner) (work.Work, error) {
 	var w work.Work
 	var goal, tpl, state jb
 	var reason, owner, source, leaseOwner ns
 	var wake, leaseUntil, created, updated, closed ts
-	var kind, status string
+	var kind, status, queue string
 	err := r.Scan(&w.ID, &w.TenantID, &kind, &status, &w.Title, &goal, &w.GoalHash, &tpl, &w.Generation, &w.Stage,
 		&state, &w.Replans, &w.RunsStarted, &w.CostMicros, &reason, &w.Priority, &owner, &source, &w.Version,
-		&w.LastSeq, &wake, &leaseOwner, &leaseUntil, &created, &updated, &closed)
+		&w.LastSeq, &wake, &leaseOwner, &leaseUntil, &created, &updated, &closed, &queue)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, work.ErrNotFound
 	}
 	if err != nil {
 		return w, err
 	}
-	w.Kind, w.Status = work.Kind(kind), work.Status(status)
+	w.Kind, w.Status, w.Queue = work.Kind(kind), work.Status(status), work.Queue(queue)
 	if err := json.Unmarshal(goal, &w.Goal); err != nil {
 		return w, fmt.Errorf("work %s goal: %w", w.ID, err)
 	}
@@ -174,6 +174,10 @@ func (s *Store) ListWorks(ctx context.Context, f work.Filter) ([]work.Work, erro
 		where = append(where, "kind=?")
 		args = append(args, string(f.Kind))
 	}
+	if f.Queue != "" {
+		where = append(where, "queue=?")
+		args = append(args, string(f.Queue))
+	}
 	if f.Subject != "" {
 		where = append(where, `id IN (SELECT work_id FROM work_subject_links WHERE tenant_id=? AND subject_kind='subject' AND subject_id=?)`)
 		args = append(args, f.TenantID, f.Subject)
@@ -255,6 +259,14 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		}
 		if m.Reason != nil {
 			w.Reason = cpkit.Truncate(*m.Reason, 2000)
+		}
+		if m.Queue != nil && *m.Queue != w.Queue {
+			if w.Status.Terminal() && (m.Status == nil || m.Status.Terminal()) {
+				return fmt.Errorf("%w: a closed Work cannot change queue", work.ErrInvalid)
+			}
+			m.Events = append(m.Events, work.NewEvent{Type: "work.queue_changed", Payload: map[string]any{
+				"from": w.Queue, "to": *m.Queue}})
+			w.Queue = *m.Queue
 		}
 		if m.Stage != nil {
 			if *m.Stage < 0 || *m.Stage > len(w.Template.Stages) {
@@ -401,10 +413,10 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		}
 		res, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET status=?, reason=?, stage=?, stage_state=?, generation=?,
 			replans=?, runs_started=?, cost_micros=?, wake_at=?, lease_owner=?, lease_until=?, version=?,
-			last_event_seq=?, updated_at=?, closed_at=?, goal=?, goal_hash=? WHERE tenant_id=? AND id=? AND version=?`),
+			last_event_seq=?, updated_at=?, closed_at=?, goal=?, goal_hash=?, queue=? WHERE tenant_id=? AND id=? AND version=?`),
 			string(w.Status), nullStr(w.Reason), w.Stage, state, w.Generation, w.Replans, w.RunsStarted, w.CostMicros,
 			s.tp(w.WakeAt), nullStr(w.LeaseOwner), s.tp(w.LeaseUntil), w.Version, w.LastSeq, s.t(now), s.tp(w.ClosedAt),
-			js(w.Goal), w.GoalHash, w.TenantID, w.ID, w.Version-1)
+			js(w.Goal), w.GoalHash, string(w.Queue), w.TenantID, w.ID, w.Version-1)
 		if err != nil {
 			return err
 		}
@@ -591,15 +603,35 @@ func (s *Store) ListOutcomes(ctx context.Context, tenantID, workID string, limit
 
 // ClaimDueWorks leases due Works for one orchestrator replica.
 func (s *Store) ClaimDueWorks(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]work.Work, error) {
+	return s.ClaimQueue(ctx, owner, "", now, lease, limit)
+}
+
+// queueRank orders queues by urgency in SQL (critical first).
+const queueRank = `CASE queue WHEN 'critical-mitigation' THEN 0 WHEN 'incident-investigate' THEN 1
+	WHEN 'routine-work' THEN 2 WHEN 'batch-evaluation' THEN 3 ELSE 4 END`
+
+// ClaimQueue leases up to limit due Works of one queue (empty: all queues,
+// most urgent queue first), by priority then wake time.
+func (s *Store) ClaimQueue(ctx context.Context, owner string, queue work.Queue, now time.Time, lease time.Duration, limit int) ([]work.Work, error) {
 	if limit <= 0 {
 		limit = 16
+	}
+	if queue != "" && !work.ValidQueue(queue) {
+		return nil, fmt.Errorf("%w: unknown queue %q", work.ErrInvalid, queue)
 	}
 	var out []work.Work
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		out = out[:0]
+		where, order := "", queueRank+", "
+		args := []any{s.t(now), s.t(now)}
+		if queue != "" {
+			where, order = " AND queue=?", ""
+			args = append(args, string(queue))
+		}
+		args = append(args, limit)
 		rows, err := tx.QueryContext(ctx, s.q(`SELECT id FROM agent_works WHERE wake_at IS NOT NULL AND wake_at <= ?
-			AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)
-			ORDER BY priority DESC, wake_at LIMIT ?`+s.skipLocked()), s.t(now), s.t(now), limit)
+			AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)`+where+`
+			ORDER BY `+order+`priority DESC, wake_at LIMIT ?`+s.skipLocked()), args...)
 		if err != nil {
 			return err
 		}
@@ -633,6 +665,30 @@ func (s *Store) ClaimDueWorks(ctx context.Context, owner string, now time.Time, 
 		return nil
 	})
 	return out, err
+}
+
+// ActiveWorkRuns counts a tenant's model runs started by open Works and
+// not yet observed terminal, per queue (the cluster-wide model-run pool).
+func (s *Store) ActiveWorkRuns(ctx context.Context, tenantID string) (map[work.Queue]int, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT w.queue, count(*) FROM work_run_links l
+		JOIN agent_works w ON w.tenant_id = l.tenant_id AND w.id = l.work_id
+		WHERE l.tenant_id=? AND l.role='owner' AND w.status NOT IN ('SUCCEEDED','FAILED','CANCELLED')
+		AND (l.status IS NULL OR l.status NOT IN ('COMPLETED','FAILED','CANCELLED'))
+		GROUP BY w.queue`), tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[work.Queue]int{}
+	for rows.Next() {
+		var q string
+		var n int
+		if err := rows.Scan(&q, &n); err != nil {
+			return nil, err
+		}
+		out[work.Queue(q)] = n
+	}
+	return out, rows.Err()
 }
 
 // ReleaseWork drops a lease without changing the Work (e.g. after a

@@ -48,6 +48,7 @@ type CreateRequest struct {
 	TemplateID     string          `json:"template,omitempty"`
 	Template       *work.Template  `json:"template_spec,omitempty"`
 	Priority       int             `json:"priority,omitempty"`
+	Queue          work.Queue      `json:"queue,omitempty"`
 	Meta           json.RawMessage `json:"-"`
 }
 
@@ -85,7 +86,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (work.Work, boo
 		actorType = "user"
 	}
 	return s.Store.CreateWork(ctx, work.NewWork{TenantID: req.TenantID, Kind: req.Kind, Title: req.Title, Goal: req.Goal,
-		Template: tpl, Priority: req.Priority, ActorType: actorType, ActorID: req.ActorID,
+		Template: tpl, Priority: req.Priority, Queue: req.Queue, ActorType: actorType, ActorID: req.ActorID,
 		IdempotencyKey: req.IdempotencyKey, Subjects: subjects, Now: s.Clock.Now()})
 }
 
@@ -114,6 +115,8 @@ type CommandPayload struct {
 	// replan/reopen: amended goal for the new generation (RFC §6.3: the
 	// goal may change, earlier generations keep theirs in work_goals).
 	Goal *work.GoalSpec `json:"goal,omitempty"`
+	// set_queue: the target scheduling queue.
+	Queue work.Queue `json:"queue,omitempty"`
 }
 
 // Command applies an operator command. Commands are idempotent on the key:
@@ -176,6 +179,16 @@ func (s *Service) Command(ctx context.Context, req CommandRequest) (work.Work, e
 		setStatus(work.StatusCancelled)
 		m.CancelAllWatches = true
 	case work.CmdWake:
+		wake()
+	case work.CmdSetQueue:
+		if !work.ValidQueue(p.Queue) {
+			return work.Work{}, fmt.Errorf("%w: set_queue needs a known queue", work.ErrInvalid)
+		}
+		if cur.Status.Terminal() {
+			return work.Work{}, &work.TransitionError{From: cur.Status, To: cur.Status}
+		}
+		q := p.Queue
+		m.Queue = &q
 		wake()
 	case work.CmdReplan, work.CmdReopen:
 		idx := cur.Stage

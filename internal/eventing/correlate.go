@@ -49,6 +49,10 @@ type Rule struct {
 	// ${label.<name>} are substituted (plain substitution, no expressions).
 	Title    string `json:"title,omitempty"`
 	Priority int    `json:"priority,omitempty"`
+	// Queue is the scheduling queue of created Works (empty: the
+	// template's or kind's default). Events are authenticated, so a rule may
+	// route to critical-mitigation.
+	Queue string `json:"queue,omitempty"`
 	// Intent becomes the GoalSpec intent of created Works.
 	Intent string `json:"intent,omitempty"`
 	// Group lets several rules feed one correlation group (default: the

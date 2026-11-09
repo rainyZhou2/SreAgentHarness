@@ -200,6 +200,7 @@ type Work struct {
 	CostMicros  int64           `json:"cost_micros"`
 	Reason      string          `json:"reason,omitempty"`
 	Priority    int             `json:"priority"`
+	Queue       Queue           `json:"queue"`
 	OwnerActor  string          `json:"owner_actor,omitempty"`
 	SourceEvent string          `json:"source_event,omitempty"`
 	Version     int64           `json:"version"`

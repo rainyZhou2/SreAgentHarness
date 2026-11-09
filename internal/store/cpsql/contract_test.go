@@ -627,3 +627,107 @@ func TestFactConflictResolvedByLaterObservation(t *testing.T) {
 		}
 	})
 }
+
+// Queues (RFC §20.2): persisted, filterable, claimed per queue, changeable
+// by an operator with a timeline event; active runs are counted per queue.
+func TestWorkQueues(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store) {
+		ctx, tn := context.Background(), tenant()
+		inc := mustCreate(t, s, tn)
+		if inc.Queue != work.QueueIncident {
+			t.Fatalf("incident default queue: %s", inc.Queue)
+		}
+		n := newWork(tn, cpkit.NewID())
+		n.Kind, n.Queue, n.ActorType, n.ActorID = work.KindRoutine, work.QueueBackground, "user", "op"
+		bg, _, err := s.CreateWork(ctx, n)
+		if err != nil || bg.Queue != work.QueueBackground {
+			t.Fatalf("requested queue: %v %s", err, bg.Queue)
+		}
+		got, _ := s.GetWork(ctx, tn, bg.ID)
+		if got.Queue != work.QueueBackground {
+			t.Fatalf("persisted queue: %s", got.Queue)
+		}
+		list, _ := s.ListWorks(ctx, work.Filter{TenantID: tn, Queue: work.QueueBackground})
+		if len(list) != 1 || list[0].ID != bg.ID {
+			t.Fatalf("filter: %+v", list)
+		}
+		claimed, err := s.ClaimQueue(ctx, "o", work.QueueBackground, t0.Add(time.Second), time.Minute, 500)
+		if err != nil || !containsWork(claimed, bg.ID) || containsWork(claimed, inc.ID) {
+			t.Fatalf("claim by queue: %v", err)
+		}
+		if _, err := s.ClaimQueue(ctx, "o", "nope", t0, time.Minute, 1); !errors.Is(err, work.ErrInvalid) {
+			t.Fatalf("unknown queue: %v", err)
+		}
+
+		// An operator escalates the incident; the change is on the timeline.
+		q := work.QueueCritical
+		up, err := s.ApplyWork(ctx, work.Mutation{TenantID: tn, WorkID: inc.ID, ActorType: "user", ActorID: "oncall",
+			Now: t0.Add(time.Second), Queue: &q})
+		if err != nil || up.Queue != work.QueueCritical {
+			t.Fatalf("escalate: %v %s", err, up.Queue)
+		}
+		evs, _ := s.ListWorkEvents(ctx, tn, inc.ID, 0, 50)
+		found := false
+		for _, e := range evs {
+			found = found || e.Type == "work.queue_changed"
+		}
+		if !found {
+			t.Fatal("queue change not on the timeline")
+		}
+
+		// Active model runs per queue: owner links of open Works until a
+		// terminal run status is observed.
+		cur, _ := s.GetWork(ctx, tn, inc.ID)
+		r1, r2 := cpkit.NewID(), cpkit.NewID()
+		cur, err = s.ApplyWork(ctx, work.Mutation{TenantID: tn, WorkID: inc.ID, ActorType: "system", ActorID: "test",
+			ExpectedVersion: cur.Version, Now: t0.Add(2 * time.Second), Links: []work.RunLink{
+				{RunID: r1, Role: work.RoleOwner, Phase: "investigate", StageID: "investigate", Generation: 1, Required: true},
+				{RunID: r2, Role: work.RoleOwner, Phase: "investigate", StageID: "investigate", Generation: 1, Required: true}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts, err := s.ActiveWorkRuns(ctx, tn)
+		if err != nil || counts[work.QueueCritical] != 2 {
+			t.Fatalf("active runs: %v %v", err, counts)
+		}
+		if _, err := s.ApplyWork(ctx, work.Mutation{TenantID: tn, WorkID: inc.ID, ActorType: "system", ActorID: "test",
+			ExpectedVersion: cur.Version, Now: t0.Add(3 * time.Second), LinkStatus: map[string]string{r1: "COMPLETED"}}); err != nil {
+			t.Fatal(err)
+		}
+		if counts, _ = s.ActiveWorkRuns(ctx, tn); counts[work.QueueCritical] != 1 {
+			t.Fatalf("a completed run is not active: %v", counts)
+		}
+
+		b, err := s.Backlog(ctx, t0.Add(time.Hour))
+		if err != nil || b.Due[string(work.QueueCritical)].Count < 1 {
+			t.Fatalf("due backlog per queue: %v %+v", err, b.Due)
+		}
+	})
+}
+
+// Claiming across queues takes the most urgent queue first, whatever the
+// priority within other queues (fresh SQLite: no Works of other tests).
+func TestClaimPrefersUrgentQueues(t *testing.T) {
+	s, err := OpenSQLite(filepath.Join(t.TempDir(), "cp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, tn := context.Background(), tenant()
+	mk := func(q work.Queue, prio int) work.Work {
+		n := newWork(tn, cpkit.NewID())
+		n.Queue, n.Priority, n.ActorType, n.ActorID = q, prio, "user", "op"
+		w, _, err := s.CreateWork(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	mk(work.QueueBackground, 100)
+	mk(work.QueueRoutine, 50)
+	crit := mk(work.QueueCritical, -10)
+	got, err := s.ClaimDueWorks(ctx, "o", t0.Add(time.Second), time.Minute, 1)
+	if err != nil || len(got) != 1 || got[0].ID != crit.ID {
+		t.Fatalf("critical first: %v %+v", err, got)
+	}
+}

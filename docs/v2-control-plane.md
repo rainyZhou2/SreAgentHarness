@@ -83,6 +83,48 @@ terminal → ACTIVE only through `reopen` (new generation)
   (48h), `max_agents` (4), `max_actions` (5); `goal.constraints.max_cost_usd`
   blocks the Work when exceeded.
 
+## Queues and resource pools
+
+Every Work has a scheduling **queue** (RFC §20.2), chosen at creation from
+the request, the correlation rule (`queue:`), the template (`queue:`) or the
+kind (incidents and AI-infra Works investigate, everything else is routine):
+
+| Queue | Default concurrency / batch | Model runs per tenant | Used for |
+|---|---|---|---|
+| `critical-mitigation` | 8 / 16 | own cap only | mitigations; only authenticated event sources and operators may use it |
+| `incident-investigate` | 4 / 16 | pool total | incident and AI-infra investigation |
+| `routine-work` | 2 / 8 | 8 | monitoring, changes, requests, routine checks |
+| `batch-evaluation` | 1 / 4 | 4 | evaluation and replay work |
+| `background-improvement` | 1 / 4 | 2 | postmortems, follow-ups, learning |
+
+- The orchestrator runs **one claim loop per queue**, each with its own
+  concurrency slots, so a stuck or flooded queue only holds its own slots; a
+  single-shot `Tick` claims the most urgent queue first.
+- **Resource pools**: model runs are counted per tenant across replicas (the
+  queue's cap, then `pools.model_runs_per_tenant`, which critical-mitigation
+  is exempt from); production action dispatches and reconciliations
+  (`pools.actions`, `pools.actions_per_tenant`) and world snapshot builds
+  (`pools.snapshots`) are bounded per replica. A full pool **defers** the
+  step: the Work keeps its status, its reason says `queued: …` once, and it
+  retries quietly. It never fails or blocks because of a pool.
+- A queue only orders and isolates work. It never relaxes policy: R3 stays
+  denied and R2 still needs an approval in every queue.
+- Operators move a Work with the `set_queue` command (payload `{"queue":
+  "critical-mitigation"}`), recorded as `work.queue_changed`; the desktop
+  offers "Escalate to mitigation". Works derived by the system (follow-ups,
+  playbook sweeps) cannot enter critical-mitigation.
+
+```json
+"work": {
+  "queues": {"routine-work": {"concurrency": 4, "model_runs_per_tenant": 12}},
+  "pools": {"model_runs_per_tenant": 48, "actions": 8, "actions_per_tenant": 2, "snapshots": -1}
+}
+```
+
+Fields left out keep their defaults; `-1` in `pools` means unlimited. The
+model-run count is not a reservation: replicas starting stages at the same
+moment may overshoot by their in-flight stages.
+
 ## Events, correlation and watches
 
 `POST /v1/events` (or a plugin's `WorkEnv.Ingest`) stores the envelope in the
@@ -251,6 +293,9 @@ resumable with `Last-Event-ID`.
 
 ## Metrics
 
+- Queues and pools: `harness_work_queue_claimed_total{queue}`,
+  `harness_work_queue_due{queue}`, `harness_work_queue_due_oldest_seconds{queue}`,
+  `harness_pool_deferred_total{pool}`, `harness_pool_inflight{pool}`.
 - Works: `harness_work_active`, `harness_work_transitions_total`,
   `harness_work_ticks_total`, `harness_work_stage_total`,
   `harness_work_replans_total`, `harness_work_age_seconds`,

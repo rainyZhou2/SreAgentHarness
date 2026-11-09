@@ -274,7 +274,7 @@ func (in *Ingestor) newWork(rule eventing.Rule, rec eventing.Record) (work.NewWo
 		Goal: work.GoalSpec{Intent: intent, SubjectRefs: []string{env.SubjectRef},
 			Description: cpkit.Truncate(fmt.Sprintf("Triggered by %s from %s on %s.", env.Type, env.Source, env.SubjectRef), 500),
 			Labels:      map[string]string{"rule": rule.Name}},
-		Template: tpl, Priority: rule.Priority, ActorType: "system", ActorID: "event:" + env.Source,
+		Template: tpl, Priority: rule.Priority, Queue: work.Queue(rule.Queue), ActorType: "system", ActorID: "event:" + env.Source,
 		IdempotencyKey: "event:" + rec.InboxID, SourceEvent: rec.InboxID,
 		Subjects: []work.SubjectLink{{Kind: "subject", ID: env.SubjectRef}}, Now: in.Clock.Now()}, nil
 }

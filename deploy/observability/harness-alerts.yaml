@@ -72,6 +72,18 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "Inbox events in {{ $labels.state }} older than 5m"
+      - alert: HarnessCriticalQueueStarved
+        expr: harness_work_queue_due_oldest_seconds{queue="critical-mitigation"} > 30
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "A critical-mitigation Work has waited over 30s to be processed"
+      - alert: HarnessQueueBacklog
+        expr: harness_work_queue_due_oldest_seconds{queue!="critical-mitigation"} > 900
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Works in queue {{ $labels.queue }} have waited over 15m"
       - alert: HarnessInboxDeadLetters
         expr: increase(harness_event_ingested_total{decision="failed"}[30m]) > 10 or harness_event_inbox_backlog{state="DEAD"} > 0
         labels: {severity: ticket}

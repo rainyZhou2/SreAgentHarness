@@ -279,3 +279,36 @@ func TestPostmortemRoutes(t *testing.T) {
 		t.Fatalf("postmortem of postmortem: %d", code)
 	}
 }
+
+// Queues over HTTP: an operator may create a Work in critical-mitigation,
+// the list filters by queue, unknown queues are 400, and set_queue moves a
+// Work (operators only).
+func TestWorkQueueRoutes(t *testing.T) {
+	e := newEnv(t)
+	body := map[string]any{"kind": "incident", "title": "sev1", "queue": "critical-mitigation",
+		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"}}}
+	code, w1, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "q1"})
+	if code != http.StatusCreated || w1["queue"] != "critical-mitigation" {
+		t.Fatalf("create critical: %d %v", code, w1)
+	}
+	id := w1["id"].(string)
+	body["queue"] = "asap"
+	if code, _, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "q2"}); code != http.StatusBadRequest {
+		t.Fatalf("unknown queue: %d", code)
+	}
+	code, list, _ := e.do("GET", "/v1/works?queue=critical-mitigation", "t1", "viewer", nil, nil)
+	if items, _ := list["items"].([]any); code != 200 || len(items) != 1 {
+		t.Fatalf("filter: %d %v", code, list)
+	}
+	if code, _, _ := e.do("GET", "/v1/works?queue=asap", "t1", "viewer", nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("filter unknown queue: %d", code)
+	}
+	cmd := map[string]any{"type": work.CmdSetQueue, "payload": map[string]any{"queue": "routine-work"}}
+	if code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "viewer", cmd, nil); code != http.StatusForbidden {
+		t.Fatalf("viewer set_queue: %d", code)
+	}
+	code, moved, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", cmd, map[string]string{"Idempotency-Key": "sq1"})
+	if code != 200 || moved["queue"] != "routine-work" {
+		t.Fatalf("set_queue: %d %v", code, moved)
+	}
+}

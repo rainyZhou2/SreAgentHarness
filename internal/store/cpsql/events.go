@@ -304,14 +304,14 @@ func (s *Store) createWorkTx(ctx context.Context, tx *sql.Tx, n work.NewWork) (w
 	now := n.Now
 	w := work.Work{ID: cpkit.NewID(), TenantID: n.TenantID, Kind: n.Kind, Status: work.StatusNew, Title: n.Title,
 		Goal: n.Goal, GoalHash: cpkit.MustHash(n.Goal), Template: n.Template, Generation: 1, Priority: n.Priority,
-		OwnerActor: n.ActorID, SourceEvent: n.SourceEvent, Version: 1, CreatedAt: now, UpdatedAt: now, WakeAt: &now}
+		Queue: n.ResolvedQueue(), OwnerActor: n.ActorID, SourceEvent: n.SourceEvent, Version: 1, CreatedAt: now, UpdatedAt: now, WakeAt: &now}
 	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO agent_works (id, tenant_id, kind, status, title, goal, goal_hash,
 		template, template_id, template_version, generation, stage, replans, runs_started, cost_micros, priority,
 		owner_actor, source_event, version, last_event_seq, wake_at, create_idempotency_key, create_request_hash,
-		created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,1,0,0,0,0,?,?,?,1,0,?,?,?,?,?)`),
+		created_at, updated_at, queue) VALUES (?,?,?,?,?,?,?,?,?,?,1,0,0,0,0,?,?,?,1,0,?,?,?,?,?,?)`),
 		w.ID, w.TenantID, string(w.Kind), string(w.Status), w.Title, js(w.Goal), w.GoalHash, js(w.Template),
 		w.Template.ID, w.Template.Version, w.Priority, nullStr(w.OwnerActor), nullStr(w.SourceEvent),
-		s.t(now), n.IdempotencyKey, n.RequestHash(), s.t(now), s.t(now)); err != nil {
+		s.t(now), n.IdempotencyKey, n.RequestHash(), s.t(now), s.t(now), string(w.Queue)); err != nil {
 		if isUnique(err, "") {
 			return w, errRetryCreate
 		}

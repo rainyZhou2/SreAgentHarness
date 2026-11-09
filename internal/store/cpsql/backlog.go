@@ -18,6 +18,9 @@ type Backlog struct {
 	Actions map[string]BacklogItem // by action state
 	Works   map[string]BacklogItem // WAITING / BLOCKED / SUSPENDED
 	Inbox   map[string]BacklogItem // NEW / FAILED / DEAD
+	// Due are Works ready to be processed and not leased, per queue: a
+	// growing count or age shows a starved queue.
+	Due map[string]BacklogItem
 	// OverdueWatches are ACTIVE watches due for longer than the grace
 	// period: the reconciler is not making progress.
 	OverdueWatches BacklogItem
@@ -31,7 +34,8 @@ const WatchGrace = time.Minute
 
 // Backlog reads the control-plane backlog (all tenants: a metrics source).
 func (s *Store) Backlog(ctx context.Context, now time.Time) (Backlog, error) {
-	b := Backlog{Actions: map[string]BacklogItem{}, Works: map[string]BacklogItem{}, Inbox: map[string]BacklogItem{}}
+	b := Backlog{Actions: map[string]BacklogItem{}, Works: map[string]BacklogItem{}, Inbox: map[string]BacklogItem{},
+		Due: map[string]BacklogItem{}}
 	group := func(dst map[string]BacklogItem, q string, args ...any) error {
 		rows, err := s.db.QueryContext(ctx, s.q(q), args...)
 		if err != nil {
@@ -60,6 +64,11 @@ func (s *Store) Backlog(ctx context.Context, now time.Time) (Backlog, error) {
 	}
 	if err := group(b.Works, `SELECT status, count(*), min(updated_at) FROM agent_works
 		WHERE status IN ('WAITING','BLOCKED','SUSPENDED') GROUP BY status`); err != nil {
+		return b, err
+	}
+	if err := group(b.Due, `SELECT queue, count(*), min(wake_at) FROM agent_works WHERE wake_at IS NOT NULL AND wake_at <= ?
+		AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)
+		GROUP BY queue`, s.t(now), s.t(now)); err != nil {
 		return b, err
 	}
 	if err := group(b.Inbox, `SELECT processing_state, count(*), min(received_at) FROM event_inbox

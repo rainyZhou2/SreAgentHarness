@@ -284,6 +284,10 @@ type Service struct {
 	Clock cpkit.Clock
 	// Observer receives snapshot latency and fact ages (optional).
 	Observer Observer
+	// Gate, when set, bounds concurrent snapshot builds (the snapshot
+	// resource pool, RFC §20.2): it returns a release function, or an error
+	// when no slot frees up in time.
+	Gate func(ctx context.Context, tenantID string) (release func(), err error)
 }
 
 // Observer receives the World's metric signals (RFC §21.1).
@@ -318,6 +322,13 @@ func (s *Service) Snapshot(ctx context.Context, req SnapshotRequest) (snap Snaps
 			}
 		}
 	}()
+	if s.Gate != nil {
+		release, gerr := s.Gate(ctx, req.TenantID)
+		if gerr != nil {
+			return Snapshot{}, gerr
+		}
+		defer release()
+	}
 	return s.snapshot(ctx, req)
 }
 

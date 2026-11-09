@@ -2,14 +2,14 @@
 // extension:
 //
 //	POST /v1/works                         create a Work (operator; Idempotency-Key)
-//	GET  /v1/works                         list Works (viewer)
+//	GET  /v1/works                         list Works (viewer; ?status=&kind=&queue=&subject=)
 //	GET  /v1/works/{id}                    read a Work (ETag = version)
 //	GET  /v1/works/{id}/events             timeline page (after_seq, limit)
 //	GET  /v1/works/{id}/events/stream      timeline SSE (Last-Event-ID / after_seq)
 //	GET  /v1/works/{id}/runs|evidence|hypotheses|watches|outcomes|actions|evaluation
 //	GET  /v1/works/{id}/assignments        agent assignments per stage with results
 //	GET  /v1/works/{id}/goals              goal of every generation
-//	POST /v1/works/{id}/commands           pause|resume|cancel|replan|resolve|wake (operator),
+//	POST /v1/works/{id}/commands           pause|resume|cancel|replan|resolve|wake|set_queue (operator),
 //	                                       confirm|reopen (approver); Idempotency-Key, If-Match
 //	GET  /v1/work-templates                template catalog
 //	POST /v1/works/{id}/evidence           attach evidence (operator; untrusted tier unless admin)
@@ -443,7 +443,11 @@ func (a *API) listWorks(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	f := work.Filter{TenantID: p.Tenant, Kind: work.Kind(q.Get("kind")), Subject: q.Get("subject"),
-		Limit: queryInt(r, "limit", 50, 200), BeforeID: q.Get("before_id")}
+		Queue: work.Queue(q.Get("queue")), Limit: queryInt(r, "limit", 50, 200), BeforeID: q.Get("before_id")}
+	if f.Queue != "" && !work.ValidQueue(f.Queue) {
+		writeErr(w, http.StatusBadRequest, "invalid", "unknown queue")
+		return
+	}
 	for _, s := range q["status"] {
 		for _, x := range strings.Split(s, ",") {
 			if x = strings.TrimSpace(strings.ToUpper(x)); x != "" {
