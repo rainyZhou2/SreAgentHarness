@@ -126,3 +126,26 @@ func strictJSON(raw json.RawMessage, v any) error {
 	}
 	return json.Unmarshal(raw, v)
 }
+
+// TestLoadFileKeepsWorkSection guards the v2 section: templates and
+// correlation rules in HARNESS_CONFIG must reach the work engine.
+func TestLoadFileKeepsWorkSection(t *testing.T) {
+	path := t.TempDir() + "/harness.json"
+	body := `{"work":{"templates":[{"id":"t","version":1,"kind":"incident","stages":[{"id":"c","type":"confirm"}]}],
+	  "correlation_rules":[{"name":"r","match":{"event_types":["alert.firing"]},"key":"dedup_key","template":"t","work_kind":"incident","title":"${type} on ${subject} (${HARNESS_TEST_UNSET_VAR})"}]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := LoadFile(path, File{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Work.Templates) != 1 || f.Work.Templates[0].ID != "t" || len(f.Work.CorrelationRules) != 1 {
+		t.Fatalf("work section dropped: %+v", f.Work)
+	}
+	// Template placeholders survive environment expansion; unset upper-case
+	// variables still expand to empty.
+	if got := f.Work.CorrelationRules[0].Title; got != "${type} on ${subject} ()" {
+		t.Fatalf("title: %q", got)
+	}
+}

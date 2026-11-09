@@ -1506,6 +1506,382 @@ async function decide(btn, a, approve) {
   api().RefreshApprovals();
 }
 
+// ---------- Works: timeline, action cards, outcome cards ----------
+// A Work is a continuous piece of operations work (incident, change,
+// routine). The page shows its lifecycle, the controlled actions it took
+// (with approvals and unknown-effect resolution) and the verified outcome.
+Object.assign(BADGE, {
+  NEW: "s-info", BLOCKED: "s-bad", SUSPENDED: "s-idle", SATISFIED: "s-ok", NOT_SATISFIED: "s-bad", INCONCLUSIVE: "s-warn",
+  PROPOSED: "s-info", READY: "s-info", DISPATCHED: "s-warn", APPLIED: "s-ok", VERIFYING: "s-warn", DEGRADED: "s-warn",
+  EFFECT_UNKNOWN: "s-bad", MANUAL_RECOVERY: "s-bad", REJECTED: "s-bad", COMPENSATION_PENDING: "s-warn", COMPENSATED: "s-idle",
+  SUPPORTED: "s-ok", OPEN: "s-idle", CHALLENGED: "s-warn",
+});
+const WORK_FILTERS = [
+  ["open", "Open", "NEW,ACTIVE,WAITING,BLOCKED,SUSPENDED"],
+  ["closed", "Closed", "SUCCEEDED,FAILED,CANCELLED"],
+  ["all", "All", ""],
+];
+const WORK_TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
+const wv = { filter: "open", items: [], id: null, data: null, error: null, timer: null, pm: null, busy: false, sig: "", openPlans: new Set() };
+// workSig fingerprints what the page shows, so a refresh that changed
+// nothing does not rebuild the DOM under the user's pointer.
+const workSig = () => JSON.stringify([wv.id, wv.error, wv.id ? wv.data : wv.items]);
+
+function showWorks(id) {
+  state.view = "works";
+  markSide();
+  stopWatching();
+  renderSessions();
+  $("#chat-head").replaceChildren();
+  $("#chat-head").className = "chat-head";
+  $("#composer-wrap").hidden = true;
+  wv.id = id || null;
+  wv.data = null;
+  wv.pm = null;
+  wv.error = null;
+  renderWorks(true);
+  loadWorks().then(() => renderWorks());
+  clearInterval(wv.timer);
+  // Refresh while the page is open; a closed Work no longer changes.
+  wv.timer = setInterval(async () => {
+    if (state.view !== "works") { clearInterval(wv.timer); return; }
+    if (wv.busy || document.hidden) return;
+    const w = wv.data && wv.data.work;
+    if (wv.id && w && WORK_TERMINAL.has(w.status)) return;
+    // Do not redraw while a dialog is open or the pointer is pressed.
+    if (document.querySelector("dialog[open]")) return;
+    await loadWorks();
+    if (workSig() !== wv.sig) renderWorks();
+  }, 5000);
+}
+
+async function loadWorks() {
+  wv.error = null;
+  try {
+    if (wv.id) {
+      wv.data = await api().WorkView(wv.id);
+    } else {
+      const f = WORK_FILTERS.find((x) => x[0] === wv.filter) || WORK_FILTERS[0];
+      const res = await api().ListWorks(f[2], "", 100);
+      wv.items = (res && res.items) || [];
+    }
+  } catch (e) {
+    wv.error = errText(e);
+  }
+}
+
+function renderWorks(loading) {
+  if (state.view !== "works") return;
+  wv.sig = loading ? "" : workSig();
+  const page = h("div", { class: "customize works" });
+  if (wv.id) renderWorkDetail(page, loading);
+  else renderWorkList(page, loading);
+  $("#thread").replaceChildren(page);
+}
+
+function renderWorkList(page, loading) {
+  page.append(
+    h("h1", {}, t("Works")),
+    h("p", { class: "muted lead" }, t("Incidents, changes and routines the control plane is driving to a verified outcome. Signals that belong together land in one Work.")),
+    h("div", { class: "tabs" }, WORK_FILTERS.map(([id, label]) =>
+      h("button", { class: "tab" + (wv.filter === id ? " on" : ""), onclick: async () => {
+        wv.filter = id; renderWorks(true); await loadWorks(); renderWorks();
+      } }, t(label)))));
+  if (wv.error) { page.append(h("div", { class: "empty-card muted" }, wv.error)); return; }
+  if (loading && !wv.items.length) { page.append(h("div", { class: "empty-card muted" }, t("Loading…"))); return; }
+  if (!wv.items.length) { page.append(h("div", { class: "empty-card muted" }, t("No Works here."))); return; }
+  page.append(...wv.items.map((w) => {
+    const stages = (w.template && w.template.stages) || [];
+    const st = stages[w.stage];
+    return actionable(h("div", { class: "ext-card work-card", onclick: () => showWorks(w.id) },
+      h("div", { class: "ext-main" },
+        h("div", { class: "ext-title" }, badge(w.status), h("span", {}, w.title || w.id)),
+        h("div", { class: "muted small" },
+          t(w.kind || "general"), " · ",
+          st && !WORK_TERMINAL.has(w.status) ? t("stage {n}/{total}: {id}", { n: w.stage + 1, total: stages.length, id: st.id }) + " · " : "",
+          ((w.goal && w.goal.subject_refs) || []).slice(0, 3).join(", ")),
+        w.reason ? h("div", { class: "muted small work-reason" }, w.reason) : null),
+      h("div", { class: "ext-side muted small", title: new Date(w.updated_at).toLocaleString(locale()) }, ago(w.updated_at))),
+    () => showWorks(w.id));
+  }));
+}
+
+function renderWorkDetail(page, loading) {
+  const back = h("button", { class: "link-btn", onclick: () => showWorks() }, t("‹ All Works"));
+  if (wv.error && !wv.data) { page.append(back, h("div", { class: "empty-card muted" }, wv.error)); return; }
+  if (!wv.data) { page.append(back, h("div", { class: "empty-card muted" }, t("Loading…"))); return; }
+  const d = wv.data, w = d.work;
+  const stages = (w.template && w.template.stages) || [];
+  const cur = stages[w.stage];
+  page.append(back,
+    h("div", { class: "work-head" },
+      h("h1", {}, w.title || w.id),
+      h("div", { class: "work-meta muted small" },
+        badge(w.status), " ", t(w.kind || "general"), " · ", t("generation {n}", { n: w.generation }),
+        " · ", t("opened {time}", { time: new Date(w.created_at).toLocaleString(locale()) }),
+        w.closed_at ? " · " + t("closed after {d}", { d: dur(w.created_at, w.closed_at) }) : ""),
+      w.reason ? h("div", { class: "work-reason" }, w.reason) : null,
+      h("div", { class: "muted small mono" }, ((w.goal && w.goal.subject_refs) || []).join("  "))),
+    workControls(w, cur),
+    h("div", { class: "stage-strip" }, stages.map((s, i) => {
+      const cls = WORK_TERMINAL.has(w.status) ? (i <= w.stage ? "done" : "skipped") : i < w.stage ? "done" : i === w.stage ? "current" : "";
+      return h("div", { class: "stage-chip " + cls, title: s.type }, h("span", { class: "stage-n" }, i + 1), s.id);
+    })));
+  if (d.errors && d.errors.events) page.append(h("p", { class: "error" }, d.errors.events));
+  page.append(...[outcomeSection(d), actionSection(d), hypothesisSection(d), timelineSection(d)].filter(Boolean));
+  if (wv.pm != null) page.append(h("section", { class: "work-section" }, h("h2", {}, t("Postmortem")), h("div", { class: "pm-card" }, md(wv.pm))));
+}
+
+function workControls(w, cur) {
+  const btn = (label, fn, cls = "btn") => h("button", { class: cls, onclick: async (e) => {
+    const b = e.currentTarget; b.disabled = true; wv.busy = true;
+    try { await fn(); } catch (err) { toast(errText(err), true); } finally { wv.busy = false; b.disabled = false; }
+    await loadWorks(); renderWorks();
+  } }, t(label));
+  const cmd = (type, payload, reason) => api().WorkCommand(w.id, type, payload || null, w.version, reason || "");
+  const out = [];
+  const waitingHuman = w.status === "WAITING" && cur && (cur.type === "confirm" || cur.type === "verify");
+  if (waitingHuman) {
+    out.push(btn("Confirm outcome", async () => {
+      const c = await ask({ title: t("Confirm the outcome"), text: (cur.confirm && cur.confirm.prompt) || t("Record that the goal is met."), label: t("What did you check?"), ok: t("Confirm") });
+      if (c == null) return;
+      await cmd("confirm", { verdict: "satisfied", comment: c });
+      toast(t("Outcome confirmed"));
+    }, "btn approve"));
+    out.push(btn("Not satisfied", async () => {
+      const c = await ask({ title: t("Outcome not met"), label: t("What is still wrong?"), ok: t("Record"), danger: true });
+      if (c == null) return;
+      await cmd("confirm", { verdict: "not_satisfied", comment: c });
+    }));
+  }
+  if (w.status === "BLOCKED") out.push(btn("Resolve blocker", async () => {
+    const c = await ask({ title: t("Resolve the blocker"), text: w.reason || "", label: t("What did you fix?"), ok: t("Resume") });
+    if (c == null) return;
+    await cmd("resolve", { comment: c }, c);
+  }, "btn approve"));
+  if (["ACTIVE", "WAITING", "BLOCKED"].includes(w.status)) out.push(btn("Pause", () => cmd("pause")));
+  if (w.status === "SUSPENDED") out.push(btn("Resume", () => cmd("resume"), "btn approve"));
+  if (!WORK_TERMINAL.has(w.status)) {
+    out.push(btn("Check now", () => cmd("wake")));
+    out.push(btn("Cancel Work", async () => {
+      const r = await ask({ title: t("Cancel this Work?"), text: t("Running investigations stop. Changes already made are not undone."), label: t("Reason"), ok: t("Cancel Work"), danger: true });
+      if (r == null) return;
+      await cmd("cancel", null, r);
+    }));
+  } else {
+    out.push(btn("Postmortem", async () => { wv.pm = await api().WorkPostmortem(w.id); }));
+    const tid = w.template && w.template.id;
+    if (tid !== "postmortem" && tid !== "follow-up") out.push(btn("Open postmortem Work", async () => {
+      const pm = await api().CreatePostmortem(w.id);
+      toast(t("Postmortem Work opened"));
+      showWorks(pm.id);
+    }));
+    out.push(btn("Reopen", async () => {
+      const r = await ask({ title: t("Reopen this Work?"), label: t("Reason"), ok: t("Reopen") });
+      if (r == null) return;
+      await cmd("reopen", null, r);
+    }));
+  }
+  return h("div", { class: "work-controls" }, out);
+}
+
+// ---- outcome cards ----
+function outcomeSection(d) {
+  const evals = d.outcomes || [];
+  const sc = Array.isArray(d.evaluation) ? null : d.evaluation;
+  const latest = evals[0];
+  const card = latest ? h("div", { class: "outcome-card v-" + String(latest.verdict || "").toLowerCase() },
+    h("div", { class: "oc-top" },
+      badge(latest.verdict),
+      latest.raw_verdict && latest.raw_verdict !== latest.verdict ? h("span", { class: "muted small" }, t("raw {v}", { v: t(latest.raw_verdict).replaceAll("_", " ") })) : null,
+      latest.stage ? h("span", { class: "muted small" }, t("stage {id}", { id: latest.stage })) : null,
+      h("span", { class: "spacer" }),
+      h("span", { class: "muted small", title: new Date(latest.evaluated_at).toLocaleString(locale()) }, ago(latest.evaluated_at))),
+    latest.satisfied_since ? h("div", { class: "muted small" }, t("holding since {time}", { time: new Date(latest.satisfied_since).toLocaleTimeString(locale()) })) : null,
+    h("table", { class: "oc-table" }, (latest.objectives || []).map((o) => h("tr", {},
+      h("td", { class: "mono" }, o.id, o.optional ? h("span", { class: "muted small" }, " " + t("optional")) : null),
+      h("td", {}, badge(o.verdict)),
+      h("td", { class: "mono" }, o.value != null ? fmtNum(o.value) : (o.observed || "")),
+      h("td", { class: "muted small" }, o.reason || "")))),
+    (latest.missing || []).length ? h("div", { class: "muted small" }, t("no data: {ids}", { ids: latest.missing.join(", ") })) : null,
+    sparkVerdicts(evals))
+    : h("div", { class: "empty-card muted" }, t("Not evaluated yet. The verify stage checks the success spec against live data."));
+  return h("section", { class: "work-section" }, h("h2", {}, t("Outcome")), card, sc ? scorecard(sc, !WORK_TERMINAL.has(d.work.status)) : null);
+}
+
+// sparkVerdicts draws the verdict history (oldest left) as small ticks.
+function sparkVerdicts(evals) {
+  if (evals.length < 2) return null;
+  const list = evals.slice(0, 60).reverse();
+  return h("div", { class: "verdict-strip", title: t("verdict history") }, list.map((e) =>
+    h("span", { class: "vtick v-" + String(e.verdict || "").toLowerCase(), title: `${t(e.verdict || "").replaceAll("_", " ")} · ${new Date(e.evaluated_at).toLocaleTimeString(locale())}` })));
+}
+
+function scorecard(sc, provisional) {
+  const pct = (x) => Math.round(x * 100) + "%";
+  const secs = (v) => (v < 60 ? Math.round(v) + "s" : Math.round(v / 60) + "m");
+  const grounding = sc.supported_conclusions ? sc.grounded_conclusions / sc.supported_conclusions : 1;
+  return h("div", { class: "score-card" + (sc.pass ? "" : " fail") },
+    h("div", { class: "oc-top" },
+      h("b", {}, t("Scorecard")),
+      sc.pass ? h("span", { class: "badge " + (provisional ? "s-idle" : "s-ok") }, t(provisional ? "no gate failed so far" : "pass")) : h("span", { class: "badge s-bad" }, t("gates failed")),
+      (sc.failed_gates || []).map((g) => h("span", { class: "gate" }, t(g).replaceAll("_", " ")))),
+    h("div", { class: "score-grid" },
+      stat(t("grounding"), pct(grounding)),
+      stat(t("actions"), `${sc.actions_applied}/${sc.actions_proposed}`),
+      stat(t("rule violations"), sc.rule_violations),
+      stat(t("unresolved effects"), sc.unresolved_effects),
+      stat(t("time to mitigation"), sc.diagnosis_seconds ? secs(sc.diagnosis_seconds) : "–"),
+      stat(t("runs / tool calls"), `${sc.runs} / ${sc.tool_calls}`),
+      stat(t("cost"), "$" + Number(sc.cost_usd || 0).toFixed(2))));
+}
+const stat = (label, value) => h("div", { class: "stat" }, h("div", { class: "stat-v" }, String(value)), h("div", { class: "muted small" }, label));
+function fmtNum(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return String(v);
+  return Math.abs(n) >= 100 ? n.toFixed(0) : Math.abs(n) >= 1 ? n.toFixed(2) : n.toPrecision(3);
+}
+
+// ---- action cards ----
+function actionSection(d) {
+  const acts = d.actions || [];
+  return h("section", { class: "work-section" }, h("h2", {}, t("Actions"), " ", h("span", { class: "count" }, acts.length)),
+    acts.length ? acts.map(actionCard) : h("div", { class: "empty-card muted" }, t("No controlled actions. Production changes only happen here, after policy, approval and preflight.")));
+}
+
+function actionCard(a) {
+  const open = ["WAITING_APPROVAL", "EFFECT_UNKNOWN", "MANUAL_RECOVERY"].includes(a.state);
+  const run = (fn) => async (e) => {
+    const b = e.currentTarget; b.disabled = true; wv.busy = true;
+    try { await fn(); } catch (err) { toast(errText(err), true); } finally { wv.busy = false; b.disabled = false; }
+    await loadWorks(); renderWorks();
+  };
+  const buttons = [];
+  if (a.state === "WAITING_APPROVAL") {
+    buttons.push(h("button", { class: "btn approve", onclick: run(async () => {
+      const c = await ask({ title: t("Approve {name}", { name: a.action_name }), text: t("on {target}", { target: a.target_ref }), label: t("Comment (optional)"), ok: t("Approve") });
+      if (c == null) return;
+      await api().DecideAction(a.id, true, a.intent_hash, c);
+      toast(t("Approved"));
+    }) }, t("Approve")));
+    buttons.push(h("button", { class: "btn", onclick: run(async () => {
+      const c = await ask({ title: t("Reject {name}", { name: a.action_name }), label: t("Reason (optional)"), ok: t("Reject"), danger: true });
+      if (c == null) return;
+      await api().DecideAction(a.id, false, a.intent_hash, c);
+      toast(t("Rejected"));
+    }) }, t("Reject")));
+  }
+  if (a.state === "EFFECT_UNKNOWN" || a.state === "MANUAL_RECOVERY") {
+    buttons.push(h("button", { class: "btn", onclick: run(async () => {
+      const r = await api().ReconcileAction(a.id);
+      toast(t("Inspected: {state}", { state: t(r.state || "?").replaceAll("_", " ") }));
+    }) }, t("Inspect again")));
+    for (const applied of [true, false]) {
+      buttons.push(h("button", { class: "btn" + (applied ? " approve" : ""), onclick: run(async () => {
+        const c = await ask({ title: t(applied ? "The change was applied" : "The change was not applied"),
+          text: t("The harness will not retry it. Record what you verified on the target."), label: t("What did you check?"), ok: t("Record") });
+        if (c == null) return;
+        await api().ResolveAction(a.id, applied, c);
+      }) }, t(applied ? "Mark applied" : "Mark not applied")));
+    }
+  }
+  const approvals = a.approvals || [];
+  const eff = a.effect_evaluation;
+  return h("div", { class: "action-card" + (open ? " attention" : "") + (a.state === "EFFECT_UNKNOWN" ? " unknown" : "") },
+    h("div", { class: "inbox-top" },
+      h("span", { class: "risk-tag r" + String(a.risk || "R0").slice(1) }, a.risk),
+      h("span", { class: "mono" }, a.action_name),
+      h("span", { class: "muted" }, t("on") + " ", h("b", { class: "mono" }, a.target_ref)),
+      h("span", { class: "spacer" }),
+      badge(a.state)),
+    h("div", { class: "muted small" },
+      t("proposed by {who}", { who: a.proposed_by || "?" }), " · ", ago(a.created_at),
+      a.stage_id ? " · " + t("stage {id}", { id: a.stage_id }) : "",
+      a.policy_verdict ? " · " + t("policy {v}", { v: a.policy_verdict }) : "",
+      a.required_approvals ? " · " + t("needs {n} approvals", { n: a.required_approvals }) : "",
+      a.break_glass ? " · " + t("break-glass") : ""),
+    a.reason ? h("div", { class: "ac-reason" }, a.reason) : null,
+    a.last_error ? h("div", { class: "ac-reason bad" }, a.last_error) : null,
+    a.state === "EFFECT_UNKNOWN" ? h("div", { class: "ac-note" }, t("The downstream may or may not have applied this change. It is never retried automatically: inspect the target and record what you find.")) : null,
+    eff ? h("div", { class: "muted small" }, t("effect check"), " ", badge(eff.verdict)) : null,
+    approvals.length ? h("div", { class: "muted small" }, approvals.map((p) => `${p.decision} · ${p.approver_id}${p.comment ? " — " + p.comment : ""}`).join("; ")) : null,
+    h("details", { class: "adv", open: wv.openPlans.has(a.id), ontoggle: (e) => {
+      if (e.currentTarget.open) wv.openPlans.add(a.id); else wv.openPlans.delete(a.id);
+    } }, h("summary", {}, t("Plan")),
+      h("pre", { class: "ac-args" }, JSON.stringify(a.args || {}, null, 2)),
+      h("div", { class: "mono tiny-hash" }, t("intent {hash}", { hash: a.intent_hash || "" }))),
+    buttons.length ? h("div", { class: "approve-actions" }, buttons) : null);
+}
+
+// ---- hypotheses ----
+function hypothesisSection(d) {
+  const hs = d.hypotheses || [];
+  if (!hs.length) return null;
+  const order = { SUPPORTED: 0, CHALLENGED: 1, OPEN: 2, INCONCLUSIVE: 3, REFUTED: 4 };
+  hs.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+  return h("section", { class: "work-section" }, h("h2", {}, t("Hypotheses")),
+    h("div", { class: "hyp-list" }, hs.map((x) => h("div", { class: "hyp" },
+      badge(x.status),
+      h("span", { class: "hyp-text" }, x.statement),
+      h("span", { class: "muted small" }, t("{s} for · {r} against", { s: (x.supporting_evidence_refs || []).length, r: (x.refuting_evidence_refs || []).length }))))));
+}
+
+// ---- timeline ----
+const TL_LABEL = {
+  "work.created": "Work created", "work.started": "Work started", "work.status_changed": "status changed", "work.event_attached": "signal attached",
+  "work.runs_started": "investigation started", "work.stage_completed": "stage completed", "work.stage_failed": "stage failed",
+  "work.action_proposed": "action proposed", "work.action_executed": "action executed", "work.blocked": "Work blocked",
+  "work.confirmed": "human confirmation", "work.replanned": "replanned", "work.goal_amended": "goal amended", "work.watch_fired": "wait satisfied",
+};
+const TL_SKIP = new Set(["work.wake", "work.command_applied"]);
+function timelineSection(d) {
+  const rows = [];
+  for (const e of d.events || []) {
+    if (TL_SKIP.has(e.type)) continue;
+    rows.push({ at: e.occurred_at, src: "work", label: TL_LABEL[e.type] || e.type.replace(/^work\./, ""), text: payloadSummary(e.payload), actor: e.actor_type === "user" ? e.actor_id : "" });
+  }
+  for (const a of d.actions || []) {
+    if (a.dispatched_at) rows.push({ at: a.dispatched_at, src: "action", label: t("dispatched"), text: `${a.action_name} → ${a.target_ref}` });
+  }
+  let last = "";
+  for (const e of (d.outcomes || []).slice().reverse()) {
+    if (e.verdict === last) continue;
+    last = e.verdict;
+    rows.push({ at: e.evaluated_at, src: "outcome", label: t("verdict"), text: t(e.verdict || "").replaceAll("_", " ") });
+  }
+  rows.sort((x, y) => new Date(x.at) - new Date(y.at));
+  // Repeated identical signals (a firing alert re-sent every few seconds)
+  // collapse into one row with a count.
+  const merged = [];
+  for (const r of rows) {
+    const p = merged[merged.length - 1];
+    if (p && p.src === r.src && p.label === r.label && p.text === r.text) { p.n = (p.n || 1) + 1; p.until = r.at; continue; }
+    merged.push({ ...r });
+  }
+  rows.length = 0;
+  rows.push(...merged);
+  return h("section", { class: "work-section" }, h("h2", {}, t("Timeline")),
+    rows.length ? h("ol", { class: "timeline" }, rows.map((r) => h("li", { class: "tl-" + r.src },
+      h("span", { class: "tl-time mono", title: new Date(r.at).toLocaleString(locale()) }, new Date(r.at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })),
+      h("span", { class: "tl-dot" }),
+      h("span", { class: "tl-body" }, h("b", {}, t(r.label)), r.text ? h("span", { class: "muted" }, " " + r.text) : null, r.actor ? h("span", { class: "muted small" }, " · " + r.actor) : null,
+        r.n ? h("span", { class: "count", title: t("until {time}", { time: new Date(r.until).toLocaleTimeString(locale()) }) }, "×" + r.n) : null))))
+      : h("div", { class: "empty-card muted" }, t("No events yet.")));
+}
+
+function payloadSummary(p) {
+  if (!p || typeof p !== "object") return "";
+  const keys = ["type", "subject_ref", "stage_id", "from", "to", "verdict", "state", "decision", "reason", "error", "comment"];
+  const parts = [];
+  for (const k of keys) {
+    const v = p[k];
+    if (v == null || v === "") continue;
+    parts.push(k === "from" || k === "to" || k === "type" || k === "stage_id" || k === "verdict" || k === "state" ? String(v) : `${k}: ${v}`);
+  }
+  const s = parts.join(" · ");
+  return s.length > 240 ? s.slice(0, 239) + "…" : s;
+}
+
 // ---------- plugins ----------
 async function showPlugins() {
   state.view = "plugins";
@@ -2985,6 +3361,7 @@ async function setLanguage(lang, save) {
   renderSessions();
   if (state.view === "chat") render();
   else if (state.view === "inbox") renderInbox();
+  else if (state.view === "works") renderWorks();
   else if (state.view === "customize") renderCustomize();
   else if (state.view === "settings") renderSettings();
   else if (state.view === "plugins") showPlugins();
@@ -2992,6 +3369,7 @@ async function setLanguage(lang, save) {
 
 function markSide() {
   $("#btn-inbox").classList.toggle("on", state.view === "inbox");
+  $("#btn-works").classList.toggle("on", state.view === "works");
   $("#btn-customize").classList.toggle("on", state.view === "customize");
   $("#btn-gallery").classList.toggle("on", state.view === "gallery");
   $("#btn-graph").classList.toggle("on", state.view === "graph");
@@ -3008,6 +3386,7 @@ function bind() {
   $("#btn-gallery").onclick = showGallery;
   $("#btn-graph").onclick = () => showGraph();
   $("#btn-inbox").onclick = showInbox;
+  $("#btn-works").onclick = () => showWorks();
   $("#btn-settings").onclick = () => showSettings();
   $("#btn-archived").onclick = () => {
     state.sessFilter = { ...state.sessFilter, status: state.sessFilter.status === "archived" ? "active" : "archived" };

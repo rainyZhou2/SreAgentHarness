@@ -27,6 +27,9 @@ type Reconciler struct {
 	SweepEvery time.Duration
 	// StaleDispatch is when a DISPATCHED action is reconciled (default 5m).
 	StaleDispatch time.Duration
+	// Retention is the event inbox retention; the zero value keeps events
+	// forever.
+	Retention cpsql.InboxRetention
 }
 
 func (r *Reconciler) log() *slog.Logger {
@@ -86,6 +89,9 @@ func (r *Reconciler) FireDue(ctx context.Context) (int, error) {
 		if fired {
 			n++
 			r.Metrics.watch(string(kind))
+			if w.NextCheckAt != nil {
+				r.Metrics.watchDue(string(kind), now.Sub(*w.NextCheckAt))
+			}
 		}
 	}
 	return n, nil
@@ -109,5 +115,15 @@ func (r *Reconciler) Sweep(ctx context.Context) {
 	}
 	if _, err := r.Store.PurgeCorrelations(ctx, r.Clock.Now(), 1000); err != nil && ctx.Err() == nil {
 		r.log().Warn("correlation purge failed", "err", err)
+	}
+	if r.Retention.Payload > 0 || r.Retention.Record > 0 {
+		res, err := r.Store.PurgeEvents(ctx, r.Clock.Now(), r.Retention)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			r.log().Warn("inbox retention failed", "err", err)
+		case res.PayloadsStripped > 0 || res.Deleted > 0:
+			r.log().Info("inbox retention", "payloads_stripped", res.PayloadsStripped, "deleted", res.Deleted)
+			r.Metrics.inboxPurged(res.PayloadsStripped, res.Deleted)
+		}
 	}
 }

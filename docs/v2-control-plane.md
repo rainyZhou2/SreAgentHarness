@@ -17,7 +17,18 @@ Everything is off by default:
 | `HARNESS_ACTION_REQUIRE_KNOWN_TARGET` | `false` | reject targets the world state cannot resolve uniquely |
 | `HARNESS_REQUIRE_DISTINCT_APPROVER` | `false` | the Work owner cannot approve its own actions |
 | `HARNESS_WORK_INLINE_TEMPLATES` | `false` | admins may submit template bodies instead of catalog ids |
+| `HARNESS_TRIGGER_MIRROR` | = shadow mode | copy v1 webhook trigger events into the inbox for `GET /v1/events/shadow-report` |
+| `HARNESS_MODEL_MAX_DATA_CLASS` | `confidential` | most sensitive data class sent to the model provider; more sensitive evidence is redacted from run goals |
+| `HARNESS_EVENT_PAYLOAD_RETENTION` | `336h` | inbox payloads are purged after this (`0` keeps them) |
+| `HARNESS_EVENT_RETENTION` | `2160h` | inbox records are purged after this (`0` keeps them) |
 | `HARNESS_CONTROLPLANE_DB` | `<data dir>/controlplane.db` | desktop runtime: SQLite file of the control plane |
+
+Templates and correlation rules come from the `work:` section of
+`HARNESS_CONFIG` (`harness.local.json` on the desktop); `work_extension`
+plugins under `plugins:` add action executors, metric sources, source
+normalizers and background feeders. `${VAR}` references in the config file
+are expanded from the environment, except unset lower-case names such as
+`${subject}` or `${title}`, which are template placeholders and are kept.
 
 Rollout: enable the engine in shadow mode, compare `GET /v1/events/{id}`
 decisions with what the v1 triggers did, then turn shadow mode off; enable
@@ -38,8 +49,13 @@ actions last.
 | `internal/orchestration` | orchestrator, ingestor, reconciler, command service, metrics |
 | `internal/workapi` | HTTP extension (`/v1/works`, `/v1/events`, `/v1/world`, `/v1/actions`) |
 | `internal/workengine` | assembly behind the flags, shared by server and desktop runtime |
+| `internal/workeval` | per-Work scorecard and safety gates |
+| `internal/postmortem` | postmortem report built from the ledger (timeline, grounded root cause, actions, gaps) |
+| `internal/workbench` | deterministic Work benchmark: cases, simulator, record and replay |
 | `pkg/workclient` | typed Go client |
-| `plugins/srework` | `sre-sim` simulator (deployments, metrics, rollback/traffic actions) |
+| `pkg/sdk` | public plugin API (aliases and `Register`) for plugins outside this module |
+| `plugins/sre` | SRE domain pack: Prometheus/Alertmanager, Kubernetes, OTel, GitOps/Argo CD, Istio traffic, CMDB, Jira, AI infra |
+| `plugins/srework` | `sre-sim` simulator (deployments, pods and topology, metrics, rollback/traffic actions, optional persistent state) |
 
 ## Lifecycle
 
@@ -80,6 +96,14 @@ with the stored record. Processing then
    `label:<name>`) already has an open one within the window, `attach` only
    attaches, `ignore` drops.
 
+Several rules can feed one correlation **group** (`group:`), so a deploy
+event and the alert it causes land in the same Work: an `attach` rule for
+`change.deployed` and a `create` rule for `alert.firing` share the group, and
+`lookback:` on the creating rule attaches the group's events from before the
+Work existed. Plugins that implement `SourceNormalizers` accept
+source-native payloads (Alertmanager, Kubernetes events, Argo CD) at
+`POST /v1/sources/{source}/events`.
+
 Correlation is one transaction over `work_correlations`, so concurrent
 deliveries of one group converge on one Work. Failed records are retried by
 the sweep and become `DEAD` after 5 attempts (kept for repair).
@@ -96,7 +120,12 @@ when we learned it, `closed_observed_at` when we learned it stopped. A query
 "as of T, as known at K" reconstructs exactly what was believable then, which
 is what actions and post-incident reviews pin (`world_snapshots`, with a
 digest). Re-observing an unchanged value refreshes `confirmed_at`, which only
-feeds freshness. API writers are stored as trust tier T4 unless admin;
+feeds freshness. Two values from one source at the same instant stay visible
+as a conflict (actions on a conflicting version fact are refused); the next
+later observation from that source closes every open value of the series,
+so the result never depends on row order. Topology edges (`deployed_as`,
+`owns`, `runs_on`, ...) are relations with the same bitemporal columns;
+`POST /v1/world/snapshots/query` with `depth` walks them. API writers are stored as trust tier T4 unless admin;
 snapshots prefer higher trust, then recency, and flag disagreements.
 
 ## Actions
@@ -136,6 +165,79 @@ stale or too few samples are `INCONCLUSIVE`, never `SATISFIED`. The
 stabilization clock (`satisfied_since`) is bound to the spec hash and resets
 on any regression.
 
+## Evaluation, postmortems and learning
+
+- `GET /v1/works/{id}/evaluation` is the Work's **scorecard**: time to
+  diagnosis and mitigation, runs, tool calls, actions by state, outcome
+  verification, and the safety **gates** that fail it regardless of the
+  outcome: `rule_violation`, `repeated_unknown_effect`, `blast_radius`,
+  `ungrounded_conclusion` (a conclusion supported only by T4 evidence) and
+  `success_without_verified_outcome`. While a Work is open the scorecard is
+  provisional.
+- `GET /v1/works/{id}/postmortem` builds a report from the ledger: a
+  collapsed timeline (repeated signals as `×N until`), the root cause only
+  from SUPPORTED hypotheses with T1–T3 evidence (otherwise "unknown"),
+  refuted and open hypotheses, actions with their effects, the outcome, the
+  scorecard, gaps and follow-ups. `?format=markdown` (or `Accept:
+  text/markdown`) renders it. `POST` on a closed Work creates a `postmortem`
+  review Work (idempotent per source Work).
+- Built-in templates `postmortem` (draft run + human review) and `follow-up`
+  (plan a ticket, file it with `ticket.create`, wait up to 30 days for the
+  ticket to reach Done/Closed/Resolved/Fixed, confirm).
+- `POST /v1/works/{id}/playbook` proposes a procedural memory from a
+  verified Work. Memories carry **applicability** (environments, services,
+  versions, validity window) and are recalled only where they apply; a
+  playbook becomes ACTIVE only after at least one machine-verified success,
+  with no failure majority, approved by someone other than its author.
+  Outcome counters are moved by Work evaluations only, never by a model.
+
+## Security
+
+| Role | Grants |
+|---|---|
+| `viewer` | read Works, events, world, actions |
+| `operator` | create Works, commands, evidence, facts (T4), reconcile; implies viewer and service |
+| `approver` | approve/reject actions, confirm/reopen, resolve unknown effects |
+| `admin` | everything above, inline templates, trusted facts |
+| `service` | submit events only, within its scope |
+| `break_glass` | emergency release of a held action with a justification; never implied, never lifts R3 |
+
+A token (or OIDC principal) may carry a **scope**: `event_sources`,
+`event_types`, `resources` (prefix patterns such as `deployment://prod/*`)
+and `max_risk` (the highest risk it may approve). Out-of-scope requests are
+refused with 403 and written to the security audit log, as are approvals and
+break-glass releases. R3 actions are never allowed; R2 always needs an
+approval bound to the intent hash.
+
+## Work bench
+
+`harness work-bench` replays incidents deterministically against the real
+orchestrator, action runtime and evaluator on a simulated clock (SQLite,
+no model, no network):
+
+```bash
+harness work-bench run bench/cases [-baseline base.json] [-out result.json] [-write-baseline base.json]
+harness work-bench record -tenant <t> -work <id> [-out case.json]   # export a real Work as a case (HARNESS_DATABASE_URL)
+harness work-bench replay -tenant <t> -work <id> [-out result.json] # record, replay and diff
+```
+
+A case (`bench/cases/*.json`) scripts runs (stage, role, result, duration),
+metric series, simulated actions (`applied`, `not_applied`, `unknown`, with
+facts and metric effects), approvals and human steps, and states
+expectations (status, pass, gates, run/action limits, applied and forbidden
+actions, Work count, root cause, duration). `-baseline` fails when a case
+regresses. Unknown effects are never replayed: they reconcile or block,
+exactly as in production.
+
+## Desktop
+
+The desktop client has a **Works** view (both local and team-server mode):
+the Work list, its status and outcome with verdict history, the scorecard,
+action cards (approve/reject with the intent hash, inspect again, mark
+applied or not applied), hypotheses with evidence, a merged timeline, and
+controls for confirm, resolve, pause/resume, check now, cancel, reopen and
+postmortems.
+
 ## API
 
 See the package comment of `internal/workapi` for the full route list.
@@ -149,11 +251,32 @@ resumable with `Last-Event-ID`.
 
 ## Metrics
 
-`harness_work_active{kind,status}`, `harness_work_transitions_total{kind,to}`,
-`harness_work_ticks_total{result}`, `harness_work_stage_total{type,result}`,
-`harness_action_state_total{state}`, `harness_outcome_evaluations_total{verdict}`,
-`harness_event_ingested_total{decision}`, `harness_watch_fired_total{kind}`.
+- Works: `harness_work_active`, `harness_work_transitions_total`,
+  `harness_work_ticks_total`, `harness_work_stage_total`,
+  `harness_work_replans_total`, `harness_work_age_seconds`,
+  `harness_work_waiting`, `harness_work_waiting_oldest_seconds`,
+  `harness_work_wake_lag_seconds`, `harness_work_model_cost_usd`.
+- Actions: `harness_action_state_total`, `harness_action_preflight_total`,
+  `harness_action_effect_unknown_total`, `harness_action_backlog`,
+  `harness_action_backlog_oldest_seconds`, `harness_action_verify_seconds`,
+  `harness_action_break_glass_total`, `harness_action_unapproved_dispatch`,
+  `harness_action_blocked_by_kernel_effect_total`.
+- Events and watches: `harness_event_ingested_total`,
+  `harness_event_correlation_seconds`, `harness_event_inbox_backlog`,
+  `harness_event_inbox_oldest_seconds`, `harness_event_inbox_purged_total`,
+  `harness_watch_fired_total`, `harness_watch_due_lag_seconds`,
+  `harness_watch_overdue`, `harness_watch_overdue_oldest_seconds`.
+- Outcomes and world: `harness_outcome_evaluations_total`,
+  `harness_world_snapshot_seconds`, `harness_world_fact_staleness_seconds`,
+  `harness_agent_assignment_total`.
+
 Labels are bounded enums; tenant, Work id and subjects are in logs only.
+`deploy/observability/harness-dashboard.json` (Grafana) and
+`harness-alerts.yaml` (Prometheus rules: approval invariant broken, unknown
+effects, break-glass use, unauthorized or cross-tenant requests, model data
+boundary refusals, stalled watches, wake lag, inbox backlog and dead
+letters, waiting approvals, blocked Works, tick errors, replan rate, slow
+snapshots) are ready to import.
 
 ## Deviations from the RFC (decisions)
 
@@ -173,10 +296,31 @@ Labels are bounded enums; tenant, Work id and subjects are in logs only.
 ## Demo and tests
 
 ```bash
-scripts/v2/demo.sh   # offline: builds harness-local with the simulator and drives one incident
-go test ./internal/store/cpsql/ ./internal/orchestration/ ./internal/workapi/ ./plugins/srework/
-HARNESS_PG_TEST_URL=postgres://postgres@127.0.0.1:55432/harness_test?sslmode=disable go test ./internal/store/cpsql/
+scripts/v2/demo.sh      # offline: harness-local (SQLite) with the simulator drives one incident
+HARNESS_PG_ADMIN_URL=postgres://postgres@127.0.0.1:55432/postgres scripts/v2/demo-pg.sh
+harness work-bench run bench/cases
+go test ./internal/store/cpsql/ ./internal/orchestration/ ./internal/workapi/ ./internal/workbench/ ./plugins/srework/
+HARNESS_PG_TEST_URL=postgres://postgres@127.0.0.1:55432/harness_test?sslmode=disable go test ./...
 ```
+
+`demo-pg.sh` runs `harness all` on a fresh PostgreSQL database with the
+`sre-sim` extension (`scripts/v2/harness.pg.json`) and fails unless:
+
+1. a deploy event and the repeating alert end up in **one** incident Work
+   (shared correlation group with lookback);
+2. a re-sent event is a duplicate, a second approval is refused (409), and a
+   re-sent postmortem request returns the same Work;
+3. after `kill -9` right after the approval and again during verification,
+   the restarted harness finishes the Work (SUCCEEDED, outcome SATISFIED)
+   and the downstream applied the rollback **exactly once** (the simulator
+   keeps its state in `state_file`, as a real cluster outlives the control
+   plane);
+4. the world holds service → deployment → 3 pods → nodes, with the pods
+   replaced by the rollout.
+
+The PostgreSQL test database should be UTF-8 (`CREATE DATABASE … ENCODING
+'UTF8'`): on a `SQL_ASCII` database full-text search drops CJK text and the
+CJK memory test fails.
 
 `scripts/v2/harness.local.json` also contains `investigate-and-rollback`, which
 adds a model-driven investigation (needs a model provider) whose proposal

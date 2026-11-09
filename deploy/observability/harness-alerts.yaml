@@ -1,0 +1,107 @@
+# Prometheus alerting rules for the v2 control plane (RFC §21.3).
+# Load as a rule file (rule_files: [harness-alerts.yaml]) or wrap the
+# `groups:` block in a PrometheusRule (spec.groups) for the operator.
+groups:
+  - name: harness-v2-safety
+    rules:
+      - alert: HarnessActionEffectUnknown
+        expr: increase(harness_action_effect_unknown_total[10m]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "An action effect is unknown ({{ $labels.cause }})"
+          description: >-
+            A Work action may or may not have changed its target. It is never
+            replayed automatically: inspect it (POST /v1/actions/{id}/reconcile)
+            or resolve it (POST /v1/actions/{id}/resolve).
+      - alert: HarnessActionEffectUnknownBacklog
+        expr: harness_action_backlog{state=~"EFFECT_UNKNOWN|MANUAL_RECOVERY"} > 0 and harness_action_backlog_oldest_seconds{state=~"EFFECT_UNKNOWN|MANUAL_RECOVERY"} > 1800
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $value }} actions in {{ $labels.state }} for over 30 minutes"
+      - alert: HarnessApprovalInvariantBroken
+        expr: harness_action_unapproved_dispatch > 0
+        labels: {severity: page}
+        annotations:
+          summary: "An action that required approval was dispatched without approval or break-glass"
+          description: "Approval protection failed. Freeze action dispatch (HARNESS_ACTION_V2_ENABLED=false) and audit work_actions."
+      - alert: HarnessBreakGlassUsed
+        expr: increase(harness_action_break_glass_total[5m]) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "Break-glass released an action; review the audit log (action.break_glass)"
+      - alert: HarnessUnauthorizedActionAttempts
+        expr: sum(rate(harness_guard_denials_total{guard="scope"}[10m])) > 0.05
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Requests outside caller scopes are being refused ({{ $value | humanize }}/s)"
+      - alert: HarnessCrossTenantOrForbiddenRequests
+        expr: sum(rate(harness_http_requests_total{code="403"}[10m])) > 0.2
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Sustained 403 responses (forbidden or cross-tenant access attempts)"
+      - alert: HarnessModelDataBoundaryRefusals
+        expr: increase(harness_guard_denials_total{guard="data_class"}[1h]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "Works were kept from the model by the data-class boundary ({{ $labels.reason }})"
+  - name: harness-v2-progress
+    rules:
+      - alert: HarnessWatchesStalled
+        expr: harness_watch_overdue > 0 and harness_watch_overdue_oldest_seconds > 300
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Watches are overdue by {{ $value | humanizeDuration }}: the reconciler is not progressing"
+      - alert: HarnessWatchDueLagHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(harness_watch_due_lag_seconds_bucket[15m]))) > 60
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "p95 watch due lag above 60s"
+      - alert: HarnessWorkWakeLagHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(harness_work_wake_lag_seconds_bucket[15m]))) > 120
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "p95 Work wake lag above 2m (orchestrator saturated or down)"
+      - alert: HarnessInboxBacklog
+        expr: harness_event_inbox_oldest_seconds{state=~"NEW|FAILED"} > 300
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Inbox events in {{ $labels.state }} older than 5m"
+      - alert: HarnessInboxDeadLetters
+        expr: increase(harness_event_ingested_total{decision="failed"}[30m]) > 10 or harness_event_inbox_backlog{state="DEAD"} > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "Events are failing or dead-lettered in the inbox"
+      - alert: HarnessApprovalsWaiting
+        expr: harness_action_backlog_oldest_seconds{state="WAITING_APPROVAL"} > 1200
+        labels: {severity: ticket}
+        annotations:
+          summary: "An action has waited over 20m for approval"
+      - alert: HarnessWorksBlocked
+        expr: harness_work_waiting_oldest_seconds{status="BLOCKED"} > 3600
+        labels: {severity: ticket}
+        annotations:
+          summary: "A Work has been BLOCKED (needs a human) for over an hour"
+      - alert: HarnessWorkTickErrors
+        expr: sum(rate(harness_work_ticks_total{result=~"error|panic"}[10m])) / clamp_min(sum(rate(harness_work_ticks_total[10m])), 1e-9) > 0.2
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "Over 20% of Work processing passes fail"
+      - alert: HarnessReplanRateHigh
+        expr: sum(rate(harness_work_replans_total[1h])) / clamp_min(sum(rate(harness_work_transitions_total{to=~"SUCCEEDED|FAILED|CANCELLED"}[1h])), 1e-9) > 1
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "More than one replan per closed Work"
+      - alert: HarnessWorldSnapshotSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(harness_world_snapshot_seconds_bucket[15m]))) > 1
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "p95 World snapshot build above 1s"

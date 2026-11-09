@@ -417,3 +417,37 @@ func TestAPIStatusCodes(t *testing.T) {
 
 func toolsDur(d time.Duration) tools.Duration { return tools.Duration(d) }
 func tools30m() tools.Duration                { return toolsDur(30 * time.Minute) }
+
+type recMirror struct {
+	got []MirrorEvent
+	err error
+}
+
+func (m *recMirror) MirrorTriggerEvent(_ context.Context, e MirrorEvent) error {
+	m.got = append(m.got, e)
+	return m.err
+}
+
+// The v2 mirror sees every rendered event with v1's outcome, and a failing
+// mirror never changes what v1 does.
+func TestMirrorReceivesV1Outcomes(t *testing.T) {
+	s, runs, _, _ := newService(t, alertTrigger())
+	m := &recMirror{err: errors.New("inbox unavailable")}
+	s.Mirror = m
+	res := deliver(t, s, "alerts", map[string]any{"alerts": []any{
+		alert("fp1", "firing", "critical"), alert("fp1", "firing", "critical"), alert("fp2", "firing", "info"),
+	}})
+	if len(res.Items) != 3 || res.Items[0].Action != ActionCreated || res.Items[1].Action != ActionDuplicate ||
+		res.Items[2].Action != ActionFiltered {
+		t.Fatalf("v1 results: %+v", res.Items)
+	}
+	if len(runs.runs) != 1 {
+		t.Fatalf("runs: %d", len(runs.runs))
+	}
+	// Filtered events are not mirrored (v1 never rendered them).
+	if len(m.got) != 2 || m.got[0].V1Action != ActionCreated || m.got[0].V1RunID == "" ||
+		m.got[1].V1Action != ActionDuplicate || m.got[0].Fingerprint != m.got[1].Fingerprint ||
+		m.got[0].Trigger != "alerts" || m.got[0].TenantID != "t1" || len(m.got[0].Services) != 1 {
+		t.Fatalf("mirrored: %+v", m.got)
+	}
+}

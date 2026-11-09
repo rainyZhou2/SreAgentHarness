@@ -9,9 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
 )
@@ -131,7 +135,16 @@ func (in *Ingestor) Process(ctx context.Context, rec eventing.Record) error {
 	if maxAttempts <= 0 {
 		maxAttempts = 5
 	}
+	start := time.Now()
+	ctx, sp := obs.Tracer().Start(ctx, "event.correlate", trace.WithAttributes(attribute.String("event.inbox_id", rec.InboxID),
+		attribute.String("event.type", rec.Envelope.Type), attribute.String("event.source", rec.Envelope.Source)))
 	workID, decision, state, err := in.route(ctx, rec)
+	in.Metrics.correlated(metricDecision(decision), time.Since(start))
+	if workID != "" {
+		sp.SetAttributes(attribute.String("work_id", workID))
+	}
+	sp.SetAttributes(attribute.String("event.decision", decision))
+	sp.End()
 	if err != nil {
 		in.Metrics.event("failed")
 		if merr := in.Store.MarkEvent(ctx, rec.Envelope.TenantID, rec.InboxID, eventing.StateFailed, "", "", err.Error(), maxAttempts); merr != nil {
@@ -173,7 +186,7 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record) (workID, dec
 		}
 		return "", "no_rule", eventing.StateIgnored, nil
 	}
-	group := "rule:" + rule.Name + "|" + rule.GroupKey(&env)
+	group := "rule:" + rule.GroupName() + "|" + rule.GroupKey(&env)
 	window := rule.Window.D()
 	if window <= 0 {
 		window = eventing.DefaultWindow
@@ -201,8 +214,46 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record) (workID, dec
 	if decision == cpsql.CorrCreated {
 		in.log().Info("work created from event", "tenant", env.TenantID, "work_id", w.ID, "rule", rule.Name,
 			"inbox_id", rec.InboxID)
+		if rule.Lookback > 0 {
+			in.attachPrior(ctx, rule, group, window, rec, now)
+		}
 	}
 	return w.ID, decision, eventing.StateProcessed, nil
+}
+
+// attachPrior attaches events of the same correlation group that arrived
+// within the rule's lookback, found no open Work then, and were dropped
+// (e.g. the deploy that preceded the alert). Best effort: the Work exists
+// either way, and a failure is logged, not retried.
+func (in *Ingestor) attachPrior(ctx context.Context, rule eventing.Rule, group string, window time.Duration,
+	rec eventing.Record, now time.Time) {
+	env := rec.Envelope
+	prior, err := in.Store.ListEvents(ctx, cpsql.EventFilter{TenantID: env.TenantID, Subject: env.SubjectRef,
+		State: eventing.StateIgnored, Since: env.OccurredAt.Add(-rule.Lookback.D()), Until: now, Limit: 200})
+	if err != nil {
+		in.log().Warn("lookback: list events failed", "rule", rule.Name, "err", err)
+		return
+	}
+	for _, p := range prior {
+		if p.InboxID == rec.InboxID || p.Decision != cpsql.CorrNoWork {
+			continue
+		}
+		pe := p.Envelope
+		pr, ok := in.Router.Route(&pe)
+		if !ok || "rule:"+pr.GroupName()+"|"+pr.GroupKey(&pe) != group {
+			continue
+		}
+		w, decision, err := in.Store.Correlate(ctx, cpsql.CorrelateRequest{TenantID: env.TenantID, GroupKey: group,
+			Rule: pr.Name, Window: window, Now: now, EventID: p.InboxID, Payload: map[string]any{"inbox_id": p.InboxID,
+				"type": pe.Type, "source": pe.Source, "subject_ref": pe.SubjectRef, "rule": pr.Name, "lookback": true}})
+		if err != nil || decision != cpsql.CorrAttached {
+			in.log().Warn("lookback: attach failed", "inbox_id", p.InboxID, "decision", decision, "err", err)
+			continue
+		}
+		if err := in.Store.MarkEvent(ctx, env.TenantID, p.InboxID, eventing.StateProcessed, w.ID, cpsql.CorrAttached, "", 1); err != nil {
+			in.log().Warn("lookback: mark event failed", "inbox_id", p.InboxID, "err", err)
+		}
+	}
 }
 
 func (in *Ingestor) newWork(rule eventing.Rule, rec eventing.Record) (work.NewWork, error) {

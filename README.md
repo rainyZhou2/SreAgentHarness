@@ -38,7 +38,7 @@ A cognitive agent runtime for SRE: every reasoning step and tool call runs as a 
 
 ## Desktop client
 
-[`desktop/`](desktop/README.md) is a native Wails client. It starts in **Local runtime** mode: the app launches a bundled SQLite-backed harness core, writes execution events to an append-only JSONL log, and keeps SQLite only as the query index. No Docker, PostgreSQL, NATS or terminal is needed. Switch to **Team server** to use a shared harness. Sessions, streamed reasoning, tool-call cards, inline approvals, an approval inbox, and model / MCP / HTTP tool / skill management are the same in both modes; local mode implements the same `/v1/extensions`, command, checkpoint/fork, memory, graph and evaluation APIs. Commands are version-guarded and idempotent across restarts, cancelling a flow cascades to child runs, and compaction summaries, memory hits, checkpoints and step output revisions are persisted in the local store.
+[`desktop/`](desktop/README.md) is a native Wails client. It starts in **Local runtime** mode: the app launches a bundled SQLite-backed harness core, writes execution events to an append-only JSONL log, and keeps SQLite only as the query index. No Docker, PostgreSQL, NATS or terminal is needed. Switch to **Team server** to use a shared harness. Sessions, streamed reasoning, tool-call cards, inline approvals, an approval inbox, a Works view for continuous v2 Works, and model / MCP / HTTP tool / skill management are the same in both modes; local mode implements the same `/v1/extensions`, command, checkpoint/fork, memory, graph and evaluation APIs. Commands are version-guarded and idempotent across restarts, cancelling a flow cascades to child runs, and compaction summaries, memory hits, checkpoints and step output revisions are persisted in the local store.
 
 ```bash
 desktop/build.sh run
@@ -238,7 +238,16 @@ The desktop runtime reads the same sections (`policy`, `triggers`, `context_prov
 
 ## Continuous Works (v2 control plane)
 
-Behind `HARNESS_WORK_ENGINE_ENABLED`, a **Work** is a durable goal that spans many runs: events are deduplicated and correlated into Works, durable watches wait for events and timers, actions are planned against a bitemporal world state, held for approval bound to an intent hash, dispatched ledger-first and never replayed blindly, and a Work only succeeds with a verified outcome (metrics, world state, events or a human). `HARNESS_EVENT_SHADOW_MODE` (default on) routes events without creating Works; `HARNESS_ACTION_V2_ENABLED` turns on actions. Templates and correlation rules live under `work:` in the config file (`harness.local.json` on the desktop); `work_extension` plugins add action executors and metric sources. Run `scripts/v2/demo.sh` for an offline end-to-end incident on the built-in simulator. Details: [docs/v2-control-plane.md](docs/v2-control-plane.md).
+Behind `HARNESS_WORK_ENGINE_ENABLED`, a **Work** is a durable goal that spans many runs: events are deduplicated and correlated into Works, durable watches wait for events and timers, actions are planned against a bitemporal world state, held for approval bound to an intent hash, dispatched ledger-first and never replayed blindly, and a Work only succeeds with a verified outcome (metrics, world state, events or a human). `HARNESS_EVENT_SHADOW_MODE` (default on) routes events without creating Works; `HARNESS_ACTION_V2_ENABLED` turns on actions. Templates and correlation rules live under `work:` in the config file (`harness.local.json` on the desktop); `work_extension` plugins add action executors and metric sources. Run `scripts/v2/demo.sh` for an offline end-to-end incident on the built-in simulator, or `scripts/v2/demo-pg.sh` for the same on `harness all` + PostgreSQL with change/alert correlation, idempotent replay, `kill -9` crash recovery and pod topology checks.
+
+- **Security**: roles `viewer`, `operator`, `approver`, `admin`, `service` (events only) and `break_glass` (never implied); per-principal scopes limit event sources/types, resources and the approvable risk. R3 is never allowed, R2 always needs an approval bound to the intent hash; denials, approvals and break-glass are audited.
+- **Domain plugins**: `sre` (Prometheus/Alertmanager, Kubernetes, OTel, GitOps/Argo CD, Istio traffic, CMDB, Jira, AI infra) and `sre-sim`; source-native webhooks at `POST /v1/sources/{source}/events`; external plugins use `pkg/sdk`.
+- **Evaluation and learning**: per-Work scorecard and safety gates (`/evaluation`), ledger-based postmortems (`/postmortem`, Markdown or a review Work), `postmortem` and `follow-up` templates, playbook proposals (`/playbook`) and memories with applicability and verified-outcome promotion.
+- **Work bench**: `harness work-bench run bench/cases` replays incidents deterministically with expectations and a baseline gate; `record`/`replay` turn a real Work into a case.
+- **Observability**: Work, action, event, watch and world metrics, with a Grafana dashboard and alert rules in `deploy/observability/`.
+- **Desktop**: a Works view with outcomes, scorecard, action approvals, hypotheses, timeline and postmortems.
+
+Details: [docs/v2-control-plane.md](docs/v2-control-plane.md).
 
 ## Deployment
 
@@ -314,10 +323,11 @@ See `deploy/harness.example.yaml` for the rest.
 ## Tests
 
 ```bash
-HARNESS_TEST_DATABASE_URL=postgres://localhost/harness_test go test -race ./...
+HARNESS_PG_TEST_URL=postgres://localhost/harness_test go test -race ./...
+harness work-bench run bench/cases
 ```
 
-Database tests are skipped when the variable is unset. The PostgreSQL store tests (including the v2 control-plane contract tests, which always run on SQLite too) read `HARNESS_PG_TEST_URL`. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
+PostgreSQL tests (including the v2 control-plane contract tests, which always run on SQLite too) read `HARNESS_PG_TEST_URL` and are skipped when it is unset; use a UTF-8 database, since full-text search on `SQL_ASCII` drops CJK text. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout after approval"

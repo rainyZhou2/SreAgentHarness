@@ -46,6 +46,7 @@ import (
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/trigger"
 	"go-sre-harness/internal/verify"
+	"go-sre-harness/internal/workengine"
 	"go-sre-harness/plugins/profiles"
 )
 
@@ -196,7 +197,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	var gatherer kernel.ContextGatherer
-	if len(local.ContextProviders) > 0 {
+	var envGatherer *envctx.Gatherer
+	if len(local.ContextProviders) > 0 || workengine.FlagsFromEnv(os.Getenv).Engine {
 		deps := envctx.Deps{Registry: reg, Dependencies: store, Network: extensions.NetPolicy{Allow: networks}, Timeout: 5 * time.Second}
 		var providers []envctx.Provider
 		for i, pc := range local.ContextProviders {
@@ -206,7 +208,8 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			providers = append(providers, p)
 		}
-		gatherer = &envctx.Gatherer{Providers: providers, Log: cfg.Log.With("component", "envctx")}
+		envGatherer = &envctx.Gatherer{Providers: providers, Log: cfg.Log.With("component", "envctx")}
+		gatherer = envGatherer
 	}
 	offload := local.OutputOffloadBytes
 	if offload == 0 {
@@ -282,11 +285,14 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	work, err := buildLocalWork(ctx, cfg, local, server, pol, metrics)
+	work, err := buildLocalWork(ctx, cfg, local, server, pol, metrics, embedder)
 	if err != nil {
 		return err
 	}
 	if work != nil {
+		work.engine.MirrorTriggers(triggers, work.flags)
+		work.engine.AttachContext(envGatherer)
+		retriever.Env = work.engine.MemoryEnv
 		defer work.close()
 		go func() {
 			if err := work.engine.Run(ctx); err != nil && ctx.Err() == nil {

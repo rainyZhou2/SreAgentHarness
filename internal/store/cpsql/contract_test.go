@@ -591,3 +591,39 @@ func TestEvidenceStore(t *testing.T) {
 		}
 	})
 }
+
+// A same-instant conflict is resolved by a later observation from that
+// source whichever side it repeats, independent of row order.
+func TestFactConflictResolvedByLaterObservation(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		for _, order := range [][2]string{{"1", "2"}, {"2", "1"}} {
+			tn := "t-conf-" + cpkit.NewID()[24:]
+			put := func(v string, at time.Time) {
+				t.Helper()
+				if _, _, err := s.AssertFact(ctx, world.Fact{TenantID: tn, SubjectRef: "deployment://p/c", Predicate: "generation",
+					Value: v, Source: "k8s", TrustTier: world.TrustFirstParty, ValidFrom: at, ObservedAt: at}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			put(order[0], t0)
+			put(order[1], t0) // same instant: conflict, both visible
+			fs, _ := s.FactsAt(ctx, tn, []string{"deployment://p/c"}, []string{"generation"}, t0, t0)
+			if len(fs) != 2 {
+				t.Fatalf("order %v: conflict should keep both: %+v", order, fs)
+			}
+			later := t0.Add(time.Second)
+			put("1", later)
+			fs, _ = s.FactsAt(ctx, tn, []string{"deployment://p/c"}, []string{"generation"}, later, later)
+			if len(fs) != 1 || fs[0].Value != "1" {
+				t.Fatalf("order %v: later observation must resolve the conflict: %+v", order, fs)
+			}
+			// History is kept: as of t0 both values are still visible.
+			fs, _ = s.FactsAt(ctx, tn, []string{"deployment://p/c"}, []string{"generation"}, t0, later)
+			if len(fs) != 2 {
+				t.Fatalf("order %v: history at t0: %+v", order, fs)
+			}
+		}
+	})
+}

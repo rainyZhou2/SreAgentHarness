@@ -1,0 +1,20 @@
+{
+  "name": "change-and-alert-correlation",
+  "description": "A deploy event, then an alert on the same service and a second deploy: all land in one Work through the shared correlation group and lookback.",
+  "rules": [
+    {"name": "alerts", "match": {"event_types": ["alert.firing"]}, "key": "subject", "group": "service-health",
+     "lookback": "1h", "template": "bench-wait", "work_kind": "incident", "title": "${type} on ${subject}"},
+    {"name": "deploys", "match": {"event_types": ["change.deployed"]}, "key": "subject", "group": "service-health", "action": "attach"}
+  ],
+  "templates": [{
+    "id": "bench-wait", "kind": "incident",
+    "stages": [{"id": "triage", "type": "confirm", "phase": "assess"}]
+  }],
+  "signals": [
+    {"at": "0s", "event": {"source": "argocd", "type": "change.deployed", "subject_ref": "service://prod/checkout", "dedup_key": "sync-42"}},
+    {"at": "5m", "event": {"source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-1"}},
+    {"at": "8m", "event": {"source": "argocd", "type": "change.deployed", "subject_ref": "service://prod/checkout", "dedup_key": "sync-43"}}
+  ],
+  "human": [{"stage": "triage", "command": "confirm", "payload": {"verdict": "satisfied", "comment": "deploy reverted"}, "at": "10m"}],
+  "expect": {"works": 1, "status": "SUCCEEDED"}
+}

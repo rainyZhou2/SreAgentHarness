@@ -241,7 +241,7 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		if m.LeaseOwner != "" && (w.LeaseOwner != m.LeaseOwner || w.LeaseUntil == nil || !w.LeaseUntil.After(now)) {
 			return work.ErrLeaseLost
 		}
-		from := w.Status
+		from, from0Gen := w.Status, w.Generation
 		if m.Status != nil {
 			cmd := ""
 			if m.Command != nil {
@@ -275,7 +275,21 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 			if *m.Generation < w.Generation {
 				return fmt.Errorf("%w: generation cannot go back", work.ErrInvalid)
 			}
+			if m.Goal != nil && *m.Generation == w.Generation {
+				return fmt.Errorf("%w: a goal amendment needs a new generation", work.ErrInvalid)
+			}
 			w.Generation = *m.Generation
+		}
+		goalChanged := false
+		if m.Goal != nil {
+			if h := cpkit.MustHash(*m.Goal); h != w.GoalHash {
+				w.Goal, w.GoalHash, goalChanged = *m.Goal, h, true
+			}
+		}
+		if m.Generation != nil && w.Generation > from0Gen {
+			if err := s.insertGoal(ctx, tx, w, w.Reason, m.ActorID, now); err != nil {
+				return err
+			}
 		}
 		w.Replans += m.AddReplans
 		w.RunsStarted += m.AddRuns
@@ -298,6 +312,17 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		}
 		for _, l := range m.Links {
 			if err := s.insertLink(ctx, tx, w, l, now); err != nil {
+				return err
+			}
+		}
+		for runID, r := range m.LinkResults {
+			fin := r.FinishedAt
+			if fin.IsZero() {
+				fin = now
+			}
+			if _, err := tx.ExecContext(ctx, s.q(`UPDATE work_run_links SET outcome=?, cost_micros=?, finished_at=?, evidence_refs=?
+				WHERE tenant_id=? AND work_id=? AND run_id=?`), nullStr(cpkit.Truncate(r.Outcome, 64)), r.CostMicros, s.t(fin),
+				js(r.EvidenceRefs), w.TenantID, w.ID, runID); err != nil {
 				return err
 			}
 		}
@@ -352,6 +377,15 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 			evs = append([]work.NewEvent{{Type: "work.status_changed", Payload: map[string]any{
 				"from": from, "to": w.Status, "reason": w.Reason, "stage": w.Stage, "generation": w.Generation}}}, evs...)
 		}
+		if goalChanged {
+			evs = append(evs, work.NewEvent{Type: "work.goal_amended", Payload: map[string]any{
+				"generation": w.Generation, "goal_hash": w.GoalHash, "subjects": w.Goal.SubjectRefs}})
+			for _, ref := range w.Goal.SubjectRefs {
+				if err := s.insertSubject(ctx, tx, w.TenantID, w.ID, work.SubjectLink{Kind: "subject", ID: ref}, now); err != nil {
+					return err
+				}
+			}
+		}
 		if m.Command != nil {
 			evs = append(evs, work.NewEvent{Type: "work.command_applied", Payload: map[string]any{
 				"command": m.Command.Type, "idempotency_key": m.Command.Key}})
@@ -367,10 +401,10 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		}
 		res, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET status=?, reason=?, stage=?, stage_state=?, generation=?,
 			replans=?, runs_started=?, cost_micros=?, wake_at=?, lease_owner=?, lease_until=?, version=?,
-			last_event_seq=?, updated_at=?, closed_at=? WHERE tenant_id=? AND id=? AND version=?`),
+			last_event_seq=?, updated_at=?, closed_at=?, goal=?, goal_hash=? WHERE tenant_id=? AND id=? AND version=?`),
 			string(w.Status), nullStr(w.Reason), w.Stage, state, w.Generation, w.Replans, w.RunsStarted, w.CostMicros,
 			s.tp(w.WakeAt), nullStr(w.LeaseOwner), s.tp(w.LeaseUntil), w.Version, w.LastSeq, s.t(now), s.tp(w.ClosedAt),
-			w.TenantID, w.ID, w.Version-1)
+			js(w.Goal), w.GoalHash, w.TenantID, w.ID, w.Version-1)
 		if err != nil {
 			return err
 		}
@@ -460,18 +494,28 @@ func (s *Store) scanLinks(rows *sql.Rows, tenantID string) ([]work.RunLink, erro
 	var out []work.RunLink
 	for rows.Next() {
 		l := work.RunLink{TenantID: tenantID}
-		var stage, role, status ns
+		var stage, role, status, oc ns
 		var at ts
-		if err := rows.Scan(&l.WorkID, &l.RunID, &l.Role, &l.Phase, &stage, &role, &l.Generation, &l.Required, &status, &at); err != nil {
+		var fin ts
+		var refs jb
+		if err := rows.Scan(&l.WorkID, &l.RunID, &l.Role, &l.Phase, &stage, &role, &l.Generation, &l.Required, &status, &at,
+			&oc, &l.CostMicros, &fin, &refs); err != nil {
 			return nil, err
 		}
-		l.StageID, l.AgentRole, l.Status, l.CreatedAt = stage.S(), role.S(), status.S(), at.T
+		l.StageID, l.AgentRole, l.Status, l.CreatedAt, l.Outcome = stage.S(), role.S(), status.S(), at.T, oc.S()
+		l.FinishedAt = fin.ptr()
+		if len(refs) > 0 {
+			if err := json.Unmarshal(refs, &l.EvidenceRefs); err != nil {
+				return nil, fmt.Errorf("run link %s evidence refs: %w", l.RunID, err)
+			}
+		}
 		out = append(out, l)
 	}
 	return out, rows.Err()
 }
 
-const linkCols = `work_id, run_id, role, phase, stage_id, agent_role, generation, required, status, created_at`
+const linkCols = `work_id, run_id, role, phase, stage_id, agent_role, generation, required, status, created_at,
+	outcome, cost_micros, finished_at, evidence_refs`
 
 // ListRunLinks lists a Work's runs in creation order.
 func (s *Store) ListRunLinks(ctx context.Context, tenantID, workID string) ([]work.RunLink, error) {
@@ -676,4 +720,64 @@ func (s *Store) CommandResult(ctx context.Context, tenantID, workID, key string)
 		return w, "", false, err
 	}
 	return w, hash, true, nil
+}
+
+func (s *Store) insertGoal(ctx context.Context, tx *sql.Tx, w work.Work, reason, actor string, now time.Time) error {
+	_, err := tx.ExecContext(ctx, s.q(`INSERT INTO work_goals (tenant_id, work_id, generation, goal, goal_hash, reason,
+		actor_id, created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (tenant_id, work_id, generation) DO NOTHING`),
+		w.TenantID, w.ID, w.Generation, js(w.Goal), w.GoalHash, nullStr(cpkit.Truncate(reason, 500)), nullStr(actor), s.t(now))
+	return err
+}
+
+// ListGoals returns the goal of every generation of a Work, oldest first.
+func (s *Store) ListGoals(ctx context.Context, tenantID, workID string) ([]work.GoalRecord, error) {
+	if !cpkit.ValidID(workID) {
+		return nil, work.ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT generation, goal, goal_hash, reason, actor_id, created_at FROM work_goals
+		WHERE tenant_id=? AND work_id=? ORDER BY generation`), tenantID, workID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []work.GoalRecord
+	for rows.Next() {
+		var g work.GoalRecord
+		var goal jb
+		var reason, actor ns
+		var at ts
+		if err := rows.Scan(&g.Generation, &goal, &g.GoalHash, &reason, &actor, &at); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(goal, &g.Goal); err != nil {
+			return nil, fmt.Errorf("goal of generation %d: %w", g.Generation, err)
+		}
+		g.Reason, g.ActorID, g.CreatedAt = reason.S(), actor.S(), at.T
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// RecentlyClosedWorks lists Works of every tenant that reached SUCCEEDED or
+// FAILED since the given time, newest first (system sweeps: playbook
+// outcome feedback). Not exposed through any tenant API.
+func (s *Store) RecentlyClosedWorks(ctx context.Context, since time.Time, limit int) ([]work.Work, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+workCols+` FROM agent_works
+		WHERE status IN ('SUCCEEDED','FAILED') AND updated_at >= ? ORDER BY updated_at DESC, id DESC LIMIT ?`), s.t(since), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []work.Work
+	for rows.Next() {
+		w, err := scanWork(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
 }

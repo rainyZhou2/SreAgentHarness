@@ -11,6 +11,7 @@ import (
 
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/outcome"
 )
 
@@ -324,6 +325,23 @@ func (t *Template) Index(id string) (int, bool) {
 // Values are inserted verbatim; nothing is evaluated. summaries maps a run
 // stage id to its bounded result summary.
 func Render(tpl string, w *Work, summaries map[string]string) string {
+	return RenderWith(tpl, w, summaries, nil)
+}
+
+// UntrustedField reports whether a placeholder expands to text that may
+// come from outside the operator (event titles and labels, descriptions,
+// earlier runs' summaries).
+func UntrustedField(name string) bool {
+	switch {
+	case name == "title", name == "goal.description", strings.HasPrefix(name, "label."), strings.HasPrefix(name, "stage."):
+		return true
+	}
+	return false
+}
+
+// RenderWith is Render with a hook applied to every substituted value
+// (e.g. to fence untrusted text before it reaches a model).
+func RenderWith(tpl string, w *Work, summaries map[string]string, quote func(name, value string) string) string {
 	var b strings.Builder
 	for {
 		i := strings.Index(tpl, "${")
@@ -337,7 +355,12 @@ func Render(tpl string, w *Work, summaries map[string]string) string {
 			break
 		}
 		b.WriteString(tpl[:i])
-		b.WriteString(lookup(tpl[i+2:i+j], w, summaries))
+		name := tpl[i+2 : i+j]
+		v := lookup(name, w, summaries)
+		if quote != nil {
+			v = quote(name, v)
+		}
+		b.WriteString(v)
 		tpl = tpl[i+j+1:]
 	}
 	return b.String()
@@ -417,6 +440,8 @@ func Builtin() []Template {
 			{ID: "review", Type: StageRun, Phase: "review", OnFailure: OnFailSkip, Run: &RunSpec{
 				Goal: "Write a postmortem candidate for \"${title}\" on ${subjects}: timeline, trigger, root cause (or unknown), contributing factors, detection and recovery gaps, follow-up actions.\nInvestigation summary: ${stage.investigate.summary}"}},
 		}},
+		postmortemTemplate(),
+		followUpTemplate(),
 		{ID: "routine", Version: 1, Kind: KindRoutine, Stages: []Stage{
 			{ID: "check", Type: StageRun, Phase: "investigate", Run: &RunSpec{Goal: "Routine check (${goal.intent}) of ${subjects}: report risks, missing monitoring and capacity concerns. ${goal.description}"}},
 			{ID: "review", Type: StageConfirm, Phase: "review"},
@@ -428,4 +453,47 @@ func Builtin() []Template {
 		}
 	}
 	return ts
+}
+
+// Builtin template ids for reviews (RFC §14.5).
+const (
+	TemplatePostmortem = "postmortem"
+	TemplateFollowUp   = "follow-up"
+)
+
+// postmortemTemplate drafts a postmortem for a closed Work. The deterministic
+// ledger report (timeline, actions, outcomes, hypotheses, gaps) is put in
+// the goal description by the server; the model writes prose around it and
+// may not invent a root cause. A human reviews the draft.
+func postmortemTemplate() Template {
+	return Template{ID: TemplatePostmortem, Version: 1, Kind: KindRequest, Stages: []Stage{
+		{ID: "draft", Type: StageRun, Phase: "review", Run: &RunSpec{Goal: "Draft the postmortem for Work ${label.source_work} (\"${title}\") on ${subjects}.\n" +
+			"Use only the ledger report below. Sections: summary, impact, timeline, trigger, root cause, contributing factors, detection gap, recovery gap, what went well, follow-ups.\n" +
+			"State a root cause only if the report lists a SUPPORTED hypothesis with evidence; otherwise write \"root cause: unknown\" and list the open hypotheses. " +
+			"Do not claim the incident is resolved unless the report shows a verified outcome.\n" +
+			"End with a JSON object {\"follow_ups\":[{\"title\",\"why\",\"owner_hint\",\"priority\"}]}.\n\nLedger report:\n${goal.description}"}},
+		{ID: "review", Type: StageConfirm, Phase: "review", Confirm: &ConfirmSpec{
+			Prompt: "Review the postmortem draft for Work ${label.source_work}; confirm to publish it, or reject to send it back."}},
+	}}
+}
+
+// followUpTemplate tracks one postmortem follow-up to completion: plan it,
+// file a ticket through the controlled action path, wait until the ticket
+// is done, then a human confirms the follow-up is actually effective.
+// Subjects must include the ticket project (ticket://<PROJECT>) and the
+// affected services.
+func followUpTemplate() Template {
+	return Template{ID: TemplateFollowUp, Version: 1, Kind: KindRequest, Limits: Limits{MaxDuration: cpkit.Duration(60 * 24 * time.Hour)},
+		Stages: []Stage{
+			{ID: "plan", Type: StageRun, Phase: "assess", Run: &RunSpec{Goal: "Plan the follow-up \"${title}\" from Work ${label.source_work} on ${subjects}. ${goal.description}\n" +
+				"Describe the concrete change, its acceptance check and the owning team, then propose filing it: " +
+				"{\"proposed_action\":{\"name\":\"ticket.create\",\"target\":\"ticket://<PROJECT>\",\"args\":{\"summary\",\"description\",\"services\"}}}."}},
+			{ID: "file", Type: StageAction, Phase: "mitigate", Action: &ActionSpec{FromProposal: "plan", Allowed: []string{"ticket.create"}}},
+			{ID: "track", Type: StageWait, Phase: "verify", OnTimeout: OnFailBlock, Wait: &continuous.Spec{Mode: continuous.OnEvent,
+				Purpose: "follow-up ticket done", Timeout: cpkit.Duration(30 * 24 * time.Hour),
+				Predicate: &eventing.Predicate{EventTypes: []string{"ticket.updated"},
+					Where: &eventing.Cond{Field: "labels.status", Op: "in", Values: []string{"Done", "Closed", "Resolved", "Fixed"}}}}},
+			{ID: "confirm", Type: StageConfirm, Phase: "review", Confirm: &ConfirmSpec{
+				Prompt: "The follow-up ticket is done. Confirm the change is in place and effective."}},
+		}}
 }

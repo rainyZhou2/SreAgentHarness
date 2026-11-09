@@ -69,6 +69,7 @@ type Store struct {
 	modelReqs       map[string]modelReqRec
 	checkpoints     map[string]checkpointRec
 	memories        map[string]memoryRec
+	memOutcomes     map[string]bool // memory|work outcomes already counted
 	memHits         map[string][]memoryHitRec
 	reasoningScores map[string]reasoningScoreRec
 	consolidation   map[string]consolidationRec
@@ -458,6 +459,11 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 			return err
 		}
 		s.checkpoints[v.ID] = v
+	case "memory_outcome":
+		if s.memOutcomes == nil {
+			s.memOutcomes = map[string]bool{}
+		}
+		s.memOutcomes[id] = true
 	case "memory":
 		var v memoryRec
 		if err := json.Unmarshal(data, &v); err != nil {

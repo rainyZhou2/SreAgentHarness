@@ -187,3 +187,131 @@ func TestIncidentLoopOnSimulator(t *testing.T) {
 		t.Fatal("a settled action must not be dispatched twice")
 	}
 }
+
+// fakeTopo records facts and relations the sim publishes.
+type fakeTopo struct {
+	mu    sync.Mutex
+	facts map[string]string // subject|predicate -> value
+	rels  map[string]bool   // from|type|to -> live
+}
+
+func (f *fakeTopo) env() plugin.WorkEnv {
+	f.facts, f.rels = map[string]string{}, map[string]bool{}
+	return plugin.WorkEnv{
+		AssertFact: func(_ context.Context, x world.Fact) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.facts[x.SubjectRef+"|"+x.Predicate] = x.Value
+			return nil
+		},
+		AssertRelation: func(_ context.Context, r world.Relation) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.rels[r.FromRef+"|"+r.Type+"|"+r.ToRef] = true
+			return nil
+		},
+		RetractRelation: func(_ context.Context, _, from, typ, to, _ string, _ time.Time) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.rels[from+"|"+typ+"|"+to] = false
+			return nil
+		},
+	}
+}
+
+func (f *fakeTopo) live(prefix string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for k, v := range f.rels {
+		if v && len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func TestTopologyAndPersistentState(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{t: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
+	state := filepath.Join(t.TempDir(), "sim.json")
+	cfg := Config{Tenant: "local", StateFile: state, Deployments: []DeploymentConfig{{Ref: "deployment://prod/checkout",
+		Image: "checkout:v2", GoodImage: "checkout:v1", BadImages: []string{"checkout:v2"}, Replicas: 2}}}
+	sim, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sim.SetClock(c.now)
+	topo := &fakeTopo{}
+	env := topo.env()
+	sim.world, sim.env = env.AssertFact, env
+	sim.publish(ctx)
+
+	if got := topo.live("service://prod/checkout|deployed_as|deployment://prod/checkout"); len(got) != 1 {
+		t.Fatalf("deployed_as: %v", got)
+	}
+	before := topo.live("deployment://prod/checkout|owns|")
+	if len(before) != 2 {
+		t.Fatalf("owns: %v", before)
+	}
+	if got := topo.live("pod://"); len(got) != 2 {
+		t.Fatalf("runs_on: %v", got)
+	}
+
+	var rb action.Executor
+	for _, x := range sim.Actions() {
+		if x.Descriptor().Name == "deployment.rollback" {
+			rb = x
+		}
+	}
+	if rb == nil {
+		t.Fatal("no rollback action")
+	}
+	plan := action.Plan{TenantID: "local", TargetRef: "deployment://prod/checkout", TargetVersion: "1", Args: json.RawMessage(`{}`), EffectKey: "key-1"}
+	if _, err := rb.Execute(ctx, plan, "key-1"); err != nil {
+		t.Fatal(err)
+	}
+	sim.publish(ctx)
+	after := topo.live("deployment://prod/checkout|owns|")
+	if len(after) != 2 || after[0] == before[0] || after[0] == before[1] {
+		t.Fatalf("rollout did not replace pods: before=%v after=%v", before, after)
+	}
+	oldPod := before[0][len("deployment://prod/checkout|owns|"):]
+	if topo.facts[oldPod+"|phase"] != "Terminated" {
+		t.Fatalf("old pod phase: %q", topo.facts[oldPod+"|phase"])
+	}
+	if topo.facts["deployment://prod/checkout|changes_applied"] != "1" {
+		t.Fatalf("changes: %q", topo.facts["deployment://prod/checkout|changes_applied"])
+	}
+
+	// A restarted harness sees the downstream as it really is, and a retry
+	// of the same effect key is answered without a second change.
+	sim2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sim2.SetClock(c.now)
+	d := sim2.deps["deployment://prod/checkout"]
+	if d.Image != "checkout:v1" || d.generation != 2 || d.changes != 1 {
+		t.Fatalf("restored: image=%s gen=%d changes=%d", d.Image, d.generation, d.changes)
+	}
+	var rb2 action.Executor
+	for _, x := range sim2.Actions() {
+		if x.Descriptor().Name == "deployment.rollback" {
+			rb2 = x
+		}
+	}
+	res, err := rb2.Execute(ctx, plan, "key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(res, &out)
+	if out["to_image"] != "checkout:v1" || sim2.deps["deployment://prod/checkout"].changes != 1 {
+		t.Fatalf("retry was not deduplicated: %s changes=%d", res, sim2.deps["deployment://prod/checkout"].changes)
+	}
+	ins, err := rb2.Inspect(ctx, plan)
+	if err != nil || ins.Applied == nil || !*ins.Applied {
+		t.Fatalf("inspect after restart: %+v %v", ins, err)
+	}
+}

@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"context"
+	"net/http"
+	"time"
 
 	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/world"
 )
 
@@ -25,6 +28,31 @@ type WorkEnv struct {
 	AssertFact func(ctx context.Context, f world.Fact) error
 	// Ingest submits an event to the inbox (dedup, correlation, watches).
 	Ingest func(ctx context.Context, e eventing.Envelope) error
+	// AssertRelation records a topology edge; RetractRelation closes one
+	// (the edge disappeared from the observed system).
+	AssertRelation  func(ctx context.Context, r world.Relation) error
+	RetractRelation func(ctx context.Context, tenantID, from, typ, to, source string, at time.Time) error
+}
+
+// EventContributor is optionally implemented by a WorkExtension that ships
+// default correlation rules. Operator rules with the same name win.
+type EventContributor interface {
+	EventRules() []eventing.Rule
+}
+
+// SourceNormalizers is optionally implemented by a WorkExtension that
+// accepts source-native webhooks (Alertmanager, Kubernetes events, Argo
+// CD, ...) at POST /v1/sources/{source}/events.
+type SourceNormalizers interface {
+	Sources() []string
+	Normalizer(source string) (func(ctx context.Context, tenantID string, h http.Header, body []byte, now time.Time) ([]eventing.Envelope, error), bool)
+}
+
+// TemplateContributor is optionally implemented by a WorkExtension that
+// ships scenario Work templates. Operator-configured templates with the
+// same id win.
+type TemplateContributor interface {
+	WorkTemplates() []work.Template
 }
 
 // WorkRunner is optionally implemented by a WorkExtension that feeds the

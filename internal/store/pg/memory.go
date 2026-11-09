@@ -150,15 +150,17 @@ var _ memory.ConsolidationStore = (*Store)(nil)
 
 const memoryCols = `id, tenant_id, scope, scope_id, memory_type, status, current_version, subject, title, content_text,
 	content_ref, content_hash, source_refs, evidence_refs, trust, sensitivity, confidence, verified_by, environment,
-	superseded_by, expires_at, created_by, created_at, updated_at, reinforcements, last_reinforced_at`
+	superseded_by, expires_at, created_by, created_at, updated_at, reinforcements, last_reinforced_at, applicability,
+	verified_success_count, verified_failure_count, last_verified_at`
 
 func scanMemory(row pgx.Row, extra ...any) (memory.Memory, error) {
 	var m memory.Memory
-	var src, ev []byte
+	var src, ev, appl []byte
 	dest := []any{&m.ID, &m.TenantID, &m.Scope, &m.ScopeID, &m.Type, &m.Status, &m.Version, &m.Subject, &m.Title,
 		&m.Content, &m.ContentRef, &m.ContentHash, &src, &ev, &m.Trust, &m.Sensitivity, &m.Confidence, &m.VerifiedBy,
 		&m.Environment, &m.SupersededBy, &m.ExpiresAt, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt, &m.Reinforcements,
-		&m.LastReinforcedAt}
+		&m.LastReinforcedAt, &appl, &m.Verification.SuccessCount, &m.Verification.FailureCount,
+		&m.Verification.LastVerifiedAt}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return m, domain.ErrNotFound
@@ -167,6 +169,12 @@ func scanMemory(row pgx.Row, extra ...any) (memory.Memory, error) {
 	}
 	_ = json.Unmarshal(src, &m.SourceRefs)
 	_ = json.Unmarshal(ev, &m.EvidenceRefs)
+	if len(appl) > 0 && string(appl) != "null" {
+		var a memory.Applicability
+		if json.Unmarshal(appl, &a) == nil {
+			m.Applicability = &a
+		}
+	}
 	return m, nil
 }
 
@@ -187,12 +195,12 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		var inserted string
 		err := tx.QueryRow(ctx, `INSERT INTO agent_memories (id, tenant_id, scope, scope_id, memory_type, status, subject,
 			title, content_text, content_ref, content_hash, source_refs, evidence_refs, trust, sensitivity, confidence,
-			verified_by, environment, expires_at, created_by, search_terms, search_terms_v)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1)
+			verified_by, environment, expires_at, created_by, search_terms, search_terms_v, applicability)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,$22)
 			ON CONFLICT (tenant_id, scope, scope_id, content_hash) WHERE status NOT IN ('REJECTED','ARCHIVED') DO NOTHING
 			RETURNING id`, id, m.TenantID, m.Scope, m.ScopeID, m.Type, m.Status, m.Subject, m.Title, m.Content,
 			m.ContentRef, m.ContentHash, jsonb(nonNil(m.SourceRefs)), jsonb(nonNil(m.EvidenceRefs)), m.Trust, m.Sensitivity,
-			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy, m.SearchTerms).Scan(&inserted)
+			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy, m.SearchTerms, applicabilityJSON(m.Applicability)).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			cur, err := scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
 				AND scope_id=$3 AND content_hash=$4 AND status NOT IN ('REJECTED','ARCHIVED') FOR UPDATE`, m.TenantID, m.Scope, m.ScopeID,
@@ -343,6 +351,11 @@ func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, ac
 		if !allowed {
 			return &domain.RejectedError{Reason: fmt.Sprintf("invalid_transition_%s_to_%s", cur.Status, to)}
 		}
+		if to == "ACTIVE" {
+			if err := memory.CanPromote(cur, actor); err != nil {
+				return &domain.RejectedError{Reason: "playbook_promotion: " + err.Error()}
+			}
+		}
 		trust := cur.Trust
 		var verifier *string
 		if to == "ACTIVE" {
@@ -363,6 +376,64 @@ func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, ac
 		if _, err := tx.Exec(ctx, `INSERT INTO security_audit_log (id, tenant_id, actor_type, actor_id, action, resource_type,
 			resource_id, outcome, details) VALUES ($1,$2,'user',$3,'memory.transition','memory',$4,'applied',$5)`, newID(),
 			tenantID, actor, id, jsonb(map[string]string{"from": cur.Status, "to": to, "reason": reason})); err != nil {
+			return err
+		}
+		out, err = scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE id=$1`, id))
+		return err
+	})
+	return out, err
+}
+
+func applicabilityJSON(a *memory.Applicability) any {
+	if a == nil {
+		return nil
+	}
+	return jsonb(a)
+}
+
+// RecordMemoryOutcome records the machine-verified outcome of a Work that
+// used a memory. It is idempotent per (memory, Work): a replayed close or
+// a second evaluation never double-counts. It reports whether it counted.
+func (s *Store) RecordMemoryOutcome(ctx context.Context, tenantID, memoryID, workID string, success bool, evaluationID string) (bool, error) {
+	verdict, col := "failure", "verified_failure_count"
+	if success {
+		verdict, col = "success", "verified_success_count"
+	}
+	counted := false
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO memory_outcomes (tenant_id, memory_id, work_id, verdict, evaluation)
+			SELECT $1,$2::uuid,$3,$4,$5 WHERE EXISTS (SELECT 1 FROM agent_memories WHERE tenant_id=$1 AND id=$2::uuid)
+			ON CONFLICT DO NOTHING`, tenantID, memoryID, workID, verdict, evaluationID)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		counted = true
+		_, err = tx.Exec(ctx, `UPDATE agent_memories SET `+col+` = `+col+` + 1, last_verified_at = now()
+			WHERE tenant_id=$1 AND id=$2::uuid`, tenantID, memoryID)
+		return err
+	})
+	return counted, err
+}
+
+// SetMemoryApplicability replaces a memory's applicability (operator
+// curation; audited).
+func (s *Store) SetMemoryApplicability(ctx context.Context, tenantID, id, actor string, a memory.Applicability) (memory.Memory, error) {
+	if err := a.Normalize(); err != nil {
+		return memory.Memory{}, &domain.RejectedError{Reason: err.Error()}
+	}
+	var out memory.Memory
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE agent_memories SET applicability=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`,
+			tenantID, id, jsonb(a))
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrNotFound
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO security_audit_log (id, tenant_id, actor_type, actor_id, action, resource_type,
+			resource_id, outcome, details) VALUES ($1,$2,'user',$3,'memory.applicability','memory',$4,'applied',$5)`, newID(),
+			tenantID, actor, id, jsonb(a)); err != nil {
 			return err
 		}
 		out, err = scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE id=$1`, id))

@@ -25,7 +25,12 @@ import (
 	"sort"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/obs"
 )
 
 // Trust tiers of a fact source (aligned with tool output trust).
@@ -277,10 +282,46 @@ type SnapshotRequest struct {
 type Service struct {
 	Store Store
 	Clock cpkit.Clock
+	// Observer receives snapshot latency and fact ages (optional).
+	Observer Observer
+}
+
+// Observer receives the World's metric signals (RFC §21.1).
+type Observer interface {
+	// Snapshot: build time by result (ok | error) and outcome flags.
+	Snapshot(d time.Duration, result string, facts, stale int)
+	// FactAge: the age of a fact served in a snapshot, by trust tier.
+	FactAge(trust string, age time.Duration)
 }
 
 // Snapshot builds (and optionally persists) a digest-addressed view.
-func (s *Service) Snapshot(ctx context.Context, req SnapshotRequest) (Snapshot, error) {
+func (s *Service) Snapshot(ctx context.Context, req SnapshotRequest) (snap Snapshot, err error) {
+	start := time.Now()
+	ctx, sp := obs.Tracer().Start(ctx, "world.snapshot", trace.WithAttributes(
+		attribute.Int("world.subjects", len(req.Subjects)), attribute.Int("world.depth", req.Depth)))
+	defer func() {
+		result := "ok"
+		if err != nil {
+			result = "error"
+			sp.SetStatus(codes.Error, err.Error())
+		} else {
+			sp.SetAttributes(attribute.String("snapshot_id", snap.ID), attribute.Int("world.facts", len(snap.Facts)),
+				attribute.Int("world.stale", len(snap.Stale)), attribute.Bool("world.truncated", snap.Truncated))
+		}
+		sp.End()
+		if s.Observer != nil {
+			s.Observer.Snapshot(time.Since(start), result, len(snap.Facts), len(snap.Stale))
+			if err == nil {
+				for _, f := range snap.Facts {
+					s.Observer.FactAge(f.TrustTier, snap.KnownAt.Sub(f.SeenBy(snap.KnownAt)))
+				}
+			}
+		}
+	}()
+	return s.snapshot(ctx, req)
+}
+
+func (s *Service) snapshot(ctx context.Context, req SnapshotRequest) (Snapshot, error) {
 	now := s.Clock.Now()
 	if req.AsOf.IsZero() {
 		req.AsOf = now

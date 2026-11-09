@@ -99,6 +99,8 @@ type Mutation struct {
 
 	Status *Status
 	Reason *string
+	// Goal amends the goal; only allowed together with a new Generation.
+	Goal *GoalSpec
 	// Stage moves to a stage index; StageState replaces the stage scratch.
 	Stage        *int
 	StageState   json.RawMessage
@@ -114,6 +116,7 @@ type Mutation struct {
 	Events        []NewEvent
 	Links         []RunLink
 	LinkStatus    map[string]string // run id -> observed status
+	LinkResults   map[string]LinkResult
 	Watches       []continuous.Watch
 	CancelWatches []string
 	// CancelAllWatches cancels every ACTIVE watch of the Work.
@@ -146,6 +149,19 @@ func CheckMutation(m *Mutation) error {
 			return invalidf("unknown link role %q", l.Role)
 		}
 	}
+	if m.Goal != nil {
+		if m.Generation == nil {
+			return invalidf("a goal amendment needs a new generation")
+		}
+		if err := m.Goal.Normalize(); err != nil {
+			return err
+		}
+	}
+	for runID, r := range m.LinkResults {
+		if r.CostMicros < 0 || len(r.Outcome) > 64 || len(r.EvidenceRefs) > 100 {
+			return invalidf("link result of run %s is out of bounds", runID)
+		}
+	}
 	return nil
 }
 
@@ -170,6 +186,8 @@ type Store interface {
 	ApplyWork(ctx context.Context, m Mutation) (Work, error)
 	ListWorkEvents(ctx context.Context, tenantID, workID string, afterSeq int64, limit int) ([]Event, error)
 	ListRunLinks(ctx context.Context, tenantID, workID string) ([]RunLink, error)
+	// ListGoals returns the goal of every generation, oldest first.
+	ListGoals(ctx context.Context, tenantID, workID string) ([]GoalRecord, error)
 	WorkForRun(ctx context.Context, tenantID, runID string) (RunLink, bool, error)
 	ListSubjects(ctx context.Context, tenantID, workID string) ([]SubjectLink, error)
 	ListWatches(ctx context.Context, tenantID, workID string, activeOnly bool) ([]continuous.Watch, error)

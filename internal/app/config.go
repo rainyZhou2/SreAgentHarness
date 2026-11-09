@@ -61,12 +61,18 @@ type StrategyConfig struct {
 
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)
 
-// expand replaces ${VAR} and ${VAR:-default}; a bare $ is left alone.
+// expand replaces ${VAR} and ${VAR:-default}; a bare $ is left alone. An
+// unset name with lower-case letters and no default (${subject},
+// ${title}) is a Work template placeholder, not an environment variable,
+// and is kept for the template engine.
 func expand(b []byte) []byte {
 	return envRef.ReplaceAllFunc(b, func(m []byte) []byte {
 		sub := envRef.FindSubmatch(m)
 		if v, ok := os.LookupEnv(string(sub[1])); ok && v != "" {
 			return []byte(v)
+		}
+		if sub[2] == nil && bytes.ContainsAny(sub[1], "abcdefghijklmnopqrstuvwxyz") {
+			return m
 		}
 		return sub[3]
 	})
@@ -243,6 +249,12 @@ func merge(base, f File) (File, error) {
 	}
 	if f.ToolOverlays != nil {
 		out.ToolOverlays = f.ToolOverlays
+	}
+	if f.Work.Templates != nil {
+		out.Work.Templates = f.Work.Templates
+	}
+	if f.Work.CorrelationRules != nil {
+		out.Work.CorrelationRules = f.Work.CorrelationRules
 	}
 	return out, nil
 }

@@ -86,9 +86,14 @@ func Main() {
 			}
 		}
 		return
+	case "work-bench":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := WorkBench(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
 	case "migrate", "all", "api", "worker", "scheduler":
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (migrate|all|api|worker|scheduler|plugins|hash-token)\n", mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (migrate|all|api|worker|scheduler|plugins|hash-token|work-bench)\n", mode)
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -159,6 +164,7 @@ type App struct {
 
 	triggerCfgs []trigger.Config
 	triggers    *trigger.Service
+	envGatherer *envctx.Gatherer
 	// work is the v2 control plane (nil unless HARNESS_WORK_ENGINE_ENABLED).
 	work *workengine.Engine
 }
@@ -378,6 +384,14 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		}
 	}
 	if r, ok := retriever.(*memory.Retriever); ok {
+		// Memory applicability follows the run's Work (environment, subjects,
+		// versions) once the work engine is up.
+		r.Env = func(ctx context.Context, tenantID, runID string) (memory.Env, bool) {
+			if a == nil || a.work == nil {
+				return memory.Env{}, false
+			}
+			return a.work.MemoryEnv(ctx, tenantID, runID)
+		}
 		// In-run memory search uses the same pipeline as the first retrieval.
 		if _, dup := h.Tools.Lookup(memsearch.Name); dup {
 			return nil, fmt.Errorf("tool %q is reserved for the harness", memsearch.Name)
@@ -399,11 +413,14 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, err
 	}
 	var gatherer kernel.ContextGatherer
-	if len(ctxProviders) > 0 {
-		gatherer = &envctx.Gatherer{Providers: ctxProviders,
+	// With the work engine, the World joins the gatherer (buildWork), so it
+	// exists even without configured providers.
+	if len(ctxProviders) > 0 || workengine.FlagsFromEnv(e).Engine {
+		a.envGatherer = &envctx.Gatherer{Providers: ctxProviders,
 			Timeout:  e.dur("HARNESS_CONTEXT_PROVIDER_TIMEOUT", 5*time.Second),
 			MaxFacts: e.int("HARNESS_CONTEXT_MAX_FACTS", 30),
 			Log:      log.With("component", "envctx")}
+		gatherer = a.envGatherer
 	}
 	// strategies
 	strategies := map[string]plugin.StrategyBuilder{}
@@ -785,11 +802,13 @@ func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server
 	}
 	eng, err := workengine.New(workengine.Options{Store: cpsql.OpenPostgres(pool), Server: srv, Policy: a.Host.Policy,
 		Extensions: exts, Config: a.Config.Work, Flags: flags, Metrics: a.metrics.Reg, Log: a.log,
-		Owner: workengine.Owner(a.Mode)})
+		Owner: workengine.Owner(a.Mode), Embedder: a.Host.Embedder})
 	if err != nil {
 		return err
 	}
 	srv.Extend(eng.API)
+	eng.MirrorTriggers(a.triggers, flags)
+	eng.AttachContext(a.envGatherer)
 	a.work = eng
 	return nil
 }

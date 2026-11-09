@@ -10,7 +10,13 @@
 //     (R1) with native idempotency (the effect key dedups), a pinned target
 //     generation (re-checked at dispatch) and read-only inspection;
 //   - optionally an alert.firing event for every deployment on a bad image
-//     (alert_every), which correlation rules turn into incident Works.
+//     (alert_every), which correlation rules turn into incident Works;
+//   - pods (pod://<ns>/<deployment>-<hash>-<i>) with phase, image and node
+//     facts and the topology edges service -deployed_as-> deployment
+//     -owns-> pod -runs_on-> node; a rollout replaces the pods;
+//   - with state_file, the simulated downstream keeps its state across
+//     harness restarts (a real cluster outlives the control plane), so
+//     crash-recovery demos see the effects that were really applied.
 //
 // Config (plugins.work_extension / local work_extensions):
 //
@@ -21,9 +27,13 @@ package srework
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,6 +67,27 @@ type Config struct {
 	// alert.firing for unhealthy deployments (0 = never).
 	RefreshEvery plugin.Duration `json:"refresh_every,omitempty"`
 	AlertEvery   plugin.Duration `json:"alert_every,omitempty"`
+	// StateFile persists the simulated downstream (images, generations,
+	// applied effect keys) across restarts; empty keeps it in memory.
+	StateFile string `json:"state_file,omitempty"`
+	// Nodes the pods are spread over (default node-a, node-b).
+	Nodes []string `json:"nodes,omitempty"`
+}
+
+// simState is the persisted downstream state.
+type simState struct {
+	Deployments map[string]depState        `json:"deployments"`
+	Applied     map[string]json.RawMessage `json:"applied"`
+}
+
+type depState struct {
+	Image       string    `json:"image"`
+	Generation  int       `json:"generation"`
+	Traffic     int       `json:"traffic"`
+	ChangedAt   time.Time `json:"changed_at"`
+	PrevBad     bool      `json:"prev_bad"`
+	PrevTraffic int       `json:"prev_traffic"`
+	Changes     int       `json:"changes"`
 }
 
 func init() {
@@ -78,6 +109,8 @@ type deployment struct {
 	// prevBad and prevTraffic describe the state before changedAt.
 	prevBad     bool
 	prevTraffic int
+	// changes counts effects really applied (dedup'd retries excluded).
+	changes int
 }
 
 // Sim is the simulated estate.
@@ -91,6 +124,9 @@ type Sim struct {
 	// dirty deployments are re-published immediately.
 	notify chan struct{}
 	world  func(ctx context.Context, f world.Fact) error
+	env    plugin.WorkEnv
+	// pods last published per deployment (to retract replaced ones).
+	pods map[string][]string
 }
 
 // New validates the config.
@@ -98,7 +134,11 @@ func New(cfg Config) (*Sim, error) {
 	if cfg.Tenant == "" {
 		cfg.Tenant = "local"
 	}
-	s := &Sim{cfg: cfg, deps: map[string]*deployment{}, applied: map[string]json.RawMessage{}, notify: make(chan struct{}, 1)}
+	if len(cfg.Nodes) == 0 {
+		cfg.Nodes = []string{"node-a", "node-b"}
+	}
+	s := &Sim{cfg: cfg, deps: map[string]*deployment{}, applied: map[string]json.RawMessage{}, notify: make(chan struct{}, 1),
+		pods: map[string][]string{}}
 	for _, d := range cfg.Deployments {
 		ref, err := cpkit.NormalizeRef(d.Ref)
 		if err != nil || cpkit.RefScheme(ref) != "deployment" {
@@ -116,7 +156,74 @@ func New(cfg Config) (*Sim, error) {
 		}
 		s.deps[ref] = &deployment{DeploymentConfig: d, generation: 1, traffic: 100}
 	}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// load restores the persisted downstream state (missing file: fresh).
+func (s *Sim) load() error {
+	if s.cfg.StateFile == "" {
+		return nil
+	}
+	b, err := os.ReadFile(s.cfg.StateFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sre-sim: state: %w", err)
+	}
+	var st simState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return fmt.Errorf("sre-sim: state %s: %w", s.cfg.StateFile, err)
+	}
+	for ref, ds := range st.Deployments {
+		d, ok := s.deps[ref]
+		if !ok || ds.Image == "" {
+			continue
+		}
+		d.Image, d.generation, d.traffic, d.changedAt = ds.Image, max(ds.Generation, 1), ds.Traffic, ds.ChangedAt
+		d.prevBad, d.prevTraffic, d.changes = ds.PrevBad, ds.PrevTraffic, ds.Changes
+	}
+	for k, v := range st.Applied {
+		s.applied[k] = v
+	}
+	return nil
+}
+
+// saveLocked persists the state (atomic rename); callers hold s.mu. The
+// downstream applies a change and records it together, like a real system
+// committing its own state.
+func (s *Sim) saveLocked() error {
+	if s.cfg.StateFile == "" {
+		return nil
+	}
+	st := simState{Deployments: map[string]depState{}, Applied: s.applied}
+	for ref, d := range s.deps {
+		st.Deployments[ref] = depState{Image: d.Image, Generation: d.generation, Traffic: d.traffic, ChangedAt: d.changedAt,
+			PrevBad: d.prevBad, PrevTraffic: d.prevTraffic, Changes: d.changes}
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.cfg.StateFile + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.cfg.StateFile)
+}
+
+// podRefs are the pods of a deployment's current rollout.
+func (s *Sim) podRefs(d *deployment) []string {
+	sum := sha256.Sum256([]byte(d.Image + "|" + strconv.Itoa(d.generation)))
+	base := "pod://" + strings.TrimPrefix(d.Ref, "deployment://") + "-" + hex.EncodeToString(sum[:])[:6]
+	out := make([]string, d.Replicas)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s-%d", base, i)
+	}
+	return out
 }
 
 // SetClock replaces the clock (tests).
@@ -137,7 +244,7 @@ func (s *Sim) MetricSources() map[string]outcome.MetricSource {
 // RunWork publishes facts and alerts until ctx ends.
 func (s *Sim) RunWork(ctx context.Context, env plugin.WorkEnv) error {
 	s.mu.Lock()
-	s.world = env.AssertFact
+	s.world, s.env = env.AssertFact, env
 	s.mu.Unlock()
 	refresh := s.cfg.RefreshEvery.D()
 	if refresh <= 0 {
@@ -166,27 +273,70 @@ func (s *Sim) RunWork(ctx context.Context, env plugin.WorkEnv) error {
 	}
 }
 
-// Publish writes the current facts of every deployment.
+// Publish writes the current facts and topology of every deployment.
 func (s *Sim) publish(ctx context.Context) {
 	s.mu.Lock()
-	assert := s.world
+	assert, env := s.world, s.env
 	var facts []world.Fact
+	var rels []world.Relation
+	type gone struct{ from, typ, to string }
+	var retract []gone
 	now := s.clock.Now()
-	for _, d := range s.deps {
-		for p, v := range map[string]string{"image": d.Image, "generation": strconv.Itoa(d.generation),
-			"replicas": strconv.Itoa(d.Replicas), "traffic_percent": strconv.Itoa(d.traffic)} {
-			facts = append(facts, world.Fact{TenantID: s.cfg.Tenant, SubjectRef: d.Ref, Predicate: p, Value: v,
-				Source: "sim-k8s", TrustTier: world.TrustFirstParty, ObservedAt: now})
-		}
-		facts = append(facts, world.Fact{TenantID: s.cfg.Tenant, SubjectRef: d.Service, Predicate: "deployment", Value: d.Ref,
+	fact := func(subj, pred, val string) {
+		facts = append(facts, world.Fact{TenantID: s.cfg.Tenant, SubjectRef: subj, Predicate: pred, Value: val,
 			Source: "sim-k8s", TrustTier: world.TrustFirstParty, ObservedAt: now})
 	}
-	s.mu.Unlock()
-	if assert == nil {
-		return
+	rel := func(from, typ, to string) {
+		rels = append(rels, world.Relation{TenantID: s.cfg.Tenant, FromRef: from, Type: typ, ToRef: to, Source: "sim-k8s",
+			ValidFrom: now, ObservedAt: now})
 	}
-	for _, f := range facts {
-		_ = assert(ctx, f)
+	refs := make([]string, 0, len(s.deps))
+	for ref := range s.deps {
+		refs = append(refs, ref)
+	}
+	slices.Sort(refs)
+	for _, ref := range refs {
+		d := s.deps[ref]
+		for p, v := range map[string]string{"image": d.Image, "generation": strconv.Itoa(d.generation),
+			"replicas": strconv.Itoa(d.Replicas), "traffic_percent": strconv.Itoa(d.traffic), "changes_applied": strconv.Itoa(d.changes)} {
+			fact(d.Ref, p, v)
+		}
+		fact(d.Service, "deployment", d.Ref)
+		rel(d.Service, "deployed_as", d.Ref)
+		pods := s.podRefs(d)
+		for i, pod := range pods {
+			node := "node://" + s.cfg.Nodes[i%len(s.cfg.Nodes)]
+			fact(pod, "phase", "Running")
+			fact(pod, "ready", "true")
+			fact(pod, "image", d.Image)
+			fact(pod, "node", strings.TrimPrefix(node, "node://"))
+			rel(d.Ref, "owns", pod)
+			rel(pod, "runs_on", node)
+		}
+		for _, old := range s.pods[ref] {
+			if !slices.Contains(pods, old) {
+				retract = append(retract, gone{d.Ref, "owns", old})
+				fact(old, "phase", "Terminated")
+				fact(old, "ready", "false")
+			}
+		}
+		s.pods[ref] = pods
+	}
+	s.mu.Unlock()
+	if assert != nil {
+		for _, f := range facts {
+			_ = assert(ctx, f)
+		}
+	}
+	if env.AssertRelation != nil {
+		for _, r := range rels {
+			_ = env.AssertRelation(ctx, r)
+		}
+	}
+	if env.RetractRelation != nil {
+		for _, g := range retract {
+			_ = env.RetractRelation(ctx, s.cfg.Tenant, g.from, g.typ, g.to, "sim-k8s", now)
+		}
 	}
 }
 
@@ -353,8 +503,14 @@ func (r *rollback) Execute(ctx context.Context, p action.Plan, key string) (json
 	from := d.Image
 	d.prevBad, d.prevTraffic = !r.s.healthy(d), d.traffic
 	d.Image, d.generation, d.changedAt = to, d.generation+1, r.s.clock.Now()
+	d.changes++
 	res, _ := json.Marshal(map[string]any{"from_image": from, "to_image": to, "generation": d.generation})
 	r.s.applied[key] = res
+	if err := r.s.saveLocked(); err != nil {
+		// The change happened but could not be recorded: report an unknown
+		// effect (inspection still finds the key in memory).
+		return nil, fmt.Errorf("sre-sim: persist state: %w", err)
+	}
 	r.s.changed()
 	return res, nil
 }
@@ -420,8 +576,12 @@ func (x *shift) Execute(ctx context.Context, p action.Plan, key string) (json.Ra
 	}
 	d.prevBad, d.prevTraffic = !x.s.healthy(d), d.traffic
 	d.traffic, d.generation, d.changedAt = pct, d.generation+1, x.s.clock.Now()
+	d.changes++
 	res, _ := json.Marshal(map[string]any{"percent": pct, "generation": d.generation})
 	x.s.applied[key] = res
+	if err := x.s.saveLocked(); err != nil {
+		return nil, fmt.Errorf("sre-sim: persist state: %w", err)
+	}
 	x.s.changed()
 	return res, nil
 }

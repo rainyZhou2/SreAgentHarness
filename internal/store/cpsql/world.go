@@ -145,15 +145,45 @@ func (s *Store) AssertFact(ctx context.Context, f world.Fact) (world.Fact, bool,
 				return err
 			}
 		}
-		prev, err := scanFact(tx.QueryRowContext(ctx, s.q(`SELECT `+factCols+` FROM world_facts WHERE tenant_id=? AND subject_ref=?
-			AND predicate=? AND source=? AND valid_from <= ? ORDER BY valid_from DESC, observed_at DESC LIMIT 1`),
-			f.TenantID, f.SubjectRef, f.Predicate, f.Source, s.t(f.ValidFrom)))
-		hasPrev := err == nil
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// The series' latest instant at or before f may hold several facts
+		// (a same-instant conflict); all of them are considered, so the
+		// outcome does not depend on row order.
+		rows, err := tx.QueryContext(ctx, s.q(`SELECT `+factCols+` FROM world_facts WHERE tenant_id=? AND subject_ref=?
+			AND predicate=? AND source=? AND valid_from = (SELECT MAX(valid_from) FROM world_facts WHERE tenant_id=?
+			AND subject_ref=? AND predicate=? AND source=? AND valid_from <= ?) ORDER BY observed_at DESC, id`),
+			f.TenantID, f.SubjectRef, f.Predicate, f.Source, f.TenantID, f.SubjectRef, f.Predicate, f.Source, s.t(f.ValidFrom))
+		if err != nil {
 			return err
 		}
-		if hasPrev && prev.Value == f.Value && (prev.ValidTo == nil || prev.ValidTo.After(f.ValidFrom)) {
-			// Same value: a re-observation. It refreshes freshness only.
+		var open []world.Fact
+		for rows.Next() {
+			p, err := scanFact(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			if p.ValidTo == nil || p.ValidTo.After(f.ValidFrom) {
+				open = append(open, p)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		var match *world.Fact
+		conflict := false
+		for i := range open {
+			if open[i].Value != f.Value {
+				conflict = true
+			} else if match == nil {
+				match = &open[i]
+			}
+		}
+		// Same value: a re-observation that refreshes freshness only. A
+		// later observation of one side of a conflict resolves it instead
+		// (below), so the stale side does not stay open.
+		if match != nil && (!conflict || match.ValidFrom.Equal(f.ValidFrom)) {
+			prev := *match
 			if f.ObservedAt.After(prev.SeenBy(f.ObservedAt)) {
 				if _, err := tx.ExecContext(ctx, s.q(`UPDATE world_facts SET confirmed_at=? WHERE id=?`),
 					s.t(f.ObservedAt), prev.ID); err != nil {
@@ -175,11 +205,13 @@ func (s *Store) AssertFact(ctx context.Context, f world.Fact) (world.Fact, bool,
 		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if hasPrev && (prev.ValidTo == nil || prev.ValidTo.After(f.ValidFrom)) {
+		for _, prev := range open {
 			if prev.ValidFrom.Equal(f.ValidFrom) {
 				// Same instant, different value: keep both visible as a
 				// conflict instead of rewriting history.
-			} else if _, err := tx.ExecContext(ctx, s.q(`UPDATE world_facts SET valid_to=?, closed_observed_at=? WHERE id=?`),
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, s.q(`UPDATE world_facts SET valid_to=?, closed_observed_at=? WHERE id=?`),
 				s.t(f.ValidFrom), s.t(f.ObservedAt), prev.ID); err != nil {
 				return err
 			}

@@ -88,6 +88,10 @@ type Constraints struct {
 	// RequireFreshData bounds the age of world facts a write action relies on.
 	RequireFreshData cpkit.Duration `json:"require_fresh_data,omitempty"`
 	MaxCostUSD       float64        `json:"max_cost_usd,omitempty"`
+	// DataClass classifies the Work's data (public | internal |
+	// confidential | restricted; default internal). Data above the
+	// deployment's model limit is never sent to a model provider.
+	DataClass string `json:"data_class,omitempty"`
 }
 
 // Production write modes.
@@ -155,6 +159,13 @@ func (g *GoalSpec) Normalize() error {
 	}
 	if g.Constraints.MaxCostUSD < 0 {
 		return invalidf("max_cost_usd must not be negative")
+	}
+	switch g.Constraints.DataClass {
+	case "":
+		g.Constraints.DataClass = "internal"
+	case "public", "internal", "confidential", "restricted":
+	default:
+		return invalidf("unknown data_class %q", g.Constraints.DataClass)
 	}
 	if len(g.Labels) > 32 {
 		return invalidf("too many labels")
@@ -230,6 +241,31 @@ type RunLink struct {
 	// source of truth).
 	Status    string    `json:"status,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+	// Assignment results (owner links, RFC §13.2), set when the run ends.
+	Outcome      string     `json:"outcome,omitempty"`
+	CostMicros   int64      `json:"cost_micros,omitempty"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	EvidenceRefs []string   `json:"evidence_refs,omitempty"`
+}
+
+// LinkResult is the result of an assignment: how the run ended, what it
+// cost and which evidence records it produced.
+type LinkResult struct {
+	Outcome      string
+	CostMicros   int64
+	FinishedAt   time.Time
+	EvidenceRefs []string
+}
+
+// GoalRecord is the goal of one Work generation. A replan or reopen may
+// amend the goal; earlier generations keep theirs for audit and replay.
+type GoalRecord struct {
+	Generation int       `json:"generation"`
+	Goal       GoalSpec  `json:"goal"`
+	GoalHash   string    `json:"goal_hash"`
+	Reason     string    `json:"reason,omitempty"`
+	ActorID    string    `json:"actor_id,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // SubjectLink maps a Work to an external subject (an existing incident, a
