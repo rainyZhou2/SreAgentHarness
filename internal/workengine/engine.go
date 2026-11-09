@@ -49,6 +49,12 @@ type Config struct {
 	Templates []work.Template `json:"templates,omitempty"`
 	// CorrelationRules route ingested events to Works (first match wins).
 	CorrelationRules []eventing.Rule `json:"correlation_rules,omitempty"`
+	// Queues overrides the per-queue limits (concurrency, batch, model runs
+	// per tenant) by queue name; unset fields keep their defaults.
+	Queues map[string]orchestration.QueueLimit `json:"queues,omitempty"`
+	// Pools overrides the resource pools; unset fields keep their defaults,
+	// -1 means unlimited.
+	Pools *orchestration.PoolLimits `json:"pools,omitempty"`
 }
 
 // Flags are the rollout switches.
@@ -172,7 +178,17 @@ func New(o Options) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("correlation rules: %w", err)
 	}
-	ws := &world.Service{Store: o.Store, Clock: clock}
+	for _, r := range rules {
+		if r.Queue != "" && !work.ValidQueue(work.Queue(r.Queue)) {
+			return nil, fmt.Errorf("correlation rule %s: unknown queue %q", r.Name, r.Queue)
+		}
+	}
+	queues, err := orchestration.ValidateQueueLimits(o.Config.Queues)
+	if err != nil {
+		return nil, err
+	}
+	pools := orchestration.NewPools(orchestration.MergePoolLimits(orchestration.DefaultPoolLimits(), o.Config.Pools))
+	ws := &world.Service{Store: o.Store, Clock: clock, Gate: pools.SnapshotGate()}
 	metricSources := outcome.MetricSourceMap{}
 	reg := action.NewRegistry()
 	var runners []plugin.WorkRunner
@@ -196,6 +212,7 @@ func New(o Options) (*Engine, error) {
 	var m *orchestration.Metrics
 	if o.Metrics != nil {
 		m = orchestration.NewMetrics(o.Metrics, o.Store)
+		m.RegisterPools(o.Metrics, pools)
 	}
 	var rt *action.Runtime
 	if o.Flags.ActionV2 {
@@ -221,7 +238,7 @@ func New(o Options) (*Engine, error) {
 		runners:  runners,
 		log:      log,
 		Orch: &orchestration.Orchestrator{Store: o.Store, Runs: runs, Actions: rt, Evaluator: ev, Clock: clock, Log: log,
-			Metrics: m, Owner: o.Owner, World: ws},
+			Metrics: m, Owner: o.Owner, World: ws, Queues: queues, Pools: pools},
 		Reconciler: &orchestration.Reconciler{Store: o.Store, Ingestor: ing, Actions: rt, Clock: clock, Log: log, Metrics: m,
 			Retention: inboxRetention(o.Flags)},
 		API: &workapi.API{Store: o.Store, Service: svc, Ingestor: ing, Actions: rt, World: ws, Clock: clock, Log: log,

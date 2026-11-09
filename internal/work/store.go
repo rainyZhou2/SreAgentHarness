@@ -14,12 +14,14 @@ import (
 // a replay with the same request hash returns the existing Work; a replay
 // with different parameters is ErrIdempotencyConflict.
 type NewWork struct {
-	TenantID       string
-	Kind           Kind
-	Title          string
-	Goal           GoalSpec
-	Template       Template
-	Priority       int
+	TenantID string
+	Kind     Kind
+	Title    string
+	Goal     GoalSpec
+	Template Template
+	Priority int
+	// Queue is the requested scheduling queue (empty: DefaultQueue).
+	Queue          Queue
 	ActorType      string
 	ActorID        string
 	IdempotencyKey string
@@ -30,6 +32,19 @@ type NewWork struct {
 
 // RequestHash binds an idempotency key to the request content.
 func (n *NewWork) RequestHash() string {
+	if n.Queue != "" {
+		return cpkit.MustHash(struct {
+			Kind     Kind
+			Title    string
+			Goal     GoalSpec
+			Template string
+			Version  int
+			Priority int
+			Queue    Queue
+		}{n.Kind, n.Title, n.Goal, n.Template.ID, n.Template.Version, n.Priority, n.Queue})
+	}
+	// Without a requested queue the hash is unchanged from before queues
+	// existed, so replays of older requests still match.
 	return cpkit.MustHash(struct {
 		Kind     Kind
 		Title    string
@@ -69,7 +84,21 @@ func (n *NewWork) Prepare() error {
 	if n.ActorType == "" {
 		n.ActorType = "user"
 	}
+	if n.Queue != "" && !ValidQueue(n.Queue) {
+		return invalidf("unknown queue %q", n.Queue)
+	}
+	if q := n.ResolvedQueue(); !MayUseQueue(q, n.ActorType, n.ActorID) {
+		return invalidf("queue %s is reserved for authenticated event sources and operators", q)
+	}
 	return nil
+}
+
+// ResolvedQueue is the queue the Work is created in.
+func (n *NewWork) ResolvedQueue() Queue {
+	if n.Queue != "" {
+		return n.Queue
+	}
+	return DefaultQueue(n.Kind, n.Template)
 }
 
 // CommandRecord makes an operator command idempotent: the first accepted
@@ -99,6 +128,8 @@ type Mutation struct {
 
 	Status *Status
 	Reason *string
+	// Queue moves the Work to another scheduling queue.
+	Queue *Queue
 	// Goal amends the goal; only allowed together with a new Generation.
 	Goal *GoalSpec
 	// Stage moves to a stage index; StageState replaces the stage scratch.
@@ -144,6 +175,14 @@ func CheckMutation(m *Mutation) error {
 	if m.ActorType == "" {
 		return invalidf("actor type is required")
 	}
+	if m.Queue != nil {
+		if !ValidQueue(*m.Queue) {
+			return invalidf("unknown queue %q", *m.Queue)
+		}
+		if !MayUseQueue(*m.Queue, m.ActorType, m.ActorID) {
+			return invalidf("queue %s is reserved for authenticated event sources and operators", *m.Queue)
+		}
+	}
 	for _, l := range m.Links {
 		if l.Role != RoleOwner && l.Role != RoleEvidence {
 			return invalidf("unknown link role %q", l.Role)
@@ -170,6 +209,7 @@ type Filter struct {
 	TenantID string
 	Status   []Status
 	Kind     Kind
+	Queue    Queue
 	Subject  string
 	Limit    int
 	// Before pages by (updated_at, id) descending.

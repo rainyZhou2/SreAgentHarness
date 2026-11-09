@@ -50,12 +50,15 @@ const (
 	CmdConfirm = "confirm" // record a human objective decision
 	CmdReopen  = "reopen"  // terminal → ACTIVE, new generation, stage 0
 	CmdWake    = "wake"    // ask the orchestrator to re-evaluate now
+	// CmdSetQueue moves a Work to another scheduling queue (escalation or
+	// de-escalation by an operator; recorded on the timeline).
+	CmdSetQueue = "set_queue"
 )
 
 // ValidCommand reports whether t is an operator command.
 func ValidCommand(t string) bool {
 	switch t {
-	case CmdPause, CmdResume, CmdCancel, CmdReplan, CmdResolve, CmdConfirm, CmdReopen, CmdWake:
+	case CmdPause, CmdResume, CmdCancel, CmdReplan, CmdResolve, CmdConfirm, CmdReopen, CmdWake, CmdSetQueue:
 		return true
 	}
 	return false

@@ -144,6 +144,9 @@ type Template struct {
 	Kind    Kind    `json:"kind,omitempty"`
 	Stages  []Stage `json:"stages"`
 	Limits  Limits  `json:"limits"`
+	// Queue is the default scheduling queue of Works created from this
+	// template (empty: by kind).
+	Queue Queue `json:"queue,omitempty"`
 }
 
 var stageIDRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)
@@ -155,6 +158,9 @@ func (t *Template) Normalize() error {
 	}
 	if t.Version <= 0 {
 		t.Version = 1
+	}
+	if t.Queue != "" && !ValidQueue(t.Queue) {
+		return invalidf("template %s: unknown queue %q", t.ID, t.Queue)
 	}
 	if len(t.Stages) == 0 || len(t.Stages) > MaxStages {
 		return invalidf("template %s needs 1..%d stages", t.ID, MaxStages)
@@ -466,7 +472,7 @@ const (
 // the goal description by the server; the model writes prose around it and
 // may not invent a root cause. A human reviews the draft.
 func postmortemTemplate() Template {
-	return Template{ID: TemplatePostmortem, Version: 1, Kind: KindRequest, Stages: []Stage{
+	return Template{ID: TemplatePostmortem, Version: 1, Kind: KindRequest, Queue: QueueBackground, Stages: []Stage{
 		{ID: "draft", Type: StageRun, Phase: "review", Run: &RunSpec{Goal: "Draft the postmortem for Work ${label.source_work} (\"${title}\") on ${subjects}.\n" +
 			"Use only the ledger report below. Sections: summary, impact, timeline, trigger, root cause, contributing factors, detection gap, recovery gap, what went well, follow-ups.\n" +
 			"State a root cause only if the report lists a SUPPORTED hypothesis with evidence; otherwise write \"root cause: unknown\" and list the open hypotheses. " +
@@ -483,7 +489,8 @@ func postmortemTemplate() Template {
 // Subjects must include the ticket project (ticket://<PROJECT>) and the
 // affected services.
 func followUpTemplate() Template {
-	return Template{ID: TemplateFollowUp, Version: 1, Kind: KindRequest, Limits: Limits{MaxDuration: cpkit.Duration(60 * 24 * time.Hour)},
+	return Template{ID: TemplateFollowUp, Version: 1, Kind: KindRequest, Queue: QueueBackground,
+		Limits: Limits{MaxDuration: cpkit.Duration(60 * 24 * time.Hour)},
 		Stages: []Stage{
 			{ID: "plan", Type: StageRun, Phase: "assess", Run: &RunSpec{Goal: "Plan the follow-up \"${title}\" from Work ${label.source_work} on ${subjects}. ${goal.description}\n" +
 				"Describe the concrete change, its acceptance check and the owning team, then propose filing it: " +

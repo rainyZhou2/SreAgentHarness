@@ -478,6 +478,9 @@ textarea.mono { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
 .work-reason { margin-top: 4px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .work-head { margin: 10px 0 12px; }
 .work-head h1 { margin-bottom: 6px; }
+.queue-chip { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; line-height: 16px; border: 1px solid var(--border, #ccc); color: var(--muted); }
+.queue-chip.q-critical-mitigation { color: #b42318; border-color: #f4a8a1; background: rgba(180, 35, 24, .08); font-weight: 600; }
+.queue-chip.q-incident-investigate { color: #b54708; border-color: #f5c58a; }
 .work-meta { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; margin-bottom: 4px; }
 .work-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .stage-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }

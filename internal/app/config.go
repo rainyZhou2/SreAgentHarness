@@ -256,6 +256,12 @@ func merge(base, f File) (File, error) {
 	if f.Work.CorrelationRules != nil {
 		out.Work.CorrelationRules = f.Work.CorrelationRules
 	}
+	if f.Work.Queues != nil {
+		out.Work.Queues = f.Work.Queues
+	}
+	if f.Work.Pools != nil {
+		out.Work.Pools = f.Work.Pools
+	}
 	return out, nil
 }
 
