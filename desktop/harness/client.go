@@ -103,12 +103,24 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 // Do sends a request and decodes the JSON response into out (may be nil).
 // Write requests get a fresh Idempotency-Key.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	return c.DoWith(ctx, method, path, nil, body, out)
+}
+
+// DoWith is Do with extra request headers (e.g. a caller-chosen
+// Idempotency-Key or If-Match); they override the defaults.
+func (c *Client) DoWith(ctx context.Context, method, path string, header http.Header, body, out any) error {
 	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
 	if method != http.MethodGet {
 		req.Header.Set("Idempotency-Key", NewKey())
+	}
+	for k, vs := range header {
+		req.Header.Del(k)
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

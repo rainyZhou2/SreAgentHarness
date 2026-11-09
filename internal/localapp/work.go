@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"go-sre-harness/internal/api"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
@@ -14,6 +15,7 @@ import (
 )
 
 type localWork struct {
+	flags  workengine.Flags
 	engine *workengine.Engine
 	store  *cpsql.Store
 }
@@ -23,7 +25,7 @@ func (w *localWork) close() { _ = w.store.Close() }
 // buildLocalWork assembles the v2 control plane on a separate SQLite file
 // (<data dir>/controlplane.db) when HARNESS_WORK_ENGINE_ENABLED is set.
 func buildLocalWork(ctx context.Context, cfg Config, local LocalFile, server *api.Server, pol policy.Gate,
-	metrics *obs.Metrics) (*localWork, error) {
+	metrics *obs.Metrics, embedder memory.Embedder) (*localWork, error) {
 	flags := workengine.FlagsFromEnv(os.Getenv)
 	if !flags.Engine {
 		return nil, nil
@@ -42,12 +44,12 @@ func buildLocalWork(ctx context.Context, cfg Config, local LocalFile, server *ap
 		return nil, err
 	}
 	eng, err := workengine.New(workengine.Options{Store: store, Server: server, Policy: pol, Extensions: exts,
-		Config: local.Work, Flags: flags, Metrics: metrics.Reg, Log: cfg.Log, Owner: workengine.Owner("local")})
+		Config: local.Work, Flags: flags, Metrics: metrics.Reg, Log: cfg.Log, Owner: workengine.Owner("local"), Embedder: embedder})
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
 	server.Extend(eng.API)
 	cfg.Log.Info("work engine enabled", "db", path)
-	return &localWork{engine: eng, store: store}, nil
+	return &localWork{engine: eng, store: store, flags: flags}, nil
 }

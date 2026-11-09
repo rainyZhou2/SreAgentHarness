@@ -27,14 +27,24 @@ const (
 	Operator Role = "operator" // create runs/turns, pause/resume/cancel, steer, feedback
 	Approver Role = "approver" // approve/reject tool actions and evolution candidates
 	Admin    Role = "admin"    // promote/rollback profiles, manage memory and tenants
+	// Service is an automated event source (alerting, CI/CD): it may only
+	// submit events, limited by its Scope (event sources/types, resources).
+	Service Role = "service"
+	// BreakGlass is the emergency approval of a held action by a named
+	// human, with a mandatory justification and a separate audit trail. It
+	// is never implied by another role (not even admin) and never lifts
+	// the framework floor (R3 stays denied).
+	BreakGlass Role = "break_glass"
 )
 
 // implies: a role grants itself plus the roles listed here.
 var implies = map[Role][]Role{
-	Viewer:   {Viewer},
-	Operator: {Operator, Viewer},
-	Approver: {Approver, Viewer},
-	Admin:    {Admin, Operator, Approver, Viewer},
+	Viewer:     {Viewer},
+	Operator:   {Operator, Viewer, Service},
+	Approver:   {Approver, Viewer},
+	Admin:      {Admin, Operator, Approver, Viewer, Service},
+	Service:    {Service},
+	BreakGlass: {BreakGlass, Viewer},
 }
 
 func ValidRole(r Role) bool { _, ok := implies[r]; return ok }
@@ -44,6 +54,88 @@ type Principal struct {
 	Subject string `json:"subject"`
 	Roles   []Role `json:"roles"`
 	Method  string `json:"method"` // token | oidc | dev
+	// Scope narrows what the principal may touch; nil means the whole
+	// tenant (subject to its roles).
+	Scope *Scope `json:"scope,omitempty"`
+}
+
+// Scope restricts a principal inside its tenant (§19.2: RBAC + resource
+// scope + action risk). Empty lists do not restrict.
+type Scope struct {
+	// EventSources and EventTypes limit the events a service principal may
+	// submit. A trailing "*" matches a prefix ("alert.*").
+	EventSources []string `json:"event_sources,omitempty"`
+	EventTypes   []string `json:"event_types,omitempty"`
+	// Resources limits the resources (refs) the principal may act on or
+	// approve. A trailing "*" matches a prefix ("deployment://prod/*").
+	Resources []string `json:"resources,omitempty"`
+	// MaxRisk is the highest action risk (R0..R2) the principal may
+	// approve; empty means no extra limit.
+	MaxRisk string `json:"max_risk,omitempty"`
+}
+
+func matchPattern(pats []string, v string) bool {
+	if len(pats) == 0 {
+		return true
+	}
+	for _, p := range pats {
+		if p == "*" || p == v {
+			return true
+		}
+		if pre, ok := strings.CutSuffix(p, "*"); ok && strings.HasPrefix(v, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowsEvent reports whether the principal may submit an event of source
+// and type about subject ("" = no subject).
+func (p Principal) AllowsEvent(source, typ, subject string) bool {
+	if p.Scope == nil {
+		return true
+	}
+	if !matchPattern(p.Scope.EventSources, source) || !matchPattern(p.Scope.EventTypes, typ) {
+		return false
+	}
+	return subject == "" || matchPattern(p.Scope.Resources, subject)
+}
+
+// AllowsResource reports whether the principal may act on ref.
+func (p Principal) AllowsResource(ref string) bool {
+	return p.Scope == nil || matchPattern(p.Scope.Resources, ref)
+}
+
+// AllowsRisk reports whether the principal may approve an action of risk
+// class r ("R0".."R3"). R3 is never approvable.
+func (p Principal) AllowsRisk(r string) bool {
+	if r == "R3" {
+		return false
+	}
+	if p.Scope == nil || p.Scope.MaxRisk == "" {
+		return true
+	}
+	return r <= p.Scope.MaxRisk
+}
+
+// Validate checks a scope from configuration.
+func (s *Scope) Validate() error {
+	if s == nil {
+		return nil
+	}
+	switch s.MaxRisk {
+	case "", "R0", "R1", "R2":
+	default:
+		return fmt.Errorf("scope: max_risk must be R0, R1 or R2, not %q", s.MaxRisk)
+	}
+	for _, l := range [][]string{s.EventSources, s.EventTypes, s.Resources} {
+		for _, p := range l {
+			if p == "" || len(p) > 256 || strings.Count(p, "*") > 1 || (strings.Contains(p, "*") && !strings.HasSuffix(p, "*")) {
+				return fmt.Errorf("scope: bad pattern %q (only a trailing * is allowed)", p)
+			}
+		}
+	}
+	return nil
 }
 
 func (p Principal) Has(r Role) bool {
@@ -137,6 +229,7 @@ type StaticToken struct {
 	Tenant  string `json:"tenant"`
 	Subject string `json:"subject"`
 	Roles   []Role `json:"roles"`
+	Scope   *Scope `json:"scope,omitempty"`
 }
 
 type StaticTokens struct{ tokens []StaticToken }
@@ -163,6 +256,9 @@ func NewStaticTokens(ts []StaticToken) (*StaticTokens, error) {
 				return nil, fmt.Errorf("token %d: unknown role %q", i, r)
 			}
 		}
+		if err := t.Scope.Validate(); err != nil {
+			return nil, fmt.Errorf("token %d: %w", i, err)
+		}
 		ts[i].SHA256 = strings.ToLower(t.SHA256)
 	}
 	return &StaticTokens{tokens: ts}, nil
@@ -181,7 +277,7 @@ func (s *StaticTokens) Authenticate(r *http.Request) (Principal, bool, error) {
 	h := []byte(HashToken(tok))
 	for _, t := range s.tokens {
 		if subtle.ConstantTimeCompare(h, []byte(t.SHA256)) == 1 {
-			return Principal{Tenant: t.Tenant, Subject: t.Subject, Roles: t.Roles, Method: "token"}, true, nil
+			return Principal{Tenant: t.Tenant, Subject: t.Subject, Roles: t.Roles, Method: "token", Scope: t.Scope}, true, nil
 		}
 	}
 	return Principal{}, false, errors.New("unknown token")

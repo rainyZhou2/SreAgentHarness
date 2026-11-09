@@ -96,7 +96,7 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		ContentRef: m.ContentRef, ContentHash: m.ContentHash, SourceRefs: m.SourceRefs, EvidenceRefs: m.EvidenceRefs,
 		Trust: m.Trust, Sensitivity: m.Sensitivity, Confidence: m.Confidence, VerifiedBy: m.VerifiedBy,
 		Environment: m.Environment, ExpiresAt: m.ExpiresAt, CreatedBy: m.CreatedBy, CreatedAt: now, UpdatedAt: now,
-		Embedding: m.Embedding, EmbeddingModel: m.EmbeddingModel}
+		Embedding: m.Embedding, EmbeddingModel: m.EmbeddingModel, Applicability: m.Applicability}
 	rec := memoryRec{Mem: mem}
 	if len(m.Embedding) > 0 && m.EmbeddingModel != "" {
 		rec.Embeddings = map[string][]float32{m.EmbeddingModel: m.Embedding}
@@ -259,6 +259,11 @@ func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, ac
 	}
 	if !allowedMemoryTransition(cur.Status, to) {
 		return memory.Memory{}, &domain.RejectedError{Reason: fmt.Sprintf("invalid_transition_%s_to_%s", cur.Status, to)}
+	}
+	if to == "ACTIVE" {
+		if err := memory.CanPromote(cur, actor); err != nil {
+			return memory.Memory{}, &domain.RejectedError{Reason: "playbook_promotion: " + err.Error()}
+		}
 	}
 	trust := cur.Trust
 	var verifier *string
@@ -712,4 +717,49 @@ func (s *Store) PutMemoryIndex(_ context.Context, it memory.IndexItem, model str
 	rec.Embeddings[model] = emb
 	s.saveMemory(rec)
 	return nil
+}
+
+// RecordMemoryOutcome records a machine-verified Work outcome for a memory,
+// once per (memory, Work).
+func (s *Store) RecordMemoryOutcome(_ context.Context, tenantID, memoryID, workID string, success bool, _ string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.memories[memoryID]
+	if !ok || rec.Mem.TenantID != tenantID {
+		return false, nil
+	}
+	key := memoryID + "|" + workID
+	if s.memOutcomes == nil {
+		s.memOutcomes = map[string]bool{}
+	}
+	if s.memOutcomes[key] {
+		return false, nil
+	}
+	s.memOutcomes[key] = true
+	s.put("memory_outcome", key, tenantID, 0, success)
+	t := now()
+	if success {
+		rec.Mem.Verification.SuccessCount++
+	} else {
+		rec.Mem.Verification.FailureCount++
+	}
+	rec.Mem.Verification.LastVerifiedAt = &t
+	s.saveMemory(rec)
+	return true, nil
+}
+
+// SetMemoryApplicability replaces a memory's applicability.
+func (s *Store) SetMemoryApplicability(_ context.Context, tenantID, id, _ string, a memory.Applicability) (memory.Memory, error) {
+	if err := a.Normalize(); err != nil {
+		return memory.Memory{}, &domain.RejectedError{Reason: err.Error()}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.memories[id]
+	if !ok || rec.Mem.TenantID != tenantID {
+		return memory.Memory{}, domain.ErrNotFound
+	}
+	rec.Mem.Applicability, rec.Mem.UpdatedAt = &a, now()
+	s.saveMemory(rec)
+	return rec.Mem, nil
 }

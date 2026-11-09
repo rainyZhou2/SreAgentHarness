@@ -11,14 +11,22 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/dataguard"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/evidence"
+	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/store/cpsql"
+	"go-sre-harness/internal/untrusted"
 	"go-sre-harness/internal/work"
+	"go-sre-harness/internal/world"
 )
 
 // Orchestrator advances Works. Several replicas may run against one
@@ -32,6 +40,9 @@ type Orchestrator struct {
 	Clock     cpkit.Clock
 	Log       *slog.Logger
 	Metrics   *Metrics
+	// OnClose is called after a Work reached a terminal status (best effort,
+	// outside the commit: e.g. playbook outcome feedback).
+	OnClose func(ctx context.Context, w work.Work)
 
 	// Owner identifies this replica in leases.
 	Owner string
@@ -48,6 +59,63 @@ type Orchestrator struct {
 	Concurrency int
 	// MaxStepsPerClaim bounds immediate transitions in one pass (default 8).
 	MaxStepsPerClaim int
+	// MaxDataClass is the most sensitive data class the model provider may
+	// receive (default confidential): Works above it never start model
+	// runs, everything below is redacted (§19.3).
+	MaxDataClass dataguard.Class
+	maxClassSet  bool
+	// World, when set, pins a persisted snapshot of the Work's subjects for
+	// every run a stage starts (label world_snapshot), so all agents of a
+	// stage reason over the same facts and the run can be replayed.
+	World *world.Service
+}
+
+// SetMaxDataClass sets the model data-class limit.
+func (o *Orchestrator) SetMaxDataClass(c dataguard.Class) { o.MaxDataClass, o.maxClassSet = c, true }
+
+// pinSnapshot persists the World view of the Work's subjects for the runs
+// about to start ("" when no World is configured or it fails: environment
+// facts are hints, not prerequisites).
+func (o *Orchestrator) pinSnapshot(ctx context.Context, w *work.Work) string {
+	if o.World == nil || len(w.Goal.SubjectRefs) == 0 {
+		return ""
+	}
+	snap, err := o.World.Snapshot(ctx, world.SnapshotRequest{TenantID: w.TenantID, Subjects: w.Goal.SubjectRefs,
+		Depth: 1, MaxNodes: 100, Persist: true})
+	if err != nil {
+		o.log().Warn("pin world snapshot", "tenant", w.TenantID, "work_id", w.ID, "err", err)
+		return ""
+	}
+	return snap.ID
+}
+
+// modelGoal renders a run goal for the model: untrusted values are fenced
+// as data, credentials and personal data are redacted, and Works whose
+// data class exceeds the provider limit are refused.
+func (o *Orchestrator) modelGoal(tpl string, w *work.Work, summaries map[string]string) (string, error) {
+	limit := dataguard.Confidential
+	if o.maxClassSet {
+		limit = o.MaxDataClass
+	}
+	class, err := dataguard.Parse(w.Goal.Constraints.DataClass)
+	if err != nil {
+		return "", err
+	}
+	goal := work.RenderWith(tpl, w, summaries, func(name, v string) string {
+		if v == "" || !work.UntrustedField(name) {
+			return v
+		}
+		return untrusted.Wrap("source=work."+name+" trust=T4", v).Text
+	})
+	out, rep, err := dataguard.ForModel(goal, class, limit)
+	if err != nil {
+		o.Metrics.GuardDenied("data_class", class.String())
+		return "", err
+	}
+	if rep.Total() > 0 {
+		o.log().Info("redacted run goal", "tenant", w.TenantID, "work_id", w.ID, "secrets", rep.Secrets, "pii", rep.PII)
+	}
+	return out, nil
 }
 
 func (o *Orchestrator) now() time.Time { return o.Clock.Now() }
@@ -124,6 +192,13 @@ func (o *Orchestrator) Tick(ctx context.Context) (int, error) {
 }
 
 func (o *Orchestrator) process(ctx context.Context, w work.Work) {
+	if w.WakeAt != nil {
+		o.Metrics.woke(o.now().Sub(*w.WakeAt))
+	}
+	ctx, sp := obs.Tracer().Start(ctx, "work.resume", trace.WithAttributes(attribute.String("work_id", w.ID),
+		attribute.String("work.kind", string(w.Kind)), attribute.String("work.status", string(w.Status)),
+		attribute.Int("work.stage", w.Stage), attribute.Int("work.generation", w.Generation)))
+	defer sp.End()
 	d := &driver{o: o, w: w}
 	defer func() {
 		if p := recover(); p != nil {
@@ -172,6 +247,7 @@ type stageRun struct {
 	Status   string                   `json:"status,omitempty"`
 	Done     bool                     `json:"done,omitempty"`
 	Result   *evidence.ResultEnvelope `json:"result,omitempty"`
+	Snapshot string                   `json:"world_snapshot,omitempty"`
 }
 
 // step is one decision: a mutation, and whether to continue immediately.
@@ -219,12 +295,22 @@ func (d *driver) apply(ctx context.Context, m work.Mutation) error {
 	m.TenantID, m.WorkID, m.ExpectedVersion = d.w.TenantID, d.w.ID, d.w.Version
 	m.LeaseOwner, m.ActorType, m.ActorID, m.Now = d.o.Owner, "system", "orchestrator", d.o.now()
 	from := d.w.Status
-	w, err := d.o.Store.ApplyWork(ctx, m)
+	cctx, sp := obs.Tracer().Start(ctx, "work.commit", trace.WithAttributes(attribute.String("work_id", d.w.ID),
+		attribute.Int("work.events", len(m.Events)), attribute.Int("work.links", len(m.Links))))
+	w, err := d.o.Store.ApplyWork(cctx, m)
 	if err != nil {
+		sp.SetStatus(codes.Error, err.Error())
+		sp.End()
 		return err
 	}
+	sp.SetAttributes(attribute.String("work.status", string(w.Status)), attribute.Int64("work.version", w.Version))
+	sp.End()
 	if w.Status != from {
 		d.o.Metrics.transition(string(w.Kind), string(w.Status))
+		d.o.Metrics.closed(w, m.Now)
+		if w.Status.Terminal() && d.o.OnClose != nil {
+			d.o.OnClose(ctx, w)
+		}
 		d.o.log().Info("work status changed", "tenant", w.TenantID, "work_id", w.ID, "from", from, "to", w.Status,
 			"stage", w.Stage, "generation", w.Generation, "reason", w.Reason)
 	}
@@ -364,6 +450,7 @@ func (d *driver) replan(idx int, reason string, evs ...work.NewEvent) step {
 		return s
 	}
 	gen := d.w.Generation + 1
+	d.o.Metrics.replan("stage_failure")
 	evs = append(evs, work.NewEvent{Type: "work.replanned", Payload: map[string]any{"to_stage": idx, "reason": reason,
 		"generation": gen}})
 	m := work.Mutation{Stage: &idx, ClearState: true, Generation: &gen, AddReplans: 1, CancelAllWatches: true,
@@ -408,10 +495,17 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			return step{}, err
 		}
 		var links []work.RunLink
+		snapID := d.o.pinSnapshot(ctx, w)
 		for _, a := range specs {
-			goal := work.Render(a.Goal, w, summaries)
+			goal, err := d.o.modelGoal(a.Goal, w, summaries)
+			if err != nil {
+				return d.fail(stage, work.OnFailBlock, err.Error()), nil
+			}
 			key := fmt.Sprintf("work:%s:g%d:%s:%s", w.ID, w.Generation, stage.ID, a.Role)
 			labels := map[string]string{"work_id": w.ID, "work_stage": stage.ID}
+			if snapID != "" {
+				labels[SnapshotLabel] = snapID
+			}
 			runID, err := d.o.Runs.StartRun(ctx, RunRequest{TenantID: w.TenantID, ActorID: "work:" + w.ID, Goal: goal,
 				ProfileID: a.ProfileID, ProfileVersion: a.ProfileVersion, Mode: a.Mode, Services: w.Goal.SubjectRefs,
 				Labels: labels, Source: "work:" + string(w.Kind), IdempotencyKey: key})
@@ -422,7 +516,7 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 				}
 				return step{}, err
 			}
-			st.Runs = append(st.Runs, stageRun{RunID: runID, Role: a.Role, Required: a.Required})
+			st.Runs = append(st.Runs, stageRun{RunID: runID, Role: a.Role, Required: a.Required, Snapshot: snapID})
 			links = append(links, work.RunLink{RunID: runID, Role: work.RoleOwner, Phase: stage.Phase, StageID: stage.ID,
 				AgentRole: a.Role, Generation: w.Generation, Required: a.Required})
 		}
@@ -439,6 +533,7 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 
 	changed, needsHuman, allDone := false, false, true
 	linkStatus := map[string]string{}
+	linkResults := map[string]work.LinkResult{}
 	var cost int64
 	for i := range st.Runs {
 		r := &st.Runs[i]
@@ -464,17 +559,23 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			env.FailureReason = rs.FailureReason
 		}
 		r.Result, r.Done, changed = &env, true, true
-		cost += int64(env.CostUSD * 1e6)
+		runCost := int64(env.CostUSD * 1e6)
+		cost += runCost
+		res := work.LinkResult{Outcome: assignmentOutcome(env), CostMicros: runCost, FinishedAt: now}
 		if env.Summary != "" || len(env.Hypotheses) > 0 {
-			if _, _, err := d.o.Store.AddEvidence(ctx, evidence.Record{TenantID: w.TenantID, WorkID: w.ID,
+			rec, _, err := d.o.Store.AddEvidence(ctx, evidence.Record{TenantID: w.TenantID, WorkID: w.ID,
 				SourceType: evidence.SourceRun, SourceRef: "run://" + r.RunID, Summary: env.Summary, RunID: r.RunID,
-				AgentRole: r.Role, TrustTier: "T4"}); err != nil {
+				AgentRole: r.Role, TrustTier: "T4"})
+			if err != nil {
 				return step{}, err
 			}
+			res.EvidenceRefs = append(res.EvidenceRefs, "evidence:"+rec.ID)
 		}
+		linkResults[r.RunID] = res
+		d.o.Metrics.assignment(string(stage.Type), res.Outcome)
 	}
 	if !allDone {
-		m := work.Mutation{LinkStatus: linkStatus, AddCost: cost}
+		m := work.Mutation{LinkStatus: linkStatus, LinkResults: linkResults, AddCost: cost}
 		if changed {
 			m.StageState = mustJSON(st)
 		}
@@ -516,7 +617,7 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		"gaps": rep.Gaps, "cost_usd": rep.CostUSD, "proposed": proposed}
 	if max := w.Goal.Constraints.MaxCostUSD; max > 0 && float64(w.CostMicros+cost)/1e6 > max {
 		s := d.block(fmt.Sprintf("cost budget exceeded (%.2f USD > %.2f USD)", float64(w.CostMicros+cost)/1e6, max))
-		s.m.LinkStatus, s.m.AddCost = linkStatus, cost
+		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
 		return s, nil
 	}
 	if rep.Verdict == "FAILED" {
@@ -525,12 +626,23 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			reason = "required agents failed: " + strings.Join(rep.RequiredFailed, ", ")
 		}
 		s := d.fail(stage, stage.OnFailure, reason)
-		s.m.LinkStatus, s.m.AddCost = linkStatus, cost
+		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
 		return s, nil
 	}
 	s := d.advance(stage, payload)
-	s.m.LinkStatus, s.m.AddCost = linkStatus, cost
+	s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
 	return s, nil
+}
+
+// assignmentOutcome classifies how an agent assignment ended.
+func assignmentOutcome(env evidence.ResultEnvelope) string {
+	switch {
+	case env.Status != "COMPLETED":
+		return strings.ToLower(env.Status)
+	case env.Verification != "":
+		return "completed:" + strings.ToLower(cpkit.Truncate(env.Verification, 40))
+	}
+	return "completed"
 }
 
 func summarize(rep evidence.MergeReport) string {
@@ -775,6 +887,11 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 		case errors.Is(err, action.ErrTargetBusy):
 			wake := now.Add(30 * time.Second)
 			return d.waitFor(st, "target "+rec.TargetRef+" is busy with another action", &wake), nil
+		case errors.Is(err, action.ErrPendingEffect):
+			// An agent's tool call on the same target has no known result:
+			// wait for the kernel to settle it (or a human to reconcile).
+			wake := now.Add(time.Minute)
+			return d.waitFor(st, cpkit.Truncate(err.Error(), 300), &wake), nil
 		case errors.Is(err, action.ErrPrecondition), errors.Is(err, action.ErrInvalidState):
 			// The runtime recorded the new state (rejected / expired);
 			// re-read it.
@@ -914,8 +1031,12 @@ func (d *driver) verifyStage(ctx context.Context, stage work.Stage, st stageStat
 	}
 	now := d.o.now()
 	// Source errors become INCONCLUSIVE objectives inside the evaluation.
-	ev := d.o.Evaluator.Evaluate(ctx, *spec, outcome.Input{TenantID: w.TenantID, WorkID: w.ID, Now: now,
+	ectx, sp := obs.Tracer().Start(ctx, "outcome.evaluate", trace.WithAttributes(attribute.String("work_id", w.ID),
+		attribute.String("work.stage_id", stage.ID)))
+	ev := d.o.Evaluator.Evaluate(ectx, *spec, outcome.Input{TenantID: w.TenantID, WorkID: w.ID, Now: now,
 		DefaultTarget: w.Goal.PrimarySubject(), Previous: prev})
+	sp.SetAttributes(attribute.String("outcome.verdict", string(ev.Verdict)))
+	sp.End()
 	ev.ID, ev.Stage, ev.Generation = cpkit.NewID(), stage.ID, w.Generation
 	d.o.Metrics.outcome(string(ev.Verdict))
 	recheck, timeout := time.Minute, 30*time.Minute

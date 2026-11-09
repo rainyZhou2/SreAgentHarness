@@ -51,6 +51,23 @@ type Rule struct {
 	Priority int    `json:"priority,omitempty"`
 	// Intent becomes the GoalSpec intent of created Works.
 	Intent string `json:"intent,omitempty"`
+	// Group lets several rules feed one correlation group (default: the
+	// rule name). Events of rules sharing a group and a key value land in
+	// one Work, e.g. a deploy (change.deployed, attach) and the alert it
+	// caused (alert.firing, create).
+	Group string `json:"group,omitempty"`
+	// Lookback, on a creating rule, attaches the group's events from the
+	// lookback window that found no Work when they arrived (the deploy
+	// that preceded the alert). At most 24h.
+	Lookback cpkit.Duration `json:"lookback,omitempty"`
+}
+
+// GroupName is the correlation group of the rule.
+func (r *Rule) GroupName() string {
+	if r.Group != "" {
+		return r.Group
+	}
+	return r.Name
 }
 
 // DefaultWindow is the correlation window when a rule sets none.
@@ -77,6 +94,12 @@ func (r *Rule) Normalize() error {
 	}
 	if r.Window == 0 {
 		r.Window = cpkit.Duration(DefaultWindow)
+	}
+	if r.Group != "" && (len(r.Group) > 64 || strings.ContainsAny(r.Group, " /|\x00")) {
+		return fmt.Errorf("%w: %s: group %q", ErrRule, r.Name, r.Group)
+	}
+	if r.Lookback < 0 || r.Lookback.D() > 24*time.Hour {
+		return fmt.Errorf("%w: %s: lookback must be within [0, 24h]", ErrRule, r.Name)
 	}
 	if r.Window < 0 || r.Window.D() > 7*24*time.Hour {
 		return fmt.Errorf("%w: %s: window out of range", ErrRule, r.Name)
@@ -111,7 +134,7 @@ func (r *Rule) GroupKey(e *Envelope) string {
 	} else {
 		v = r.Key + ":" + v
 	}
-	return r.Name + "|" + cpkit.HashBytes([]byte(v))[7:39]
+	return r.GroupName() + "|" + cpkit.HashBytes([]byte(v))[7:39]
 }
 
 // RenderTitle substitutes ${...} placeholders from the event. Unknown

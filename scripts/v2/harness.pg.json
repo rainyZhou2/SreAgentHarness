@@ -1,0 +1,97 @@
+{
+  "plugins": {
+    "work_extension": [
+      {
+        "name": "sre-sim",
+        "config": {
+          "tenant": "local",
+          "refresh_every": "5s",
+          "alert_every": "5s",
+          "state_file": "${SIM_STATE_FILE}",
+          "nodes": ["node-a", "node-b"],
+          "deployments": [
+            {
+              "ref": "deployment://prod/checkout",
+              "service": "service://prod/checkout",
+              "image": "checkout:v2",
+              "good_image": "checkout:v1",
+              "bad_images": ["checkout:v2"],
+              "replicas": 3
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "work": {
+    "correlation_rules": [
+      {
+        "name": "high-error-rate",
+        "match": {"event_types": ["alert.firing"], "where": {"field": "labels.alertname", "op": "eq", "value": "HighErrorRate"}},
+        "key": "subject",
+        "group": "checkout-health",
+        "lookback": "1h",
+        "window": "30m",
+        "action": "create",
+        "work_kind": "incident",
+        "template": "auto-rollback",
+        "title": "${label.alertname} on ${subject}",
+        "intent": "mitigate",
+        "priority": 50
+      },
+      {
+        "name": "deploys",
+        "match": {"event_types": ["change.deployed"]},
+        "key": "subject",
+        "group": "checkout-health",
+        "action": "attach"
+      }
+    ],
+    "templates": [
+      {
+        "id": "auto-rollback",
+        "version": 1,
+        "kind": "incident",
+        "limits": {"max_runs": 4, "max_replans": 1, "max_duration": "1h", "max_actions": 2},
+        "stages": [
+          {
+            "id": "mitigate",
+            "type": "action",
+            "phase": "mitigate",
+            "on_failure": "block",
+            "on_timeout": "block",
+            "action": {
+              "name": "deployment.rollback",
+              "target": "${subject}",
+              "args": {"to_image": "checkout:v1"},
+              "approval_timeout": "30m"
+            }
+          },
+          {
+            "id": "verify",
+            "type": "verify",
+            "phase": "verify",
+            "on_failure": "block",
+            "on_timeout": "block",
+            "verify": {
+              "recheck_every": "10s",
+              "timeout": "10m",
+              "spec": {
+                "stable_for": "30s",
+                "all_of": [
+                  {
+                    "id": "error_rate_below_1pct",
+                    "kind": "metric",
+                    "metric": {"source": "sim", "query": "error_rate", "aggregate": "max", "operator": "<", "threshold": 0.01},
+                    "window": "45s",
+                    "min_samples": 3
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

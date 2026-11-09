@@ -6,12 +6,19 @@
 //	GET  /v1/works/{id}                    read a Work (ETag = version)
 //	GET  /v1/works/{id}/events             timeline page (after_seq, limit)
 //	GET  /v1/works/{id}/events/stream      timeline SSE (Last-Event-ID / after_seq)
-//	GET  /v1/works/{id}/runs|evidence|hypotheses|watches|outcomes|actions
+//	GET  /v1/works/{id}/runs|evidence|hypotheses|watches|outcomes|actions|evaluation
+//	GET  /v1/works/{id}/assignments        agent assignments per stage with results
+//	GET  /v1/works/{id}/goals              goal of every generation
 //	POST /v1/works/{id}/commands           pause|resume|cancel|replan|resolve|wake (operator),
 //	                                       confirm|reopen (approver); Idempotency-Key, If-Match
 //	GET  /v1/work-templates                template catalog
-//	POST /v1/events                        ingest an event envelope (operator)
+//	POST /v1/works/{id}/evidence           attach evidence (operator; untrusted tier unless admin)
+//	POST /v1/works/{id}/playbook           propose a Playbook candidate from a verified Work (operator)
+//	POST /v1/events                        ingest an event envelope (service or operator, within scope)
 //	GET  /v1/events/{id}                   inbox record
+//	GET  /v1/actions/{id}/effects          kernel tool effects on the action's target
+//	POST /v1/sources/{source}/events       source-native webhook via a domain capability (service)
+//	GET  /v1/events/shadow-report          v1 trigger vs v2 routing agreement (?since=&until=)
 //	GET  /v1/world/entities                ?ref= or ?attr=&value=
 //	GET  /v1/world/facts                   ?subject=&predicate=&as_of=&known_at=
 //	POST /v1/world/facts                   assert a fact (operator; untrusted tier unless admin)
@@ -21,8 +28,13 @@
 //	POST /v1/actions/{id}/approve          approve/reject bound to intent_hash (approver)
 //	POST /v1/actions/{id}/reconcile        read-only reconcile of an unknown effect (operator)
 //	POST /v1/actions/{id}/resolve          human resolution of an unknown effect (approver)
+//	POST /v1/actions/{id}/break-glass      emergency release with justification (break_glass role)
 //
-// Every query is scoped to the authenticated tenant.
+// Every query is scoped to the authenticated tenant (and PostgreSQL RLS
+// through the request's tenant setting). Principals with a Scope are
+// limited to their event sources/types and resources; approvers to their
+// risk ceiling. Approvals, break-glass releases and scope denials are
+// written to the security audit log.
 package workapi
 
 import (
@@ -42,12 +54,20 @@ import (
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/evidence"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/playbook"
+	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/store/cpsql"
+	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/work"
+	"go-sre-harness/internal/workeval"
 	"go-sre-harness/internal/world"
 )
+
+// Normalizer turns a source-native webhook body into envelopes.
+type Normalizer func(ctx context.Context, tenantID string, h http.Header, body []byte, now time.Time) ([]eventing.Envelope, error)
 
 // MaxBody bounds request bodies.
 const MaxBody = 1 << 20
@@ -58,13 +78,61 @@ type API struct {
 	Service  *orchestration.Service
 	Ingestor *orchestration.Ingestor // nil: event ingestion disabled
 	Actions  *action.Runtime         // nil: action routes return 503
-	World    *world.Service
-	Clock    cpkit.Clock
-	Log      *slog.Logger
+	// Audit receives security-relevant decisions (scope denials,
+	// approvals, break-glass); nil disables the audit trail.
+	Audit Auditor
+	// Sources are webhook normalizers by source name (domain capabilities).
+	Sources map[string]Normalizer
+	// Denials counts guard refusals (harness_guard_denials_total).
+	Denials interface{ GuardDenied(guard, reason string) }
+	World   *world.Service
+	Clock   cpkit.Clock
+	Log     *slog.Logger
 	// StreamPoll is the SSE store poll interval (default 1s); StreamMax the
 	// maximum stream duration before the client reconnects (default 30m).
 	StreamPoll time.Duration
 	StreamMax  time.Duration
+	// Eval scores Works on the Improvement Loop dimensions (nil: 503).
+	Eval *workeval.Evaluator
+	// Playbooks proposes Playbook candidates (nil: route returns 503).
+	Playbooks interface {
+		Propose(ctx context.Context, req playbook.ProposeRequest) (memory.Memory, error)
+	}
+	// Postmortems builds ledger reports (nil: routes return 503).
+	Postmortems *postmortem.Builder
+}
+
+// Auditor is the security audit sink (the kernel's audit log).
+type Auditor interface {
+	Audit(ctx context.Context, e pg.AuditEntry) error
+}
+
+// audit writes one audit entry; it never fails the request and does not
+// depend on the request's cancellation.
+func (a *API) audit(ctx context.Context, p auth.Principal, act, resType, resID, outcome string, details map[string]any) {
+	if a.Audit == nil {
+		return
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	actor := "user"
+	if p.Has(auth.Service) && !p.Has(auth.Operator) {
+		actor = "service"
+	}
+	if err := a.Audit.Audit(actx, pg.AuditEntry{TenantID: p.Tenant, ActorType: actor, ActorID: p.Subject, Action: act,
+		ResourceType: resType, ResourceID: resID, Outcome: outcome, Details: details,
+		OccurredAt: a.Clock.Now()}); err != nil {
+		a.log().Warn("audit write failed", "action", act, "err", err)
+	}
+}
+
+// outOfScope refuses (403) and audits a request outside the caller's scope.
+func (a *API) outOfScope(w http.ResponseWriter, r *http.Request, p auth.Principal, act, resType, resID, why string) {
+	if a.Denials != nil {
+		a.Denials.GuardDenied("scope", act)
+	}
+	a.audit(r.Context(), p, act, resType, resID, "denied", map[string]any{"reason": why})
+	writeErr(w, http.StatusForbidden, "forbidden", why)
 }
 
 func (a *API) log() *slog.Logger {
@@ -77,30 +145,41 @@ func (a *API) log() *slog.Logger {
 // RouteRoles declares the minimum role per route.
 func (a *API) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
-		"POST /v1/works":                   auth.Operator,
-		"GET /v1/works":                    auth.Viewer,
-		"GET /v1/works/{id}":               auth.Viewer,
-		"GET /v1/works/{id}/events":        auth.Viewer,
-		"GET /v1/works/{id}/events/stream": auth.Viewer,
-		"GET /v1/works/{id}/runs":          auth.Viewer,
-		"GET /v1/works/{id}/evidence":      auth.Viewer,
-		"GET /v1/works/{id}/hypotheses":    auth.Viewer,
-		"GET /v1/works/{id}/watches":       auth.Viewer,
-		"GET /v1/works/{id}/outcomes":      auth.Viewer,
-		"GET /v1/works/{id}/actions":       auth.Viewer,
-		"POST /v1/works/{id}/commands":     auth.Operator,
-		"GET /v1/work-templates":           auth.Viewer,
-		"POST /v1/events":                  auth.Operator,
-		"GET /v1/events/{id}":              auth.Viewer,
-		"GET /v1/world/entities":           auth.Viewer,
-		"GET /v1/world/facts":              auth.Viewer,
-		"POST /v1/world/facts":             auth.Operator,
-		"POST /v1/world/snapshots/query":   auth.Viewer,
-		"GET /v1/world/snapshots/{id}":     auth.Viewer,
-		"GET /v1/actions/{id}":             auth.Viewer,
-		"POST /v1/actions/{id}/approve":    auth.Approver,
-		"POST /v1/actions/{id}/reconcile":  auth.Operator,
-		"POST /v1/actions/{id}/resolve":    auth.Approver,
+		"POST /v1/works":                    auth.Operator,
+		"GET /v1/works":                     auth.Viewer,
+		"GET /v1/works/{id}":                auth.Viewer,
+		"GET /v1/works/{id}/events":         auth.Viewer,
+		"GET /v1/works/{id}/events/stream":  auth.Viewer,
+		"GET /v1/works/{id}/runs":           auth.Viewer,
+		"GET /v1/works/{id}/evidence":       auth.Viewer,
+		"POST /v1/works/{id}/evidence":      auth.Operator,
+		"POST /v1/works/{id}/playbook":      auth.Operator,
+		"GET /v1/works/{id}/postmortem":     auth.Viewer,
+		"POST /v1/works/{id}/postmortem":    auth.Operator,
+		"GET /v1/works/{id}/hypotheses":     auth.Viewer,
+		"GET /v1/works/{id}/watches":        auth.Viewer,
+		"GET /v1/works/{id}/outcomes":       auth.Viewer,
+		"GET /v1/works/{id}/evaluation":     auth.Viewer,
+		"GET /v1/works/{id}/actions":        auth.Viewer,
+		"POST /v1/works/{id}/commands":      auth.Operator,
+		"GET /v1/work-templates":            auth.Viewer,
+		"POST /v1/events":                   auth.Service,
+		"GET /v1/events/{id}":               auth.Viewer,
+		"GET /v1/world/entities":            auth.Viewer,
+		"GET /v1/world/facts":               auth.Viewer,
+		"POST /v1/world/facts":              auth.Operator,
+		"POST /v1/world/snapshots/query":    auth.Viewer,
+		"GET /v1/world/snapshots/{id}":      auth.Viewer,
+		"GET /v1/actions/{id}":              auth.Viewer,
+		"POST /v1/actions/{id}/approve":     auth.Approver,
+		"POST /v1/actions/{id}/reconcile":   auth.Operator,
+		"POST /v1/actions/{id}/resolve":     auth.Approver,
+		"POST /v1/actions/{id}/break-glass": auth.BreakGlass,
+		"GET /v1/events/shadow-report":      auth.Viewer,
+		"POST /v1/sources/{source}/events":  auth.Service,
+		"GET /v1/works/{id}/assignments":    auth.Viewer,
+		"GET /v1/works/{id}/goals":          auth.Viewer,
+		"GET /v1/actions/{id}/effects":      auth.Viewer,
 	}
 }
 
@@ -123,11 +202,23 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/works/{id}/watches", a.sub(func(ctx context.Context, t, id string) (any, error) {
 		return a.Store.ListWatches(ctx, t, id, false)
 	}))
+	mux.HandleFunc("GET /v1/works/{id}/evaluation", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		if a.Eval == nil {
+			return nil, fmt.Errorf("%w: work evaluation is not configured", work.ErrInvalid)
+		}
+		return a.Eval.Score(ctx, t, id)
+	}))
 	mux.HandleFunc("GET /v1/works/{id}/outcomes", a.sub(func(ctx context.Context, t, id string) (any, error) {
 		return a.Store.ListOutcomes(ctx, t, id, 100)
 	}))
 	mux.HandleFunc("GET /v1/works/{id}/actions", a.sub(func(ctx context.Context, t, id string) (any, error) {
 		return a.Store.ListActions(ctx, t, id)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/assignments", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.assignments(ctx, t, id)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/goals", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		return a.Store.ListGoals(ctx, t, id)
 	}))
 	mux.HandleFunc("POST /v1/works/{id}/commands", a.command)
 	mux.HandleFunc("GET /v1/work-templates", func(w http.ResponseWriter, r *http.Request) {
@@ -143,9 +234,17 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/world/snapshots/query", a.snapshot)
 	mux.HandleFunc("GET /v1/world/snapshots/{id}", a.getSnapshot)
 	mux.HandleFunc("GET /v1/actions/{id}", a.getAction)
+	mux.HandleFunc("GET /v1/actions/{id}/effects", a.actionEffects)
 	mux.HandleFunc("POST /v1/actions/{id}/approve", a.approve)
 	mux.HandleFunc("POST /v1/actions/{id}/reconcile", a.reconcile)
 	mux.HandleFunc("POST /v1/actions/{id}/resolve", a.resolve)
+	mux.HandleFunc("POST /v1/actions/{id}/break-glass", a.breakGlass)
+	mux.HandleFunc("POST /v1/works/{id}/evidence", a.addEvidence)
+	mux.HandleFunc("POST /v1/works/{id}/playbook", a.proposePlaybook)
+	mux.HandleFunc("GET /v1/works/{id}/postmortem", a.getPostmortem)
+	mux.HandleFunc("POST /v1/works/{id}/postmortem", a.createPostmortem)
+	mux.HandleFunc("GET /v1/events/shadow-report", a.shadowReport)
+	mux.HandleFunc("POST /v1/sources/{source}/events", a.sourceEvents)
 }
 
 // ---- helpers ----
@@ -207,11 +306,13 @@ func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeErr(w, http.StatusConflict, "invalid_transition", err.Error())
 	case errors.Is(err, work.ErrOwnerConflict):
 		writeErr(w, http.StatusConflict, "owner_conflict", err.Error())
-	case errors.Is(err, action.ErrInvalidState), errors.Is(err, action.ErrTargetBusy):
+	case errors.Is(err, action.ErrInvalidState), errors.Is(err, action.ErrTargetBusy), errors.Is(err, action.ErrPendingEffect):
 		writeErr(w, http.StatusConflict, "invalid_action_state", err.Error())
 	case errors.Is(err, action.ErrApprovalMismatch):
 		writeErr(w, http.StatusUnprocessableEntity, "approval_mismatch", err.Error())
-	case errors.Is(err, work.ErrInvalid), errors.Is(err, eventing.ErrInvalid), errors.Is(err, world.ErrInvalid),
+	case errors.Is(err, playbook.ErrNotVerified):
+		writeErr(w, http.StatusConflict, "outcome_not_verified", err.Error())
+	case errors.Is(err, work.ErrInvalid), errors.Is(err, playbook.ErrInvalid), errors.Is(err, eventing.ErrInvalid), errors.Is(err, world.ErrInvalid),
 		errors.Is(err, outcome.ErrInvalidSpec), errors.Is(err, evidence.ErrInvalid), errors.Is(err, action.ErrNotApplied):
 		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -312,6 +413,12 @@ func (a *API) createWork(w http.ResponseWriter, r *http.Request) {
 	if req.Template != nil && !p.Has(auth.Admin) {
 		writeErr(w, http.StatusForbidden, "forbidden", "inline templates require the admin role")
 		return
+	}
+	for _, ref := range req.Goal.SubjectRefs {
+		if !p.AllowsResource(ref) {
+			a.outOfScope(w, r, p, "work.create", "subject", ref, "subject "+ref+" is outside the caller's scope")
+			return
+		}
 	}
 	req.TenantID, req.ActorID, req.ActorType, req.IdempotencyKey = p.Tenant, p.Subject, "user", key
 	wk, created, err := a.Service.Create(r.Context(), req)
@@ -502,6 +609,17 @@ func (a *API) command(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.TenantID, req.WorkID, req.ActorID, req.IdempotencyKey, req.ExpectedVersion = p.Tenant, r.PathValue("id"), p.Subject, key, version
+	if len(req.Payload) > 0 && p.Scope != nil {
+		var cp orchestration.CommandPayload
+		if err := json.Unmarshal(req.Payload, &cp); err == nil && cp.Goal != nil {
+			for _, ref := range cp.Goal.SubjectRefs {
+				if !p.AllowsResource(ref) {
+					a.outOfScope(w, r, p, "work.command", "subject", ref, "subject "+ref+" is outside the caller's scope")
+					return
+				}
+			}
+		}
+	}
 	wk, err := a.Service.Command(r.Context(), req)
 	if err != nil {
 		a.fail(w, r, err)
@@ -512,7 +630,113 @@ func (a *API) command(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, wk)
 }
 
+// Assignment is one agent assignment of a Work stage (RFC §13.2): an owner
+// run started for a stage role, with its result once the run ended.
+type Assignment struct {
+	RunID        string     `json:"run_id"`
+	Generation   int        `json:"generation"`
+	StageID      string     `json:"stage_id"`
+	Role         string     `json:"role"`
+	Required     bool       `json:"required"`
+	Status       string     `json:"status,omitempty"`
+	Outcome      string     `json:"outcome,omitempty"`
+	CostMicros   int64      `json:"cost_micros"`
+	EvidenceRefs []string   `json:"evidence_refs,omitempty"`
+	AssignedAt   time.Time  `json:"assigned_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+}
+
+func (a *API) assignments(ctx context.Context, tenantID, workID string) ([]Assignment, error) {
+	links, err := a.Store.ListRunLinks(ctx, tenantID, workID)
+	if err != nil {
+		return nil, err
+	}
+	out := []Assignment{}
+	for _, l := range links {
+		if l.Role != work.RoleOwner || l.StageID == "" {
+			continue
+		}
+		role := l.AgentRole
+		if role == "" {
+			role = l.Phase
+		}
+		out = append(out, Assignment{RunID: l.RunID, Generation: l.Generation, StageID: l.StageID, Role: role,
+			Required: l.Required, Status: l.Status, Outcome: l.Outcome, CostMicros: l.CostMicros,
+			EvidenceRefs: l.EvidenceRefs, AssignedAt: l.CreatedAt, FinishedAt: l.FinishedAt})
+	}
+	return out, nil
+}
+
 // ---- events ----
+
+// sourceEvents accepts a source-native webhook (Alertmanager, Kubernetes
+// events, Argo CD, ...), normalizes it with the source's domain capability
+// and ingests every envelope. All envelopes must be within the caller's
+// scope or none is ingested.
+func (a *API) sourceEvents(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if a.Ingestor == nil {
+		writeErr(w, http.StatusServiceUnavailable, "disabled", "event ingestion is disabled")
+		return
+	}
+	source := r.PathValue("source")
+	norm, ok := a.Sources[source]
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown event source "+source)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBody+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid", "read body: "+err.Error())
+		return
+	}
+	if len(body) > MaxBody {
+		writeErr(w, http.StatusRequestEntityTooLarge, "too_large", "body exceeds 1 MiB")
+		return
+	}
+	envs, err := norm(r.Context(), p.Tenant, r.Header, body, a.Clock.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid", cpkit.Truncate(err.Error(), 500))
+		return
+	}
+	if len(envs) > 500 {
+		writeErr(w, http.StatusRequestEntityTooLarge, "too_large", "a webhook may carry at most 500 events")
+		return
+	}
+	for i := range envs {
+		envs[i].TenantID = p.Tenant
+		if !p.AllowsEvent(envs[i].Source, envs[i].Type, envs[i].SubjectRef) {
+			a.outOfScope(w, r, p, "event.ingest", "event", envs[i].Source+"/"+envs[i].Type,
+				"event source, type or subject is outside the caller's scope")
+			return
+		}
+	}
+	type item struct {
+		ID       string `json:"id"`
+		InboxID  string `json:"inbox_id,omitempty"`
+		Created  bool   `json:"created"`
+		Decision string `json:"decision,omitempty"`
+		Error    string `json:"error,omitempty"`
+	}
+	out := make([]item, 0, len(envs))
+	failed := 0
+	for _, env := range envs {
+		rec, created, err := a.Ingestor.Ingest(r.Context(), env)
+		it := item{ID: env.ID, InboxID: rec.InboxID, Created: created, Decision: rec.Decision}
+		if err != nil {
+			it.Error, failed = cpkit.Truncate(err.Error(), 300), failed+1
+		}
+		out = append(out, it)
+	}
+	code := http.StatusAccepted
+	if failed > 0 && failed == len(envs) {
+		code = http.StatusBadRequest
+	}
+	writeJSON(w, code, map[string]any{"source": source, "events": out, "failed": failed})
+}
 
 func (a *API) ingest(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
@@ -532,6 +756,11 @@ func (a *API) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	env.TenantID = p.Tenant
+	if !p.AllowsEvent(env.Source, env.Type, env.SubjectRef) {
+		a.outOfScope(w, r, p, "event.ingest", "event", env.Source+"/"+env.Type,
+			"event source, type or subject is outside the caller's scope")
+		return
+	}
 	rec, created, err := a.Ingestor.Ingest(r.Context(), env)
 	if err != nil {
 		a.fail(w, r, err)
@@ -625,6 +854,10 @@ func (a *API) assertFact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.ID, f.TenantID = "", p.Tenant
+	if !p.AllowsResource(f.SubjectRef) {
+		a.outOfScope(w, r, p, "world.assert_fact", "subject", f.SubjectRef, "subject is outside the caller's scope")
+		return
+	}
 	// API writers are untrusted unless admin: a model or script posting
 	// facts must not outrank first-party sources.
 	if !p.Has(auth.Admin) || f.TrustTier == "" {
@@ -713,6 +946,36 @@ func (a *API) getAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// actionEffects lists the kernel tool effects on the action's target: the
+// agent-side ledger of the same resource (open ones block the dispatch).
+func (a *API) actionEffects(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	rec, err := a.Store.GetAction(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	effects, err := a.Store.KernelEffects(r.Context(), p.Tenant, action.EffectTargets(rec.TargetRef), false, 100)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	open := 0
+	for _, e := range effects {
+		if e.Open() {
+			open++
+		}
+	}
+	if effects == nil {
+		effects = []action.KernelEffect{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"action_id": rec.ID, "target_ref": rec.TargetRef,
+		"targets": action.EffectTargets(rec.TargetRef), "open": open, "effects": effects})
+}
+
 func (a *API) actionsEnabled(w http.ResponseWriter) bool {
 	if a.Actions == nil {
 		writeErr(w, http.StatusServiceUnavailable, "disabled", "the action runtime is disabled (HARNESS_ACTION_V2_ENABLED)")
@@ -750,6 +1013,11 @@ func (a *API) approve(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
+	if req.Decision == "approve" && (!p.AllowsResource(cur.TargetRef) || !p.AllowsRisk(string(cur.Risk))) {
+		a.outOfScope(w, r, p, "action.approve", "action", cur.ID,
+			fmt.Sprintf("the caller may not approve %s actions on %s", cur.Risk, cur.TargetRef))
+		return
+	}
 	owner := ""
 	if wk, err := a.Store.GetWork(r.Context(), p.Tenant, cur.WorkID); err == nil {
 		owner = wk.OwnerActor
@@ -757,9 +1025,12 @@ func (a *API) approve(w http.ResponseWriter, r *http.Request) {
 	rec, err := a.Actions.Decide(r.Context(), p.Tenant, cur.ID, p.Subject, req.Decision, req.IntentHash,
 		cpkit.Truncate(req.Comment, 500), owner)
 	if err != nil {
+		a.audit(r.Context(), p, "action."+req.Decision, "action", cur.ID, "rejected", map[string]any{"reason": err.Error()})
 		a.fail(w, r, err)
 		return
 	}
+	a.audit(r.Context(), p, "action."+req.Decision, "action", rec.ID, "allowed", map[string]any{
+		"work_id": rec.WorkID, "target": rec.TargetRef, "risk": rec.Risk, "intent_hash": rec.IntentHash, "state": rec.State})
 	a.log().Info("action decision", "tenant", p.Tenant, "action_id", rec.ID, "decision", req.Decision, "actor", p.Subject,
 		"state", rec.State)
 	a.wake(r.Context(), rec, "action_"+req.Decision, p.Subject)
@@ -796,7 +1067,20 @@ func (a *API) resolve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "applied and comment are required")
 		return
 	}
-	rec, err := a.Actions.Resolve(r.Context(), p.Tenant, r.PathValue("id"), p.Subject, *req.Applied, cpkit.Truncate(req.Comment, 1000))
+	cur, err := a.Store.GetAction(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	if !p.AllowsResource(cur.TargetRef) {
+		a.outOfScope(w, r, p, "action.resolve", "action", cur.ID, "the action target is outside the caller's scope")
+		return
+	}
+	rec, err := a.Actions.Resolve(r.Context(), p.Tenant, cur.ID, p.Subject, *req.Applied, cpkit.Truncate(req.Comment, 1000))
+	if err == nil {
+		a.audit(r.Context(), p, "action.resolve", "action", rec.ID, "applied", map[string]any{"applied": *req.Applied,
+			"state": rec.State})
+	}
 	if err != nil {
 		a.fail(w, r, err)
 		return
@@ -804,4 +1088,294 @@ func (a *API) resolve(w http.ResponseWriter, r *http.Request) {
 	a.log().Info("action resolved by human", "tenant", p.Tenant, "action_id", rec.ID, "applied", *req.Applied, "actor", p.Subject)
 	a.wake(r.Context(), rec, "action_resolved", p.Subject)
 	writeJSON(w, http.StatusOK, rec)
+}
+
+// breakGlass releases a held action in an emergency (§19.4): a named human
+// with the break_glass role, a justification, the intent hash they saw,
+// and a separate audit entry and Work timeline event.
+func (a *API) breakGlass(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok || !a.actionsEnabled(w) {
+		return
+	}
+	var req struct {
+		IntentHash    string `json:"intent_hash"`
+		Justification string `json:"justification"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	cur, err := a.Store.GetAction(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	if p.Method == "dev" {
+		a.outOfScope(w, r, p, "action.break_glass", "action", cur.ID, "break-glass requires an authenticated identity")
+		return
+	}
+	if !p.AllowsResource(cur.TargetRef) {
+		a.outOfScope(w, r, p, "action.break_glass", "action", cur.ID, "the action target is outside the caller's scope")
+		return
+	}
+	just, _ := memory.Redact(req.Justification)
+	rec, err := a.Actions.BreakGlass(r.Context(), p.Tenant, cur.ID, p.Subject, req.IntentHash, just)
+	if err != nil {
+		a.audit(r.Context(), p, "action.break_glass", "action", cur.ID, "rejected", map[string]any{"reason": err.Error()})
+		a.fail(w, r, err)
+		return
+	}
+	a.audit(r.Context(), p, "action.break_glass", "action", rec.ID, "applied", map[string]any{
+		"work_id": rec.WorkID, "target": rec.TargetRef, "risk": rec.Risk, "intent_hash": rec.IntentHash,
+		"justification": cpkit.Truncate(just, 500)})
+	if err := a.Store.WakeWork(r.Context(), rec.TenantID, rec.WorkID, "action_break_glass", "user", p.Subject,
+		map[string]any{"action_id": rec.ID, "justification": cpkit.Truncate(just, 500)}); err != nil &&
+		!errors.Is(err, work.ErrNotFound) {
+		a.log().Warn("wake work after break-glass failed", "work_id", rec.WorkID, "err", err)
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+// proposePlaybook turns a verified successful Work into a CANDIDATE
+// procedural memory. Promotion to ACTIVE goes through the memory API
+// (reviewer distinct from the proposer, verified success required).
+func (a *API) proposePlaybook(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if a.Playbooks == nil {
+		writeErr(w, http.StatusServiceUnavailable, "unavailable", "playbooks need a memory store")
+		return
+	}
+	wk, err := a.Store.GetWork(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	for _, ref := range wk.Goal.SubjectRefs {
+		if !p.AllowsResource(ref) {
+			a.outOfScope(w, r, p, "work.propose_playbook", "work", wk.ID, "the Work is outside the caller's scope")
+			return
+		}
+	}
+	var b struct {
+		Title              string   `json:"title"`
+		Environments       []string `json:"environments"`
+		VersionConstraints []string `json:"version_constraints"`
+		RiskOfReuse        string   `json:"risk_of_reuse"`
+		ValidForDays       int      `json:"valid_for_days"`
+	}
+	if !decode(w, r, &b) {
+		return
+	}
+	if b.ValidForDays < 0 || b.ValidForDays > 3650 {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "valid_for_days must be 0-3650")
+		return
+	}
+	m, err := a.Playbooks.Propose(r.Context(), playbook.ProposeRequest{TenantID: p.Tenant, WorkID: wk.ID, ActorID: p.Subject,
+		Title: b.Title, Environments: b.Environments, VersionConstraints: b.VersionConstraints, RiskOfReuse: b.RiskOfReuse,
+		ValidFor: time.Duration(b.ValidForDays) * 24 * time.Hour})
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	a.audit(r.Context(), p, "work.propose_playbook", "memory", m.ID, "applied", map[string]any{"work_id": wk.ID})
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// addEvidence attaches operator-supplied evidence to a Work. It is stored
+// as untrusted (T4) unless an admin states a trust tier; summaries are
+// redacted and bounded.
+func (a *API) addEvidence(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	wk, err := a.Store.GetWork(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	for _, ref := range wk.Goal.SubjectRefs {
+		if !p.AllowsResource(ref) {
+			a.outOfScope(w, r, p, "work.add_evidence", "work", wk.ID, "the Work is outside the caller's scope")
+			return
+		}
+	}
+	var e evidence.Record
+	if !decode(w, r, &e) {
+		return
+	}
+	e.ID, e.TenantID, e.WorkID, e.ActorID, e.RunID, e.AgentRole = "", p.Tenant, wk.ID, p.Subject, "", ""
+	if !p.Has(auth.Admin) || e.TrustTier == "" {
+		e.TrustTier = world.TrustUntrusted
+	}
+	if e.SourceType == "" {
+		e.SourceType = evidence.SourceHuman
+	}
+	if e.SourceRef == "" {
+		e.SourceRef = "api:" + p.Subject
+	}
+	if n := 0; e.Summary != "" {
+		e.Summary, n = memory.Redact(e.Summary)
+		if n > 0 {
+			e.Redaction = "secrets_removed"
+		}
+	}
+	out, created, err := a.Store.AddEvidence(r.Context(), e)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+		if err := a.Store.WakeWork(r.Context(), p.Tenant, wk.ID, "evidence_added", "user", p.Subject,
+			map[string]any{"evidence_id": out.ID}); err != nil && !errors.Is(err, work.ErrNotFound) {
+			a.log().Warn("wake work after evidence failed", "work_id", wk.ID, "err", err)
+		}
+	}
+	writeJSON(w, code, out)
+}
+
+// shadowReport compares v1 trigger outcomes with v2 routing decisions for
+// mirrored events (default: the last 24 hours).
+func (a *API) shadowReport(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if a.Ingestor == nil {
+		writeErr(w, http.StatusServiceUnavailable, "disabled", "event ingestion is disabled")
+		return
+	}
+	until := a.Clock.Now()
+	since := until.Add(-24 * time.Hour)
+	for name, dst := range map[string]*time.Time{"since": &since, "until": &until} {
+		if v := r.URL.Query().Get(name); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "invalid_request", name+" must be RFC 3339")
+				return
+			}
+			*dst = t
+		}
+	}
+	if !until.After(since) || until.Sub(since) > 31*24*time.Hour {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "since must be before until, at most 31 days apart")
+		return
+	}
+	rep, err := a.Ingestor.ShadowReport(r.Context(), p.Tenant, since, until, 5000)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// postmortemFor loads a Work the caller may fully see and builds its report.
+func (a *API) postmortemFor(w http.ResponseWriter, r *http.Request, act string) (auth.Principal, work.Work, postmortem.Report, bool) {
+	p, ok := principal(w, r)
+	if !ok {
+		return p, work.Work{}, postmortem.Report{}, false
+	}
+	if a.Postmortems == nil {
+		writeErr(w, http.StatusServiceUnavailable, "unavailable", "postmortems are not configured")
+		return p, work.Work{}, postmortem.Report{}, false
+	}
+	wk, err := a.Store.GetWork(r.Context(), p.Tenant, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return p, wk, postmortem.Report{}, false
+	}
+	for _, ref := range wk.Goal.SubjectRefs {
+		if !p.AllowsResource(ref) {
+			a.outOfScope(w, r, p, act, "work", wk.ID, "the Work is outside the caller's scope")
+			return p, wk, postmortem.Report{}, false
+		}
+	}
+	rep, err := a.Postmortems.Build(r.Context(), p.Tenant, wk.ID)
+	if err != nil {
+		a.fail(w, r, err)
+		return p, wk, rep, false
+	}
+	return p, wk, rep, true
+}
+
+// getPostmortem returns the deterministic ledger report as JSON, or as
+// Markdown with ?format=markdown (or Accept: text/markdown).
+func (a *API) getPostmortem(w http.ResponseWriter, r *http.Request) {
+	_, _, rep, ok := a.postmortemFor(w, r, "work.postmortem")
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("format") == "markdown" || strings.Contains(r.Header.Get("Accept"), "text/markdown") {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, postmortem.Markdown(rep))
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// createPostmortem opens a postmortem Work for a closed Work: the ledger
+// report becomes its goal description and the draft is reviewed by a
+// human. It is idempotent per source Work unless an Idempotency-Key is
+// given.
+func (a *API) createPostmortem(w http.ResponseWriter, r *http.Request) {
+	p, src, rep, ok := a.postmortemFor(w, r, "work.create_postmortem")
+	if !ok {
+		return
+	}
+	if !src.Status.Terminal() {
+		writeErr(w, http.StatusConflict, "work_open", "a postmortem needs a closed Work")
+		return
+	}
+	if src.Template.ID == work.TemplatePostmortem || src.Template.ID == work.TemplateFollowUp {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "postmortem and follow-up Works do not get postmortems")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) > 200 {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key is limited to 200 chars")
+		return
+	}
+	if key == "" {
+		key = "postmortem:" + src.ID
+	}
+	title := "Postmortem: " + firstNonEmptyStr(src.Title, src.ID)
+	if len(title) > 200 {
+		title = title[:200]
+	}
+	req := orchestration.CreateRequest{TenantID: p.Tenant, ActorID: p.Subject, ActorType: "user", IdempotencyKey: key,
+		Kind: work.KindRequest, Title: title, TemplateID: work.TemplatePostmortem,
+		Goal: work.GoalSpec{Intent: "postmortem", Description: postmortem.Brief(rep, work.MaxDescription),
+			SubjectRefs: src.Goal.SubjectRefs, Labels: map[string]string{"source_work": src.ID}}}
+	if env := src.Goal.Labels["environment"]; env != "" {
+		req.Goal.Labels["environment"] = env
+	}
+	wk, created, err := a.Service.Create(r.Context(), req)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+		a.audit(r.Context(), p, "work.create_postmortem", "work", wk.ID, "applied", map[string]any{"source_work": src.ID})
+	}
+	etag(w, wk.Version)
+	w.Header().Set("Location", "/v1/works/"+wk.ID)
+	writeJSON(w, code, wk)
+}
+
+func firstNonEmptyStr(xs ...string) string {
+	for _, x := range xs {
+		if x != "" {
+			return x
+		}
+	}
+	return ""
 }

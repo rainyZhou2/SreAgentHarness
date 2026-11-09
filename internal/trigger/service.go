@@ -73,11 +73,39 @@ type ItemResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// MirrorEvent is one webhook event as v1 handled it, offered to the v2
+// event engine in shadow mode so both behaviours can be compared before
+// the switch (RFC P0-3). It carries data only; v1 does not depend on it.
+type MirrorEvent struct {
+	Trigger     string
+	TenantID    string
+	ActorID     string
+	Fingerprint string
+	Goal        string
+	Services    []string
+	Incident    string
+	Labels      map[string]string
+	Item        any
+	ReceivedAt  time.Time
+	// V1Action and V1RunID are what the v1 trigger did with the event.
+	V1Action string
+	V1RunID  string
+}
+
+// Mirror receives v1 webhook events (e.g. the v2 event inbox). It must not
+// block or fail the v1 path; errors are logged by the caller.
+type Mirror interface {
+	MirrorTriggerEvent(ctx context.Context, e MirrorEvent) error
+}
+
 // Service evaluates triggers.
 type Service struct {
 	Runs  Runs
 	Dedup Dedup
 	Log   *slog.Logger
+	// Mirror, when set, receives every rendered webhook event after v1
+	// handled it.
+	Mirror Mirror
 	// Now is the clock (tests); default time.Now.
 	Now func() time.Time
 
@@ -195,51 +223,68 @@ func (s *Service) Handle(ctx context.Context, tenantID, actorID, name string, bo
 			ictx[k] = v
 		}
 		ictx["item"] = item
-		r := s.handleItem(ctx, t, tenantID, actorID, ictx, item, now)
+		r, ev := s.handleItem(ctx, t, tenantID, actorID, ictx, item, now)
 		r.Index = i
 		res.Items = append(res.Items, r)
+		if ev != nil {
+			s.mirror(ctx, t, tenantID, actorID, *ev, item, now, r)
+		}
 	}
 	return res, nil
 }
 
-func (s *Service) handleItem(ctx context.Context, t *compiled, tenantID, actorID string, ictx map[string]any, item any, now time.Time) ItemResult {
+// mirror offers a handled event to the v2 engine; it never affects v1.
+func (s *Service) mirror(ctx context.Context, t *compiled, tenantID, actorID string, ev event, item any, now time.Time, r ItemResult) {
+	if s.Mirror == nil {
+		return
+	}
+	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := s.Mirror.MirrorTriggerEvent(mctx, MirrorEvent{Trigger: t.Name, TenantID: tenantID, ActorID: actorID,
+		Fingerprint: ev.fingerprint, Goal: ev.goal, Services: ev.ctx.Services, Incident: ev.ctx.Incident,
+		Labels: ev.ctx.Labels, Item: item, ReceivedAt: now, V1Action: r.Action, V1RunID: r.RunID}); err != nil {
+		s.Log.Warn("trigger mirror", "trigger", t.Name, "tenant", tenantID, "err", err)
+	}
+}
+
+func (s *Service) handleItem(ctx context.Context, t *compiled, tenantID, actorID string, ictx map[string]any, item any, now time.Time) (ItemResult, *event) {
 	if t.filter != nil {
 		v, err := t.filter.Eval(ictx)
 		if err != nil {
-			return ItemResult{Action: ActionError, Error: "filter: " + err.Error()}
+			return ItemResult{Action: ActionError, Error: "filter: " + err.Error()}, nil
 		}
 		if !flow.Truthy(v) {
-			return ItemResult{Action: ActionFiltered}
+			return ItemResult{Action: ActionFiltered}, nil
 		}
 	}
 	resolveOnly := false
 	if t.resolve != nil {
 		v, err := t.resolve.Eval(ictx)
 		if err != nil {
-			return ItemResult{Action: ActionError, Error: "resolve: " + err.Error()}
+			return ItemResult{Action: ActionError, Error: "resolve: " + err.Error()}, nil
 		}
 		resolveOnly = flow.Truthy(v)
 	}
 	ev, err := render(t, ictx, now)
 	if err != nil {
-		return ItemResult{Action: ActionError, Error: err.Error()}
+		return ItemResult{Action: ActionError, Error: err.Error()}, nil
 	}
 	ev.content = evidenceText(item)
 	if t.Dedup.Disabled {
 		if resolveOnly {
-			return ItemResult{Action: ActionIgnored}
+			return ItemResult{Action: ActionIgnored}, &ev
 		}
 		if !s.allow(tenantID, t, now) {
-			return ItemResult{Action: ActionRateLimited}
+			return ItemResult{Action: ActionRateLimited}, &ev
 		}
 		key := "trigger:" + t.Name + ":" + shortHash(ev.content+"|"+now.Format(time.RFC3339Nano))
 		run, _, err := s.start(ctx, t, tenantID, actorID, ev, key)
 		if err != nil {
-			return ItemResult{Action: ActionError, Error: err.Error()}
+			return ItemResult{Action: ActionError, Error: err.Error()}, &ev
 		}
-		return ItemResult{Action: ActionCreated, RunID: run.ID}
+		return ItemResult{Action: ActionCreated, RunID: run.ID}, &ev
 	}
-	return s.dedupItem(ctx, t, tenantID, actorID, ev, resolveOnly, now, 0)
+	return s.dedupItem(ctx, t, tenantID, actorID, ev, resolveOnly, now, 0), &ev
 }
 
 func (s *Service) dedupItem(ctx context.Context, t *compiled, tenantID, actorID string, ev event, resolveOnly bool, now time.Time, depth int) ItemResult {

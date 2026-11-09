@@ -624,3 +624,124 @@ func TestDisagreeingVersionSources(t *testing.T) {
 		}
 	})
 }
+
+// fakeLedger is a kernel effect ledger with fixed entries.
+type fakeLedger struct {
+	mu      sync.Mutex
+	effects []action.KernelEffect
+}
+
+func (f *fakeLedger) KernelEffects(_ context.Context, _ string, targets []string, openOnly bool, _ int) ([]action.KernelEffect, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []action.KernelEffect
+	for _, e := range f.effects {
+		for _, t := range targets {
+			if e.Target == t && (!openOnly || e.Open()) {
+				out = append(out, e)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeLedger) settle(state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.effects {
+		f.effects[i].State = state
+	}
+}
+
+// §17.4: an agent tool call whose result is unknown blocks a Work action on
+// the same resource; the action stays READY and dispatches once the kernel
+// effect is settled.
+func TestKernelEffectBlocksDispatch(t *testing.T) {
+	if got := action.EffectTargets("deployment://prod/checkout"); len(got) != 2 || got[1] != "prod/checkout" {
+		t.Fatalf("effect targets: %v", got)
+	}
+	forEachStore(t, func(t *testing.T, e *env) {
+		ex := e.deploy("deployment.set_image", domain.RiskR1)
+		rt := e.runtime(ex)
+		ledger := &fakeLedger{effects: []action.KernelEffect{{ID: "eff-1", RunID: "run-1", Target: "prod/checkout", State: "UNKNOWN"}}}
+		rt.Effects = ledger
+		e.observe("checkout:v2", 1, e.clock.now())
+		rec := e.propose(rt, e.work(), "deployment.set_image", "checkout:v3")
+		if rec.State != action.StateReady {
+			t.Fatalf("plan: %s", rec.State)
+		}
+		_, err := rt.Execute(e.ctx, e.tn, rec.ID)
+		if !errors.Is(err, action.ErrPendingEffect) || ex.callCount() != 0 {
+			t.Fatalf("dispatch over an unknown kernel effect: %v calls=%d", err, ex.callCount())
+		}
+		if got, _ := e.store.GetAction(e.ctx, e.tn, rec.ID); got.State != action.StateReady {
+			t.Fatalf("blocked action must stay READY, got %s", got.State)
+		}
+		ledger.settle("CONFIRMED")
+		out, err := rt.Execute(e.ctx, e.tn, rec.ID)
+		if err != nil || out.State != action.StateApplied || ex.callCount() != 1 {
+			t.Fatalf("dispatch after settlement: %v %s calls=%d", err, out.State, ex.callCount())
+		}
+	})
+}
+
+type recObserver struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *recObserver) add(s string)           { r.mu.Lock(); r.events = append(r.events, s); r.mu.Unlock() }
+func (r *recObserver) Preflight(res string)   { r.add("preflight:" + res) }
+func (r *recObserver) EffectUnknown(c string) { r.add("unknown:" + c) }
+func (r *recObserver) Verify(s action.State, _ time.Duration) {
+	r.add("verify:" + string(s))
+}
+func (r *recObserver) Denied(reason string) { r.add("denied:" + reason) }
+func (r *recObserver) BreakGlass()          { r.add("break_glass") }
+func (r *recObserver) has(s string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.events {
+		if e == s {
+			return true
+		}
+	}
+	return false
+}
+
+// §21.1: the runtime reports preflight results, unknown effects (the key
+// alert), verification and guard refusals.
+func TestRuntimeObserver(t *testing.T) {
+	forEachStore(t, func(t *testing.T, e *env) {
+		e.observe("checkout:v2", 1, e.clock.now())
+		ex := e.deploy("deployment.rollback", domain.RiskR1)
+		ex.fail, ex.failApplied = errors.New("read tcp: i/o timeout"), true
+		rt := e.runtime(ex)
+		o := &recObserver{}
+		rt.Observer = o
+		r := e.propose(rt, e.work(), "deployment.rollback", "checkout:v1")
+		r2 := e.propose(rt, e.work(), "deployment.rollback", "checkout:v3")
+		if _, err := rt.Execute(e.ctx, e.tn, r.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rt.Reconcile(e.ctx, e.tn, r.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rt.VerifyEffect(e.ctx, e.tn, r.ID, e.clock.now()); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"preflight:ready", "unknown:dispatch_error", "verify:VERIFIED"} {
+			if !o.has(want) {
+				t.Fatalf("missing %s in %v", want, o.events)
+			}
+		}
+		// A plan that expired before dispatch is a guard refusal.
+		e.clock.add(2 * time.Hour)
+		if _, err := rt.Execute(e.ctx, e.tn, r2.ID); !errors.Is(err, action.ErrPrecondition) {
+			t.Fatalf("expired plan: %v", err)
+		}
+		if !o.has("denied:expired") {
+			t.Fatalf("expired plan not counted: %v", o.events)
+		}
+	})
+}

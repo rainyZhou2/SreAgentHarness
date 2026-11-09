@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/policy"
@@ -99,6 +101,11 @@ type Runtime struct {
 	// LockTTL bounds the target lock of a dispatched action (default 1h);
 	// it is released when the action settles.
 	LockTTL time.Duration
+	// Effects, when set, is the kernel effect ledger: an action does not
+	// dispatch while an agent tool call on its target is unresolved.
+	Effects EffectLedger
+	// Observer receives metric signals (optional).
+	Observer Observer
 }
 
 func (rt *Runtime) now() time.Time { return rt.Clock.Now() }
@@ -137,7 +144,9 @@ const MaxArgsBytes = 64 << 10
 // Propose builds, preflights and persists a plan. The returned record is
 // REJECTED, WAITING_APPROVAL or READY. Proposing the same plan twice returns
 // the existing record.
-func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (Record, error) {
+func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record, err error) {
+	ctx, sp := span(ctx, "action.preflight", attribute.String("work_id", req.WorkID), attribute.String("action.name", req.Name))
+	defer func() { endSpan(sp, &out, &err) }()
 	exec, ok := rt.Registry.Lookup(req.Name)
 	if !ok {
 		return Record{}, fmt.Errorf("%w: unknown action %q", ErrNotApplied, req.Name)
@@ -287,6 +296,15 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (Record, err
 	}
 	out, created, err := rt.Store.CreateAction(ctx, rec)
 	if err == nil && created {
+		switch out.State {
+		case StateRejected:
+			rt.obs().Preflight("rejected")
+			rt.obs().Denied("preflight")
+		case StateReady:
+			rt.obs().Preflight("ready")
+		default:
+			rt.obs().Preflight("approval")
+		}
 		rt.log().Info("action proposed", "tenant", out.TenantID, "work_id", out.WorkID, "action_id", out.ID,
 			"action", out.ActionName, "target", out.TargetRef, "state", out.State)
 	}
@@ -361,6 +379,53 @@ func (rt *Runtime) Decide(ctx context.Context, tenantID, actionID, approver, dec
 	return rt.Store.UpdateAction(ctx, rec, prev)
 }
 
+// MinJustification is the shortest break-glass justification accepted.
+const MinJustification = 20
+
+// BreakGlass releases a WAITING_APPROVAL action on the authority of one
+// emergency approver (§19.4). It is bound to the intent hash like any
+// approval, cannot outlive the plan, and cannot release what the policy
+// denies (R3 and policy denials never reach WAITING_APPROVAL). The grant is
+// stored on the record; callers write the separate audit trail.
+func (rt *Runtime) BreakGlass(ctx context.Context, tenantID, actionID, actor, intentHash, justification string) (Record, error) {
+	rec, err := rt.Store.GetAction(ctx, tenantID, actionID)
+	if err != nil {
+		return Record{}, err
+	}
+	if rec.State != StateWaitingApproval {
+		return rec, errState(rec, StateWaitingApproval)
+	}
+	if intentHash != rec.IntentHash {
+		return rec, fmt.Errorf("%w: intent hash does not match the current plan", ErrApprovalMismatch)
+	}
+	justification = strings.TrimSpace(justification)
+	if len([]rune(justification)) < MinJustification {
+		return rec, fmt.Errorf("%w: a break-glass justification of at least %d characters is required",
+			ErrApprovalMismatch, MinJustification)
+	}
+	if rec.Risk == "R3" || rec.PolicyVerdict == "deny" {
+		return rec, fmt.Errorf("%w: the framework floor cannot be overridden", ErrApprovalMismatch)
+	}
+	now := rt.now()
+	prev := rec.Version
+	if !now.Before(rec.ExpiresAt) {
+		rec.State, rec.Reason, rec.UpdatedAt = StateRejected, "approval window expired", now
+		return rt.Store.UpdateAction(ctx, rec, prev)
+	}
+	j := cpkit.Truncate(justification, 2000)
+	rec.ApprovalLog = append(rec.ApprovalLog, Approval{ApproverID: actor, Decision: "break_glass",
+		IntentHash: intentHash, Comment: j, At: now})
+	rec.BreakGlass = &BreakGlassGrant{Actor: actor, Justification: j, IntentHash: intentHash, At: now}
+	rec.State, rec.Reason, rec.UpdatedAt = StateReady, "released by break-glass ("+actor+")", now
+	out, err := rt.Store.UpdateAction(ctx, rec, prev)
+	if err == nil {
+		rt.obs().BreakGlass()
+		rt.log().Warn("action released by break-glass", "tenant", tenantID, "work_id", out.WorkID,
+			"action_id", out.ID, "action", out.ActionName, "target", out.TargetRef, "risk", out.Risk, "actor", actor)
+	}
+	return out, err
+}
+
 // ErrApprovalMismatch is returned for approvals that do not bind the plan.
 var ErrApprovalMismatch = errors.New("approval does not match the action")
 
@@ -378,7 +443,9 @@ func (rt *Runtime) Expire(ctx context.Context, tenantID, actionID string) (Recor
 // Execute dispatches a READY action exactly once. It re-checks expiry,
 // policy, target version and freshness against a fresh snapshot, takes the
 // target lock, commits DISPATCHED, and only then calls the executor.
-func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (Record, error) {
+func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out Record, err error) {
+	ctx, sp := span(ctx, "action.execute", attribute.String("action_id", actionID))
+	defer func() { endSpan(sp, &out, &err) }()
 	rec, err := rt.Store.GetAction(ctx, tenantID, actionID)
 	if err != nil {
 		return Record{}, err
@@ -434,6 +501,19 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (Reco
 			}
 		}
 	}
+	if rt.Effects != nil {
+		open, err := rt.Effects.KernelEffects(ctx, tenantID, EffectTargets(rec.TargetRef), true, 5)
+		if err != nil {
+			return rec, fmt.Errorf("read kernel effect ledger: %w", err)
+		}
+		if len(open) > 0 {
+			e := open[0]
+			rt.log().Warn("action dispatch waits for a kernel effect", "action_id", rec.ID, "target", rec.TargetRef,
+				"effect_id", e.ID, "effect_state", e.State, "run_id", e.RunID)
+			rt.obs().Denied("pending_effect")
+			return rec, fmt.Errorf("%w: effect %s of run %s is %s on %s", ErrPendingEffect, e.ID, e.RunID, e.State, e.Target)
+		}
+	}
 	lockTTL := rt.LockTTL
 	if lockTTL <= 0 {
 		lockTTL = time.Hour
@@ -443,6 +523,7 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (Reco
 		return rec, err
 	}
 	if !got {
+		rt.obs().Denied("target_busy")
 		return rec, fmt.Errorf("%w: %s is held by action %s", ErrTargetBusy, rec.TargetRef, holder)
 	}
 	// Ledger first: once DISPATCHED is committed the call may happen, and a
@@ -473,8 +554,9 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (Reco
 		rec.State, rec.LastError = StateFailed, cpkit.Truncate(xerr.Error(), 1000)
 	default:
 		rec.State, rec.LastError = StateEffectUnknown, cpkit.Truncate(xerr.Error(), 1000)
+		rt.obs().EffectUnknown("dispatch_error")
 	}
-	out, err := rt.Store.UpdateAction(context.WithoutCancel(ctx), rec, prev)
+	out, err = rt.Store.UpdateAction(context.WithoutCancel(ctx), rec, prev)
 	if err != nil {
 		// The effect may have happened but its result is not durable: the
 		// record stays DISPATCHED and the recovery sweep turns it into
@@ -500,6 +582,7 @@ func boundJSON(b json.RawMessage) json.RawMessage {
 }
 
 func (rt *Runtime) reject(ctx context.Context, rec Record, reason string) (Record, error) {
+	rt.obs().Denied(rejectClass(reason))
 	prev := rec.Version
 	rec.State, rec.Reason, rec.UpdatedAt = StateRejected, reason, rt.now()
 	out, err := rt.Store.UpdateAction(ctx, rec, prev)
@@ -507,6 +590,19 @@ func (rt *Runtime) reject(ctx context.Context, rec Record, reason string) (Recor
 		return rec, err
 	}
 	return out, fmt.Errorf("%w: %s", ErrPrecondition, reason)
+}
+
+// rejectClass maps a dispatch-time rejection to a bounded metric label.
+func rejectClass(reason string) string {
+	switch {
+	case strings.HasPrefix(reason, "policy"):
+		return "policy"
+	case strings.HasPrefix(reason, "precondition"):
+		return "precondition"
+	case strings.HasPrefix(reason, "plan expired"):
+		return "expired"
+	}
+	return "implementation_changed"
 }
 
 // ErrPrecondition is returned when a dispatch-time check refused the action.
@@ -522,6 +618,7 @@ func (rt *Runtime) Reconcile(ctx context.Context, tenantID, actionID string) (Re
 	}
 	if rec.State == StateDispatched {
 		prev := rec.Version
+		rt.obs().EffectUnknown("lost_result")
 		rec.State, rec.UpdatedAt = StateEffectUnknown, rt.now()
 		rec.LastError = "no result was recorded after dispatch (worker crash or lost commit)"
 		if rec, err = rt.Store.UpdateAction(ctx, rec, prev); err != nil {
@@ -589,7 +686,9 @@ func (rt *Runtime) Resolve(ctx context.Context, tenantID, actionID, actor string
 // (VERIFIED, DEGRADED, or still VERIFYING when inconclusive before the
 // deadline). Without an effect spec, a positive Inspect verifies; an
 // executor that cannot inspect is verified by its own result only.
-func (rt *Runtime) VerifyEffect(ctx context.Context, tenantID, actionID string, deadline time.Time) (Record, error) {
+func (rt *Runtime) VerifyEffect(ctx context.Context, tenantID, actionID string, deadline time.Time) (out Record, err error) {
+	ctx, sp := span(ctx, "action.effect_verify", attribute.String("action_id", actionID))
+	defer func() { endSpan(sp, &out, &err) }()
 	rec, err := rt.Store.GetAction(ctx, tenantID, actionID)
 	if err != nil {
 		return Record{}, err
@@ -634,9 +733,12 @@ func (rt *Runtime) VerifyEffect(ctx context.Context, tenantID, actionID string, 
 	default:
 		rec.State = StateVerifying
 	}
-	out, err := rt.Store.UpdateAction(ctx, rec, prev)
+	out, err = rt.Store.UpdateAction(ctx, rec, prev)
 	if err == nil && out.State.Settled() {
 		_ = rt.Store.UnlockTarget(ctx, tenantID, out.TargetRef, out.ID)
+		if out.DispatchedAt != nil {
+			rt.obs().Verify(out.State, now.Sub(*out.DispatchedAt))
+		}
 	}
 	return out, err
 }

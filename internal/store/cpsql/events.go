@@ -113,13 +113,20 @@ type EventFilter struct {
 	Subject  string
 	Type     string
 	State    string
-	Limit    int
+	// SourcePrefix selects sources starting with it (e.g. "trigger:").
+	SourcePrefix string
+	// Since/Until bound the occurrence time (zero = open).
+	Since, Until time.Time
+	Limit        int
 }
 
 // ListEvents lists inbox records newest first.
 func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]eventing.Record, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
+	if f.Limit <= 0 {
 		f.Limit = 100
+	}
+	if f.Limit > 5000 {
+		f.Limit = 5000
 	}
 	q := `SELECT ` + inboxCols + ` FROM event_inbox WHERE tenant_id=?`
 	args := []any{f.TenantID}
@@ -141,6 +148,19 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]eventing.Recor
 	if f.State != "" {
 		q += ` AND processing_state=?`
 		args = append(args, f.State)
+	}
+	if f.SourcePrefix != "" {
+		// substr comparison: exact and collation-independent on both dialects.
+		q += ` AND substr(source, 1, ?) = ?`
+		args = append(args, len([]rune(f.SourcePrefix)), f.SourcePrefix)
+	}
+	if !f.Since.IsZero() {
+		q += ` AND occurred_at >= ?`
+		args = append(args, s.t(f.Since))
+	}
+	if !f.Until.IsZero() {
+		q += ` AND occurred_at <= ?`
+		args = append(args, s.t(f.Until))
 	}
 	args = append(args, f.Limit)
 	rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY received_at DESC, id DESC LIMIT ?`), args...)
@@ -297,6 +317,9 @@ func (s *Store) createWorkTx(ctx context.Context, tx *sql.Tx, n work.NewWork) (w
 		}
 		return w, err
 	}
+	if err := s.insertGoal(ctx, tx, w, "created", n.ActorID, now); err != nil {
+		return w, err
+	}
 	subjects := append([]work.SubjectLink(nil), n.Subjects...)
 	for _, ref := range w.Goal.SubjectRefs {
 		subjects = append(subjects, work.SubjectLink{Kind: "subject", ID: ref})
@@ -315,6 +338,61 @@ func (s *Store) createWorkTx(ctx context.Context, tx *sql.Tx, n work.NewWork) (w
 }
 
 // PurgeCorrelations deletes expired correlation groups.
+// InboxRetention bounds how long event_inbox keeps terminal events (RFC
+// §17.4). NEW and FAILED events are never purged.
+type InboxRetention struct {
+	// Payload strips the raw payload of terminal events older than this
+	// (the envelope, decision and hash stay for audit). 0 disables.
+	Payload time.Duration
+	// Record deletes terminal events older than this. 0 disables.
+	Record time.Duration
+	// Batch bounds the rows touched per statement (default 1000).
+	Batch int
+}
+
+// PurgeResult counts what a retention pass did.
+type PurgeResult struct {
+	PayloadsStripped int64
+	Deleted          int64
+}
+
+// PurgeEvents applies the inbox retention once, in bounded batches so a
+// large backlog never holds long locks. Payloads are stripped first; rows
+// are deleted only after the longer record retention.
+func (s *Store) PurgeEvents(ctx context.Context, now time.Time, r InboxRetention) (PurgeResult, error) {
+	var out PurgeResult
+	batch := r.Batch
+	if batch <= 0 || batch > 10000 {
+		batch = 1000
+	}
+	if r.Record > 0 && r.Payload > r.Record {
+		return out, fmt.Errorf("cpsql: payload retention %s exceeds record retention %s", r.Payload, r.Record)
+	}
+	const terminal = `processing_state IN ('PROCESSED','IGNORED','DEAD')`
+	if r.Payload > 0 {
+		strip := `envelope - 'payload'`
+		if s.d != Postgres {
+			strip = `json_remove(envelope, '$.payload')`
+		}
+		res, err := s.db.ExecContext(ctx, s.q(`UPDATE event_inbox SET envelope = `+strip+`, payload_purged_at = ?
+			WHERE id IN (SELECT id FROM event_inbox WHERE `+terminal+` AND payload_purged_at IS NULL AND received_at < ?
+			ORDER BY received_at LIMIT ?)`), s.t(now), s.t(now.Add(-r.Payload)), batch)
+		if err != nil {
+			return out, fmt.Errorf("strip inbox payloads: %w", err)
+		}
+		out.PayloadsStripped, _ = res.RowsAffected()
+	}
+	if r.Record > 0 {
+		res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM event_inbox WHERE id IN (SELECT id FROM event_inbox
+			WHERE `+terminal+` AND received_at < ? ORDER BY received_at LIMIT ?)`), s.t(now.Add(-r.Record)), batch)
+		if err != nil {
+			return out, fmt.Errorf("delete inbox events: %w", err)
+		}
+		out.Deleted, _ = res.RowsAffected()
+	}
+	return out, nil
+}
+
 func (s *Store) PurgeCorrelations(ctx context.Context, before time.Time, limit int) (int64, error) {
 	if limit <= 0 {
 		limit = 1000

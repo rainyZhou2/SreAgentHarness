@@ -1,0 +1,964 @@
+{
+ "title": "SRE Agent Harness — v2 control plane",
+ "uid": "harness-v2",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "tags": [
+  "harness",
+  "sre"
+ ],
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "refresh": "30s",
+ "templating": {
+  "list": [
+   {
+    "name": "datasource",
+    "type": "datasource",
+    "query": "prometheus",
+    "label": "Prometheus"
+   }
+  ]
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Safety",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "collapsed": false,
+   "panels": [],
+   "id": 1
+  },
+  {
+   "type": "stat",
+   "title": "Effect unknown (now)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background"
+   },
+   "targets": [
+    {
+     "expr": "sum(harness_action_backlog{state=~\"EFFECT_UNKNOWN|MANUAL_RECOVERY\"})",
+     "refId": "A"
+    }
+   ],
+   "id": 2
+  },
+  {
+   "type": "stat",
+   "title": "Unknown effects (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background"
+   },
+   "targets": [
+    {
+     "expr": "sum(increase(harness_action_effect_unknown_total[24h]))",
+     "refId": "A"
+    }
+   ],
+   "id": 3
+  },
+  {
+   "type": "stat",
+   "title": "Unapproved dispatches",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background"
+   },
+   "targets": [
+    {
+     "expr": "max(harness_action_unapproved_dispatch)",
+     "refId": "A"
+    }
+   ],
+   "id": 4
+  },
+  {
+   "type": "stat",
+   "title": "Break-glass (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 12,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background"
+   },
+   "targets": [
+    {
+     "expr": "sum(increase(harness_action_break_glass_total[24h]))",
+     "refId": "A"
+    }
+   ],
+   "id": 5
+  },
+  {
+   "type": "stat",
+   "title": "Overdue watches",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 16,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background"
+   },
+   "targets": [
+    {
+     "expr": "max(harness_watch_overdue)",
+     "refId": "A"
+    }
+   ],
+   "id": 6
+  },
+  {
+   "type": "stat",
+   "title": "Scope denials (1h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 20,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 10
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background"
+   },
+   "targets": [
+    {
+     "expr": "sum(increase(harness_guard_denials_total{guard=\"scope\"}[1h]))",
+     "refId": "A"
+    }
+   ],
+   "id": 7
+  },
+  {
+   "type": "timeseries",
+   "title": "Guard denials by guard/reason",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (guard,reason) (rate(harness_guard_denials_total[5m]))",
+     "legendFormat": "{{guard}}/{{reason}}",
+     "refId": "A"
+    }
+   ],
+   "id": 8
+  },
+  {
+   "type": "timeseries",
+   "title": "Action backlog by state",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (state) (harness_action_backlog)",
+     "legendFormat": "{{state}}",
+     "refId": "A"
+    }
+   ],
+   "id": 9
+  },
+  {
+   "type": "row",
+   "title": "Works",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 13
+   },
+   "collapsed": false,
+   "panels": [],
+   "id": 10
+  },
+  {
+   "type": "timeseries",
+   "title": "Active Works by status",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 14
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (status) (harness_work_active)",
+     "legendFormat": "{{status}}",
+     "refId": "A"
+    }
+   ],
+   "id": 11
+  },
+  {
+   "type": "timeseries",
+   "title": "Waiting on humans (oldest)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 14
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "max by (status) (harness_work_waiting_oldest_seconds)",
+     "legendFormat": "{{status}}",
+     "refId": "A"
+    }
+   ],
+   "id": 12
+  },
+  {
+   "type": "timeseries",
+   "title": "Work age at close p50/p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 14
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(harness_work_age_seconds_bucket[1h])))",
+     "legendFormat": "p50",
+     "refId": "A"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(harness_work_age_seconds_bucket[1h])))",
+     "legendFormat": "p95",
+     "refId": "B"
+    }
+   ],
+   "id": 13
+  },
+  {
+   "type": "timeseries",
+   "title": "Replans by cause",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 22
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (cause) (rate(harness_work_replans_total[15m]))",
+     "legendFormat": "{{cause}}",
+     "refId": "A"
+    }
+   ],
+   "id": 14
+  },
+  {
+   "type": "timeseries",
+   "title": "Outcome verdicts",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 22
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (verdict) (rate(harness_outcome_evaluations_total[15m]))",
+     "legendFormat": "{{verdict}}",
+     "refId": "A"
+    }
+   ],
+   "id": 15
+  },
+  {
+   "type": "timeseries",
+   "title": "Agent assignments",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 22
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (stage_type,result) (rate(harness_agent_assignment_total[15m]))",
+     "legendFormat": "{{stage_type}} {{result}}",
+     "refId": "A"
+    }
+   ],
+   "id": 16
+  },
+  {
+   "type": "timeseries",
+   "title": "Work model cost p95 (USD)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 30
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le,kind) (rate(harness_work_model_cost_usd_bucket[6h])))",
+     "legendFormat": "{{kind}}",
+     "refId": "A"
+    }
+   ],
+   "id": 17
+  },
+  {
+   "type": "timeseries",
+   "title": "Processing passes",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 30
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (result) (rate(harness_work_ticks_total[5m]))",
+     "legendFormat": "{{result}}",
+     "refId": "A"
+    }
+   ],
+   "id": 18
+  },
+  {
+   "type": "timeseries",
+   "title": "Wake lag p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 30
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(harness_work_wake_lag_seconds_bucket[5m])))",
+     "legendFormat": "work",
+     "refId": "A"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum by (le,kind) (rate(harness_watch_due_lag_seconds_bucket[5m])))",
+     "legendFormat": "watch {{kind}}",
+     "refId": "B"
+    }
+   ],
+   "id": 19
+  },
+  {
+   "type": "row",
+   "title": "Events",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 38
+   },
+   "collapsed": false,
+   "panels": [],
+   "id": 20
+  },
+  {
+   "type": "timeseries",
+   "title": "Ingested by decision",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 39
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (decision) (rate(harness_event_ingested_total[5m]))",
+     "legendFormat": "{{decision}}",
+     "refId": "A"
+    }
+   ],
+   "id": 21
+  },
+  {
+   "type": "timeseries",
+   "title": "Correlation latency p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 39
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le,decision) (rate(harness_event_correlation_seconds_bucket[5m])))",
+     "legendFormat": "{{decision}}",
+     "refId": "A"
+    }
+   ],
+   "id": 22
+  },
+  {
+   "type": "timeseries",
+   "title": "Inbox backlog",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 39
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (state) (harness_event_inbox_backlog)",
+     "legendFormat": "{{state}}",
+     "refId": "A"
+    },
+    {
+     "expr": "max by (state) (harness_event_inbox_oldest_seconds)",
+     "legendFormat": "oldest {{state}} (s)",
+     "refId": "B"
+    }
+   ],
+   "id": 23
+  },
+  {
+   "type": "row",
+   "title": "Actions & World",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 47
+   },
+   "collapsed": false,
+   "panels": [],
+   "id": 24
+  },
+  {
+   "type": "timeseries",
+   "title": "Preflight results",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 48
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (result) (rate(harness_action_preflight_total[15m]))",
+     "legendFormat": "{{result}}",
+     "refId": "A"
+    }
+   ],
+   "id": 25
+  },
+  {
+   "type": "timeseries",
+   "title": "Effect verification p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 48
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le,state) (rate(harness_action_verify_seconds_bucket[1h])))",
+     "legendFormat": "{{state}}",
+     "refId": "A"
+    }
+   ],
+   "id": 26
+  },
+  {
+   "type": "timeseries",
+   "title": "Snapshot latency / fact age p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 48
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(harness_world_snapshot_seconds_bucket[5m])))",
+     "legendFormat": "snapshot (s)",
+     "refId": "A"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum by (le,trust) (rate(harness_world_fact_staleness_seconds_bucket[15m])))",
+     "legendFormat": "fact age {{trust}} (s)",
+     "refId": "B"
+    }
+   ],
+   "id": 27
+  },
+  {
+   "type": "row",
+   "title": "Runtime",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 56
+   },
+   "collapsed": false,
+   "panels": [],
+   "id": 28
+  },
+  {
+   "type": "timeseries",
+   "title": "Model cost (USD/h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 57
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (model) (rate(harness_model_cost_usd_total[1h])) * 3600",
+     "legendFormat": "{{model}}",
+     "refId": "A"
+    }
+   ],
+   "id": 29
+  },
+  {
+   "type": "timeseries",
+   "title": "Tool calls by outcome",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 57
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum by (outcome) (rate(harness_tool_calls_total[5m]))",
+     "legendFormat": "{{outcome}}",
+     "refId": "A"
+    }
+   ],
+   "id": 30
+  },
+  {
+   "type": "timeseries",
+   "title": "Step duration p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 57
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le,kind) (rate(harness_step_duration_seconds_bucket[5m])))",
+     "legendFormat": "{{kind}}",
+     "refId": "A"
+    }
+   ],
+   "id": 31
+  }
+ ]
+}

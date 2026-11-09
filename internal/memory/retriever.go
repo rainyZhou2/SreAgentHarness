@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/domain"
@@ -45,6 +46,12 @@ type Retriever struct {
 	Embedder  Embedder
 	Artifacts artifact.Store
 	TopK      int
+	// Env derives the retrieval environment of a run (environment,
+	// services, component versions) when ctx carries none; memories whose
+	// applicability excludes it are not recalled (§14.3 ②).
+	Env func(ctx context.Context, tenantID, runID string) (Env, bool)
+	// Now is the clock (tests).
+	Now func() time.Time
 }
 
 func uniqueStrings(in []string, max int) []string {
@@ -85,6 +92,8 @@ type SearchResult struct {
 	Scores     map[string]float64
 	Branches   map[string][]string
 	Conflicts  map[string][]string
+	// Inapplicable lists memories filtered out by applicability, with why.
+	Inapplicable map[string]string
 }
 
 // Search runs the retrieval pipeline for a query: hard filters (tenant,
@@ -183,13 +192,33 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 	for _, s := range vecS {
 		vec = append(vec, s.id)
 	}
+	env, hasEnv := EnvFrom(ctx)
+	if !hasEnv && r.Env != nil {
+		env, hasEnv = r.Env(ctx, tenantID, runID)
+	}
+	if !hasEnv {
+		env = Env{Services: services}
+	} else if len(env.Services) == 0 {
+		env.Services = services
+	}
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	inapplicable := map[string]string{}
 	fused := RRF(fts, vec, graph)
 	for id, score := range fused {
+		if ok, why := byID[id].Applies(env, now); !ok {
+			inapplicable[id] = why
+			delete(fused, id)
+			continue
+		}
 		affinity := shardW[id]
 		if affinity > 1 {
 			affinity = 1
 		}
-		fused[id] = score * (1 + 0.25*affinity) * ReinforcementBoost(byID[id].Reinforcements)
+		fused[id] = score * (1 + 0.25*affinity) * ReinforcementBoost(byID[id].Reinforcements) *
+			OutcomeBoost(byID[id].Verification)
 	}
 	ids := make([]string, 0, len(fused))
 	for id := range fused {
@@ -229,7 +258,7 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 		sort.Strings(branches[id])
 	}
 	return SearchResult{Query: query, Service: service, Deps: deps, Shards: shards, Candidates: len(cands),
-		Kept: kept, Scores: fused, Branches: branches, Conflicts: conflicts}, nil
+		Kept: kept, Scores: fused, Branches: branches, Conflicts: conflicts, Inapplicable: inapplicable}, nil
 }
 
 // personal returns the run initiator's personal memories (none when the

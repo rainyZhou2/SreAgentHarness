@@ -13,6 +13,7 @@ import (
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/orchestration"
+	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/world"
@@ -35,7 +36,7 @@ func newEnv(t *testing.T) *env {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := &API{Store: s, Service: &orchestration.Service{Store: s, Catalog: cat, Log: quiet},
 		Ingestor: &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Log: quiet},
-		World:    &world.Service{Store: s}, Log: quiet}
+		World:    &world.Service{Store: s}, Log: quiet, Postmortems: &postmortem.Builder{Ledger: s}}
 	mux := http.NewServeMux()
 	a.Register(mux)
 	// Test auth: X-Tenant / X-Roles headers become the principal (the real
@@ -174,5 +175,107 @@ func TestWorkAPI(t *testing.T) {
 	// Actions are disabled in this server.
 	if code, _, _ := e.do("POST", "/v1/actions/x/approve", "t1", "approver", map[string]any{}, nil); code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled actions: %d", code)
+	}
+}
+
+// §17.4 over the API: replan with an amended goal keeps the goal history;
+// assignments and goals are readable per Work.
+func TestGoalAmendmentAndAssignments(t *testing.T) {
+	e := newEnv(t)
+	body := map[string]any{"kind": "incident", "title": "checkout 5xx",
+		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"}}}
+	code, w1, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "g1"})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, w1)
+	}
+	id := w1["id"].(string)
+	amend := map[string]any{"type": "replan", "reason": "widen scope", "payload": map[string]any{
+		"goal": map[string]any{"intent": "mitigate", "description": "include payments",
+			"subject_refs": []string{"service://prod/checkout", "service://prod/payments"}}}}
+	code, w2, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", amend, map[string]string{"Idempotency-Key": "r1"})
+	if code != http.StatusOK || w2["generation"].(float64) != 2 {
+		t.Fatalf("replan with goal: %d %v", code, w2)
+	}
+	code, goals, _ := e.do("GET", "/v1/works/"+id+"/goals", "t1", "viewer", nil, nil)
+	items, _ := goals["items"].([]any)
+	if code != 200 || len(items) != 2 {
+		t.Fatalf("goals: %d %v", code, goals)
+	}
+	g2 := items[1].(map[string]any)
+	if g2["generation"].(float64) != 2 || g2["goal"].(map[string]any)["description"] != "include payments" {
+		t.Fatalf("generation 2 goal: %v", g2)
+	}
+	bad := map[string]any{"type": "replan", "payload": map[string]any{"goal": map[string]any{"intent": ""}}}
+	if code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", bad, map[string]string{"Idempotency-Key": "r2"}); code != http.StatusBadRequest {
+		t.Fatalf("invalid amended goal: %d", code)
+	}
+	code, as, _ := e.do("GET", "/v1/works/"+id+"/assignments", "t1", "viewer", nil, nil)
+	if code != 200 || as["items"] == nil {
+		t.Fatalf("assignments: %d %v", code, as)
+	}
+	if code, _, _ := e.do("GET", "/v1/works/"+id+"/goals", "t2", "viewer", nil, nil); code != http.StatusNotFound {
+		t.Fatalf("goals across tenants: %d", code)
+	}
+}
+
+func TestPostmortemRoutes(t *testing.T) {
+	e := newEnv(t)
+	body := map[string]any{"kind": "incident", "title": "checkout 5xx",
+		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"},
+			"labels": map[string]string{"environment": "prod"}}}
+	_, w1, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "pm"})
+	id := w1["id"].(string)
+
+	code, rep, _ := e.do("GET", "/v1/works/"+id+"/postmortem", "t1", "viewer", nil, nil)
+	if code != 200 || rep["work_id"] != id || rep["root_cause"] != nil {
+		t.Fatalf("report: %d %v", code, rep)
+	}
+	if code, _, _ := e.do("GET", "/v1/works/"+id+"/postmortem", "t2", "viewer", nil, nil); code != http.StatusNotFound {
+		t.Fatalf("tenant isolation: %d", code)
+	}
+	// Markdown rendering.
+	r := httptest.NewRequest("GET", "/v1/works/"+id+"/postmortem?format=markdown", nil)
+	r.Header.Set("X-Tenant", "t1")
+	r.Header.Set("X-Roles", "viewer")
+	rec := httptest.NewRecorder()
+	e.mux.ServeHTTP(rec, r)
+	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/markdown") ||
+		!strings.Contains(rec.Body.String(), "# Postmortem: checkout 5xx") {
+		t.Fatalf("markdown: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Only closed Works get a postmortem Work, and only operators open one.
+	if code, _, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "operator", nil, nil); code != http.StatusConflict {
+		t.Fatalf("open Work: %d", code)
+	}
+	if code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", map[string]any{"type": work.CmdCancel},
+		map[string]string{"Idempotency-Key": "c", "If-Match": `"1"`}); code != 200 {
+		t.Fatalf("cancel: %d", code)
+	}
+	if code, _, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "viewer", nil, nil); code != http.StatusForbidden {
+		t.Fatalf("viewer: %d", code)
+	}
+	code, pm, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "operator", nil, nil)
+	if code != http.StatusCreated {
+		t.Fatalf("create postmortem: %d %v", code, pm)
+	}
+	goal := pm["goal"].(map[string]any)
+	labels := goal["labels"].(map[string]any)
+	tpl := pm["template"].(map[string]any)
+	if pm["kind"] != "request" || tpl["id"] != work.TemplatePostmortem || labels["source_work"] != id || labels["environment"] != "prod" ||
+		!strings.Contains(goal["description"].(string), "Root cause") {
+		t.Fatalf("postmortem Work: %v", pm)
+	}
+	// Idempotent per source Work.
+	code, again, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "operator", nil, nil)
+	if code != http.StatusOK || again["id"] != pm["id"] {
+		t.Fatalf("replay: %d", code)
+	}
+	// A postmortem Work does not get its own postmortem.
+	pmID := pm["id"].(string)
+	e.do("POST", "/v1/works/"+pmID+"/commands", "t1", "operator", map[string]any{"type": work.CmdCancel},
+		map[string]string{"Idempotency-Key": "c2", "If-Match": `"1"`})
+	if code, _, _ := e.do("POST", "/v1/works/"+pmID+"/postmortem", "t1", "operator", nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("postmortem of postmortem: %d", code)
 	}
 }

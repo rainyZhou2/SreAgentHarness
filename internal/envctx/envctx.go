@@ -51,6 +51,9 @@ type Gatherer struct {
 	MaxFacts   int           // default 30
 	MaxSummary int           // runes per summary (default 600)
 	Log        *slog.Logger
+	// OnFacts, when set, receives the normalized facts of every gather
+	// (e.g. to keep them as World history). It must not block for long.
+	OnFacts func(ctx context.Context, q Query, facts []domain.ContextFact)
 }
 
 // Gather returns at most MaxFacts facts. Provider errors are logged and do
@@ -137,6 +140,9 @@ func (g *Gatherer) Gather(ctx context.Context, q Query) []domain.ContextFact {
 	})
 	if len(out) > maxFacts {
 		out = out[:maxFacts]
+	}
+	if g.OnFacts != nil && len(out) > 0 {
+		g.OnFacts(ctx, q, out)
 	}
 	return out
 }

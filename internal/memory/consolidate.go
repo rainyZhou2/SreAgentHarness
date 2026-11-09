@@ -32,6 +32,8 @@ type NewMemory struct {
 	Environment  *string
 	CreatedBy    string
 	ExpiresAt    *time.Time
+	// Applicability bounds reuse (nil = unrestricted).
+	Applicability *Applicability
 	// Shards are additional retrieval partitions (capability, run, incident).
 	// CreateMemory always adds the scope-derived shard.
 	Shards []domain.MemoryShard

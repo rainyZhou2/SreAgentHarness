@@ -24,6 +24,9 @@ type Service struct {
 	// AllowInlineTemplates lets callers submit a template body instead of a
 	// catalog id (admin-only at the HTTP layer).
 	AllowInlineTemplates bool
+	Metrics              *Metrics
+	// OnClose is called after a command closed a Work (see Orchestrator).
+	OnClose func(ctx context.Context, w work.Work)
 }
 
 func (s *Service) log() *slog.Logger {
@@ -108,6 +111,9 @@ type CommandPayload struct {
 	// confirm: satisfied | not_satisfied.
 	Verdict string `json:"verdict,omitempty"`
 	Comment string `json:"comment,omitempty"`
+	// replan/reopen: amended goal for the new generation (RFC §6.3: the
+	// goal may change, earlier generations keep theirs in work_goals).
+	Goal *work.GoalSpec `json:"goal,omitempty"`
 }
 
 // Command applies an operator command. Commands are idempotent on the key:
@@ -121,7 +127,7 @@ func (s *Service) Command(ctx context.Context, req CommandRequest) (work.Work, e
 	}
 	var p CommandPayload
 	if len(req.Payload) > 0 {
-		if len(req.Payload) > 16<<10 {
+		if len(req.Payload) > 64<<10 {
 			return work.Work{}, fmt.Errorf("%w: payload too large", work.ErrInvalid)
 		}
 		if err := json.Unmarshal(req.Payload, &p); err != nil {
@@ -191,6 +197,12 @@ func (s *Service) Command(ctx context.Context, req CommandRequest) (work.Work, e
 		}
 		gen := cur.Generation + 1
 		m.Stage, m.Generation, m.ClearState, m.CancelAllWatches = &idx, &gen, true, true
+		if p.Goal != nil {
+			if err := p.Goal.Normalize(); err != nil {
+				return work.Work{}, err
+			}
+			m.Goal = p.Goal
+		}
 		if req.Type == work.CmdReplan {
 			m.AddReplans = 1
 		}
@@ -239,6 +251,21 @@ func (s *Service) Command(ctx context.Context, req CommandRequest) (work.Work, e
 	w, err := s.Store.ApplyWork(ctx, m)
 	if err != nil {
 		return w, err
+	}
+	if w.Status != cur.Status {
+		s.Metrics.transition(string(w.Kind), string(w.Status))
+		s.Metrics.closed(w, now)
+		if w.Status.Terminal() && s.OnClose != nil {
+			s.OnClose(ctx, w)
+		}
+	}
+	switch {
+	case req.Type == work.CmdReplan:
+		s.Metrics.replan("operator")
+	case req.Type == work.CmdReopen:
+		s.Metrics.replan("reopen")
+	case req.Type == work.CmdResolve && p.Retry:
+		s.Metrics.replan("retry")
 	}
 	if req.Type == work.CmdCancel {
 		s.cancelRuns(ctx, w, req.ActorID)

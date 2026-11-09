@@ -89,6 +89,14 @@ func (r *Registry) Collect(name, help string, fn func(ctx context.Context, emit 
 	r.mu.Unlock()
 }
 
+// Describe sets the help text of a gauge emitted by a collector registered
+// under another name (one collector may emit several gauges).
+func (r *Registry) Describe(name, help string) {
+	r.mu.Lock()
+	r.gaugeHelp[name] = help
+	r.mu.Unlock()
+}
+
 func (f *family) get(lv []string) *series {
 	if len(lv) != len(f.labels) {
 		panic(fmt.Sprintf("metric %s: want %d labels, got %d", f.name, len(f.labels), len(lv)))

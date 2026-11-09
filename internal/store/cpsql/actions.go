@@ -13,9 +13,44 @@ import (
 )
 
 var (
-	_ action.Store   = (*Store)(nil)
-	_ evidence.Store = (*Store)(nil)
+	_ action.Store        = (*Store)(nil)
+	_ evidence.Store      = (*Store)(nil)
+	_ action.EffectLedger = (*Store)(nil)
 )
+
+// KernelEffects reads the kernel's tool effect ledger (PostgreSQL; the
+// SQLite control plane has no kernel tables and returns none).
+func (s *Store) KernelEffects(ctx context.Context, tenantID string, targets []string, openOnly bool, limit int) ([]action.KernelEffect, error) {
+	if s.d != Postgres || len(targets) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := `SELECT id::text, run_id::text, step_id::text, target, state, external_operation_id, last_check_at
+		FROM external_tool_effects WHERE tenant_id=$1 AND target = ANY($2)`
+	if openOnly {
+		q += ` AND state IN ('PREPARED','DISPATCHED','UNKNOWN')`
+	}
+	q += ` ORDER BY last_check_at DESC NULLS LAST, id DESC LIMIT $3`
+	rows, err := s.db.QueryContext(ctx, q, tenantID, targets, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []action.KernelEffect
+	for rows.Next() {
+		var e action.KernelEffect
+		var op ns
+		var at ts
+		if err := rows.Scan(&e.ID, &e.RunID, &e.StepID, &e.Target, &e.State, &op, &at); err != nil {
+			return nil, err
+		}
+		e.ExternalOperationID, e.LastCheckAt = op.S(), at.ptr()
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
 
 func scanRecord(r rowScanner) (action.Record, error) {
 	var body jb

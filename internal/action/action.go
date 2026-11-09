@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-sre-harness/internal/cpkit"
@@ -239,6 +240,14 @@ func (p *Plan) Seal() {
 	p.EffectKey = "action:" + p.TenantID + ":" + p.PlanHash[7:39]
 }
 
+// BreakGlassGrant records an emergency release of a held action.
+type BreakGlassGrant struct {
+	Actor         string    `json:"actor"`
+	Justification string    `json:"justification"`
+	IntentHash    string    `json:"intent_hash"`
+	At            time.Time `json:"at"`
+}
+
 // Approval is one decision on an action.
 type Approval struct {
 	ApproverID string    `json:"approver_id"`
@@ -263,6 +272,9 @@ type Record struct {
 	DispatchedAt   *time.Time          `json:"dispatched_at,omitempty"`
 	UpdatedAt      time.Time           `json:"updated_at"`
 	CompensationID string              `json:"compensation_id,omitempty"`
+	// BreakGlass is set when the action was released by an emergency
+	// approval instead of the regular approval quorum.
+	BreakGlass *BreakGlassGrant `json:"break_glass,omitempty"`
 	// MayHaveDispatched is true once DISPATCHED was committed: the external
 	// call may have reached the downstream even if no result was recorded.
 	MayHaveDispatched bool `json:"may_have_dispatched"`
@@ -294,6 +306,48 @@ type Store interface {
 	LockTarget(ctx context.Context, tenantID, targetRef, actionID string, until, now time.Time) (bool, string, error)
 	UnlockTarget(ctx context.Context, tenantID, targetRef, actionID string) error
 }
+
+// KernelEffect is an entry of the kernel's tool effect ledger
+// (external_tool_effects): a side-effecting tool call made by an agent run.
+type KernelEffect struct {
+	ID                  string     `json:"id"`
+	RunID               string     `json:"run_id"`
+	StepID              string     `json:"step_id"`
+	Target              string     `json:"target"`
+	State               string     `json:"state"` // PREPARED | DISPATCHED | CONFIRMED | UNKNOWN | COMPENSATED
+	ExternalOperationID string     `json:"external_operation_id,omitempty"`
+	LastCheckAt         *time.Time `json:"last_check_at,omitempty"`
+}
+
+// Open reports whether the effect may still change the target.
+func (e KernelEffect) Open() bool {
+	return e.State == "PREPARED" || e.State == "DISPATCHED" || e.State == "UNKNOWN"
+}
+
+// EffectLedger reads the kernel's effect ledger. Work actions and agent
+// tool calls are two ledgers over the same resources (RFC §17.4); the
+// runtime consults this one so an action never dispatches over an effect
+// whose result is not known yet.
+type EffectLedger interface {
+	// KernelEffects lists effects on any of targets; openOnly limits the
+	// result to PREPARED, DISPATCHED and UNKNOWN effects.
+	KernelEffects(ctx context.Context, tenantID string, targets []string, openOnly bool, limit int) ([]KernelEffect, error)
+}
+
+// EffectTargets are the kernel effect targets a resource ref corresponds
+// to: the kernel keys effects by the tool's target arguments joined with
+// "/" (tools.Target), e.g. "prod/checkout" for deployment://prod/checkout.
+func EffectTargets(ref string) []string {
+	out := []string{ref}
+	if i := strings.Index(ref, "://"); i > 0 && i+3 < len(ref) {
+		out = append(out, ref[i+3:])
+	}
+	return out
+}
+
+// ErrPendingEffect blocks a dispatch while a kernel effect on the same
+// target is unresolved.
+var ErrPendingEffect = errors.New("a kernel tool effect on the target is unresolved")
 
 func errState(r Record, want ...State) error {
 	return fmt.Errorf("%w: action %s is %s (want %v)", ErrInvalidState, r.ID, r.State, want)

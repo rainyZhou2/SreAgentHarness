@@ -47,6 +47,10 @@ type Memory struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 	Embedding        []float32  `json:"-"`
 	EmbeddingModel   string     `json:"-"`
+	// Applicability bounds reuse (§14.2); Verification is the memory's
+	// machine-verified outcome record.
+	Applicability *Applicability `json:"applicability,omitempty"`
+	Verification  Verification   `json:"verification"`
 }
 
 // ---------- write-path safety (§8.4) ----------

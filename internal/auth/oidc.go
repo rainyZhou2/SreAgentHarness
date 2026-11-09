@@ -22,13 +22,16 @@ import (
 
 // OIDCConfig verifies JWT access/ID tokens issued by an OIDC provider.
 type OIDCConfig struct {
-	Issuer       string        `json:"issuer"`
-	Audience     string        `json:"audience"`
-	JWKSURL      string        `json:"jwks_url,omitempty"`      // default: from discovery
-	TenantClaim  string        `json:"tenant_claim,omitempty"`  // default "tenant_id"
-	RolesClaim   string        `json:"roles_claim,omitempty"`   // default "roles"
-	SubjectClaim string        `json:"subject_claim,omitempty"` // default "sub"
-	Algorithms   []string      `json:"algorithms,omitempty"`    // default RS256, ES256
+	Issuer       string `json:"issuer"`
+	Audience     string `json:"audience"`
+	JWKSURL      string `json:"jwks_url,omitempty"`      // default: from discovery
+	TenantClaim  string `json:"tenant_claim,omitempty"`  // default "tenant_id"
+	RolesClaim   string `json:"roles_claim,omitempty"`   // default "roles"
+	SubjectClaim string `json:"subject_claim,omitempty"` // default "sub"
+	// ScopeClaim names an optional object claim with the Scope fields
+	// (event_sources, event_types, resources, max_risk); default "harness_scope".
+	ScopeClaim   string        `json:"scope_claim,omitempty"`
+	Algorithms   []string      `json:"algorithms,omitempty"` // default RS256, ES256
 	HTTP         *http.Client  `json:"-"`
 	RefreshEvery time.Duration `json:"-"`
 }
@@ -53,6 +56,9 @@ func NewOIDC(cfg OIDCConfig) (*OIDC, error) {
 	}
 	if cfg.SubjectClaim == "" {
 		cfg.SubjectClaim = "sub"
+	}
+	if cfg.ScopeClaim == "" {
+		cfg.ScopeClaim = "harness_scope"
 	}
 	if len(cfg.Algorithms) == 0 {
 		cfg.Algorithms = []string{"RS256", "ES256"}
@@ -94,6 +100,20 @@ func (o *OIDC) Authenticate(r *http.Request) (Principal, bool, error) {
 				p.Roles = append(p.Roles, Role(s))
 			}
 		}
+	}
+	if raw, ok := claims[o.cfg.ScopeClaim]; ok && raw != nil {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return Principal{}, false, fmt.Errorf("scope claim: %w", err)
+		}
+		var sc Scope
+		if err := json.Unmarshal(b, &sc); err != nil {
+			return Principal{}, false, fmt.Errorf("scope claim: %w", err)
+		}
+		if err := sc.Validate(); err != nil {
+			return Principal{}, false, err
+		}
+		p.Scope = &sc
 	}
 	return p, true, nil
 }
