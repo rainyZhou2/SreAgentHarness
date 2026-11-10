@@ -115,6 +115,16 @@ type Stage struct {
 	// OnTimeout applies to wait/verify/confirm stages: continue | block | fail
 	// | <stage id>. Default block.
 	OnTimeout string `json:"on_timeout,omitempty"`
+	// EvidencePlan tunes evidence planning for run and agents stages
+	// (RFC §12.4; on by default once the Work has hypotheses).
+	EvidencePlan *EvidencePlanSpec `json:"evidence_plan,omitempty"`
+}
+
+// EvidencePlanSpec tunes the read-only checks planned for a stage's runs.
+type EvidencePlanSpec struct {
+	Disabled bool `json:"disabled,omitempty"`
+	// MaxChecks is the number of checks planned per run (default 3, max 8).
+	MaxChecks int `json:"max_checks,omitempty"`
 }
 
 // Limits bound a Work (RFC §20.3). Zero values take the defaults.
@@ -266,6 +276,14 @@ func (s *Stage) normalize(l *Limits) error {
 	for _, set := range []bool{s.Run != nil, len(s.Agents) > 0, s.Wait != nil, s.Action != nil, s.Verify != nil, s.Confirm != nil} {
 		if set {
 			n++
+		}
+	}
+	if p := s.EvidencePlan; p != nil {
+		if s.Type != StageRun && s.Type != StageAgents {
+			return fmt.Errorf("evidence_plan only applies to run and agents stages")
+		}
+		if p.MaxChecks < 0 || p.MaxChecks > 8 {
+			return fmt.Errorf("evidence_plan.max_checks must be within [0,8]")
 		}
 	}
 	need := map[StageType]bool{StageRun: s.Run != nil, StageAgents: len(s.Agents) > 0, StageWait: s.Wait != nil,

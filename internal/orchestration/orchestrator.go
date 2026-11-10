@@ -71,6 +71,10 @@ type Orchestrator struct {
 	// every run a stage starts (label world_snapshot), so all agents of a
 	// stage reason over the same facts and the run can be replayed.
 	World *world.Service
+	// Checks enables evidence planning (RFC §12.4): before a run or agents
+	// stage starts, the read-only checks that best separate the Work's
+	// hypotheses are ranked within the run's tool and policy constraints.
+	Checks CheckSource
 }
 
 // SetMaxDataClass sets the model data-class limit.
@@ -95,7 +99,7 @@ func (o *Orchestrator) pinSnapshot(ctx context.Context, w *work.Work) string {
 // modelGoal renders a run goal for the model: untrusted values are fenced
 // as data, credentials and personal data are redacted, and Works whose
 // data class exceeds the provider limit are refused.
-func (o *Orchestrator) modelGoal(tpl string, w *work.Work, summaries map[string]string) (string, error) {
+func (o *Orchestrator) modelGoal(tpl string, w *work.Work, summaries map[string]string, extra string) (string, error) {
 	limit := dataguard.Confidential
 	if o.maxClassSet {
 		limit = o.MaxDataClass
@@ -109,7 +113,7 @@ func (o *Orchestrator) modelGoal(tpl string, w *work.Work, summaries map[string]
 			return v
 		}
 		return untrusted.Wrap("source=work."+name+" trust=T4", v).Text
-	})
+	}) + extra
 	out, rep, err := dataguard.ForModel(goal, class, limit)
 	if err != nil {
 		o.Metrics.GuardDenied("data_class", class.String())
@@ -620,12 +624,17 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		}
 		var links []work.RunLink
 		snapID := d.o.pinSnapshot(ctx, w)
-		for _, a := range specs {
-			goal, err := d.o.modelGoal(a.Goal, w, summaries)
+		keys := make([]string, len(specs))
+		for i, a := range specs {
+			keys[i] = fmt.Sprintf("work:%s:g%d:%s:%s", w.ID, w.Generation, stage.ID, a.Role)
+		}
+		plan := d.planEvidence(ctx, stage, specs, keys)
+		for i, a := range specs {
+			goal, err := d.o.modelGoal(a.Goal, w, summaries, plan.text[a.Role])
 			if err != nil {
 				return d.fail(stage, work.OnFailBlock, err.Error()), nil
 			}
-			key := fmt.Sprintf("work:%s:g%d:%s:%s", w.ID, w.Generation, stage.ID, a.Role)
+			key := keys[i]
 			labels := map[string]string{"work_id": w.ID, "work_stage": stage.ID}
 			if snapID != "" {
 				labels[SnapshotLabel] = snapID
@@ -648,6 +657,9 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		m := work.Mutation{StageState: mustJSON(st), Links: links, AddRuns: len(links),
 			Events: []work.NewEvent{{Type: "work.runs_started", Payload: map[string]any{"stage_id": stage.ID,
 				"runs": st.Runs}}}}
+		if plan.event != nil {
+			m.Events = append(m.Events, *plan.event)
+		}
 		if w.Status != work.StatusActive {
 			m.Status = statusPtr(work.StatusActive)
 		}
@@ -746,6 +758,9 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 	}
 	payload := map[string]any{"summary": summarize(rep), "verdict": rep.Verdict, "conflicts": rep.Conflicts,
 		"gaps": rep.Gaps, "cost_usd": rep.CostUSD, "proposed": proposed}
+	if len(rep.NextChecks) > 0 {
+		payload["next_checks"] = rep.NextChecks
+	}
 	if max := w.Goal.Constraints.MaxCostUSD; max > 0 && float64(w.CostMicros+cost)/1e6 > max {
 		s := d.block(fmt.Sprintf("cost budget exceeded (%.2f USD > %.2f USD)", float64(w.CostMicros+cost)/1e6, max))
 		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost

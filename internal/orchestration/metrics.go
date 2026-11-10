@@ -43,6 +43,8 @@ type Metrics struct {
 	queueClaimed   obs.Counter
 	poolDeferrals  obs.Counter
 	limitHits      obs.Counter
+	plans          obs.Counter
+	planExcluded   obs.Counter
 }
 
 var (
@@ -100,6 +102,10 @@ func NewMetrics(reg *obs.Registry, store *cpsql.Store) *Metrics {
 		queueClaimed: reg.Counter("harness_work_queue_claimed_total", "Works claimed for processing, by scheduling queue.", "queue"),
 		poolDeferrals: reg.Counter("harness_pool_deferred_total",
 			"Work steps postponed because a resource pool was full (model_runs, actions).", "pool"),
+		plans: reg.Counter("harness_evidence_plan_total",
+			"Evidence planning passes by result (planned, empty, no_hypotheses, error).", "result"),
+		planExcluded: reg.Counter("harness_evidence_check_excluded_total",
+			"Tools kept out of evidence plans by the framework constraints, by reason.", "reason"),
 		limitHits: reg.Counter("harness_work_limit_total",
 			"Changes refused or dropped by a Work bound (RFC §20.3), by limit.", "limit"),
 	}
@@ -132,6 +138,23 @@ func (m *Metrics) poolDeferred(pool string) {
 		return
 	}
 	m.poolDeferrals.Inc(pool)
+}
+
+func (m *Metrics) evidencePlan(result string) {
+	if m != nil {
+		m.plans.Inc(result)
+	}
+}
+
+func (m *Metrics) evidenceExcluded(by map[string]int) {
+	if m == nil {
+		return
+	}
+	for reason, n := range by {
+		for i := 0; i < n; i++ {
+			m.planExcluded.Inc(reason)
+		}
+	}
 }
 
 func (m *Metrics) limit(name string) {

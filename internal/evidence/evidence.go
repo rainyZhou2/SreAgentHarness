@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -64,6 +65,7 @@ type Record struct {
 // Limits.
 const (
 	MaxSummary    = 2000
+	MaxNextChecks = 8
 	MaxClaims     = 32
 	MaxStatement  = 500
 	MaxHypotheses = 50
@@ -203,6 +205,9 @@ type ResultEnvelope struct {
 	Uncertainties []string           `json:"uncertainties,omitempty"`
 	Proposed      json.RawMessage    `json:"proposed_action,omitempty"`
 	FailureReason string             `json:"failure_reason,omitempty"`
+	// NextChecks are tools the run suggests checking next (untrusted: the
+	// evidence planner only uses them to rank tools it already allows).
+	NextChecks []string `json:"next_checks,omitempty"`
 }
 
 // ParseResult reads a kernel run result artifact into an envelope. Unknown
@@ -222,8 +227,9 @@ func ParseResult(runID, role, status string, raw []byte) ResultEnvelope {
 		Loop struct {
 			CostUSD float64 `json:"cost_usd"`
 		} `json:"loop"`
-		Uncertainties []string        `json:"uncertainties"`
-		Proposed      json.RawMessage `json:"proposed_action"`
+		Uncertainties []string          `json:"uncertainties"`
+		Proposed      json.RawMessage   `json:"proposed_action"`
+		NextChecks    []json.RawMessage `json:"next_checks"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		env.Summary = cpkit.Truncate(string(raw), MaxSummary)
@@ -260,6 +266,25 @@ func ParseResult(runID, role, status string, raw []byte) ResultEnvelope {
 	if len(doc.Proposed) > 0 && len(doc.Proposed) <= 16<<10 && json.Valid(doc.Proposed) {
 		env.Proposed = doc.Proposed
 	}
+	// next_checks: ["tool", ...] or [{"tool": "..."}, ...]
+	for _, raw := range doc.NextChecks {
+		if len(env.NextChecks) >= MaxNextChecks {
+			break
+		}
+		var name string
+		if json.Unmarshal(raw, &name) != nil {
+			var obj struct {
+				Tool string `json:"tool"`
+			}
+			if json.Unmarshal(raw, &obj) != nil {
+				continue
+			}
+			name = obj.Tool
+		}
+		if name = strings.TrimSpace(name); name != "" && len(name) <= 128 {
+			env.NextChecks = appendUnique(env.NextChecks, name)
+		}
+	}
 	return env
 }
 
@@ -281,6 +306,9 @@ type MergeReport struct {
 	RequiredFailed []string          `json:"required_failed,omitempty"`
 	Summaries      map[string]string `json:"summaries,omitempty"`
 	CostUSD        float64           `json:"cost_usd"`
+	// NextChecks maps a suggested tool to the share of completed runs that
+	// suggested it.
+	NextChecks map[string]float64 `json:"next_checks,omitempty"`
 }
 
 // MergedHypothesis aggregates one hypothesis across agents.
@@ -317,6 +345,12 @@ func Merge(results []ResultEnvelope) MergeReport {
 			continue
 		}
 		ok++
+		for _, c := range r.NextChecks {
+			if rep.NextChecks == nil {
+				rep.NextChecks = map[string]float64{}
+			}
+			rep.NextChecks[c]++
+		}
 		if r.Summary != "" {
 			rep.Summaries[who] = cpkit.Truncate(r.Summary, 600)
 		}
@@ -383,6 +417,9 @@ func Merge(results []ResultEnvelope) MergeReport {
 		rep.Verdict = "INCONCLUSIVE"
 	default:
 		rep.Verdict = "COMPLETE"
+	}
+	for k, n := range rep.NextChecks {
+		rep.NextChecks[k] = math.Round(n/float64(max(ok, 1))*100) / 100
 	}
 	return rep
 }
