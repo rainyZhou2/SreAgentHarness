@@ -80,6 +80,9 @@ type Flags struct {
 	// default 2160h; "0" keeps forever).
 	InboxPayloadRetention time.Duration
 	InboxRecordRetention  time.Duration
+	// EvidencePlanning ranks read-only checks for run stages (RFC §12.4;
+	// HARNESS_EVIDENCE_PLANNING, default on).
+	EvidencePlanning bool
 }
 
 // FlagsFromEnv reads the flags.
@@ -93,7 +96,7 @@ func FlagsFromEnv(getenv func(string) string) Flags {
 	f := Flags{Engine: b("HARNESS_WORK_ENGINE_ENABLED", false), Shadow: b("HARNESS_EVENT_SHADOW_MODE", true),
 		ActionV2: b("HARNESS_ACTION_V2_ENABLED", false), RequireDistinctApprover: b("HARNESS_REQUIRE_DISTINCT_APPROVER", false),
 		RequireKnownTarget: b("HARNESS_ACTION_REQUIRE_KNOWN_TARGET", false), InlineTemplates: b("HARNESS_WORK_INLINE_TEMPLATES", false),
-		ApprovalTTL: 30 * time.Minute}
+		ApprovalTTL: 30 * time.Minute, EvidencePlanning: b("HARNESS_EVIDENCE_PLANNING", true)}
 	if d, err := time.ParseDuration(getenv("HARNESS_ACTION_APPROVAL_TTL")); err == nil && d > 0 {
 		f.ApprovalTTL = d
 	}
@@ -243,6 +246,9 @@ func New(o Options) (*Engine, error) {
 			Retention: inboxRetention(o.Flags)},
 		API: &workapi.API{Store: o.Store, Service: svc, Ingestor: ing, Actions: rt, World: ws, Clock: clock, Log: log,
 			Audit: o.Server.Audit, Sources: sources},
+	}
+	if o.Flags.EvidencePlanning && o.Server.Tools != nil {
+		e.Orch.Checks = KernelChecks{Server: o.Server}
 	}
 	maxClass := dataguard.Confidential
 	if o.Flags.ModelMaxDataClass != "" {

@@ -66,3 +66,18 @@ func TestParseResultBoundsUntrusted(t *testing.T) {
 		t.Fatal("proposal dropped")
 	}
 }
+
+// next_checks accepts tool names or {"tool": ...} objects, bounded and
+// deduplicated; Merge reports the share of completed runs per suggestion.
+func TestNextChecks(t *testing.T) {
+	raw := []byte(`{"answer":"x","next_checks":["trace.rpc", {"tool":"k8s.cpu"}, "trace.rpc", 42, ""]}`)
+	env := ParseResult("r1", "a", "COMPLETED", raw)
+	if len(env.NextChecks) != 2 || env.NextChecks[0] != "trace.rpc" || env.NextChecks[1] != "k8s.cpu" {
+		t.Fatalf("next checks: %v", env.NextChecks)
+	}
+	other := ParseResult("r2", "b", "COMPLETED", []byte(`{"answer":"y","next_checks":["trace.rpc"]}`))
+	rep := Merge([]ResultEnvelope{env, other})
+	if rep.NextChecks["trace.rpc"] != 1 || rep.NextChecks["k8s.cpu"] != 0.5 {
+		t.Fatalf("merged: %v", rep.NextChecks)
+	}
+}
