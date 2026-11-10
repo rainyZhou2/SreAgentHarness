@@ -305,7 +305,27 @@ var (
 	ErrInvalidTransition   = errors.New("invalid work state transition")                // 422
 	ErrOwnerConflict       = errors.New("run already has an owner work")                // 409
 	ErrLeaseLost           = errors.New("work lease lost")
+	// ErrLimit: a bound of the Work (RFC §20.3) refuses the change.
+	ErrLimit = errors.New("work limit reached") // 409
 )
+
+// LimitError names the bound that refused a change; it matches ErrLimit.
+type LimitError struct {
+	Limit  string // max_watches, max_evidence, max_evidence_bytes, ...
+	Detail string
+}
+
+func (e *LimitError) Error() string   { return "work limit reached: " + e.Limit + " (" + e.Detail + ")" }
+func (e *LimitError) Is(t error) bool { return t == ErrLimit }
+
+// LimitName returns the bound named by err, or "".
+func LimitName(err error) string {
+	var le *LimitError
+	if errors.As(err, &le) {
+		return le.Limit
+	}
+	return ""
+}
 
 // TransitionError explains a refused transition.
 type TransitionError struct {

@@ -342,6 +342,14 @@ func (d *driver) run(ctx context.Context) error {
 			m.ReleaseLease = true
 		}
 		if err := d.apply(ctx, m); err != nil {
+			if name := work.LimitName(err); name != "" {
+				// A bound refused the step: stop here for a human instead of
+				// retrying the same step forever.
+				d.o.Metrics.limit(name)
+				b := d.block(err.Error())
+				b.m.ClearWake, b.m.ReleaseLease = true, true
+				return d.apply(ctx, b.m)
+			}
 			return err
 		}
 		if last {
@@ -596,6 +604,11 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		if w.RunsStarted+len(specs) > w.Template.Limits.MaxRuns {
 			return d.terminate(work.StatusFailed, "max_runs_exceeded"), nil
 		}
+		if lim := w.Template.Limits.MaxCostUSD; lim > 0 && float64(w.CostMicros) >= lim*1e6 {
+			d.o.Metrics.limit("max_cost_usd")
+			return d.terminate(work.StatusFailed, fmt.Sprintf("max_cost_exceeded: spent $%.2f of $%.2f",
+				float64(w.CostMicros)/1e6, lim)), nil
+		}
 		if reason, err := d.o.runBudget(ctx, w, len(specs)); err != nil {
 			return step{}, err
 		} else if reason != "" {
@@ -677,10 +690,17 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			rec, _, err := d.o.Store.AddEvidence(ctx, evidence.Record{TenantID: w.TenantID, WorkID: w.ID,
 				SourceType: evidence.SourceRun, SourceRef: "run://" + r.RunID, Summary: env.Summary, RunID: r.RunID,
 				AgentRole: r.Role, TrustTier: "T4"})
-			if err != nil {
+			switch name := work.LimitName(err); {
+			case name != "":
+				// The evidence budget is spent: the run result stays on the
+				// run link; only the ledger copy is dropped.
+				d.o.Metrics.limit(name)
+				d.o.log().Warn("run evidence dropped", "work_id", w.ID, "run_id", r.RunID, "err", err)
+			case err != nil:
 				return step{}, err
+			default:
+				res.EvidenceRefs = append(res.EvidenceRefs, "evidence:"+rec.ID)
 			}
-			res.EvidenceRefs = append(res.EvidenceRefs, "evidence:"+rec.ID)
 		}
 		linkResults[r.RunID] = res
 		d.o.Metrics.assignment(string(stage.Type), res.Outcome)

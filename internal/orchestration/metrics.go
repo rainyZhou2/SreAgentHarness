@@ -42,6 +42,7 @@ type Metrics struct {
 	effectsBlocked obs.Counter
 	queueClaimed   obs.Counter
 	poolDeferrals  obs.Counter
+	limitHits      obs.Counter
 }
 
 var (
@@ -99,6 +100,8 @@ func NewMetrics(reg *obs.Registry, store *cpsql.Store) *Metrics {
 		queueClaimed: reg.Counter("harness_work_queue_claimed_total", "Works claimed for processing, by scheduling queue.", "queue"),
 		poolDeferrals: reg.Counter("harness_pool_deferred_total",
 			"Work steps postponed because a resource pool was full (model_runs, actions).", "pool"),
+		limitHits: reg.Counter("harness_work_limit_total",
+			"Changes refused or dropped by a Work bound (RFC §20.3), by limit.", "limit"),
 	}
 	if store != nil {
 		registerBacklog(reg, store)
@@ -129,6 +132,12 @@ func (m *Metrics) poolDeferred(pool string) {
 		return
 	}
 	m.poolDeferrals.Inc(pool)
+}
+
+func (m *Metrics) limit(name string) {
+	if m != nil && name != "" {
+		m.limitHits.Inc(name)
+	}
 }
 
 // RegisterPools exports the in-flight slots of the per-replica pools.

@@ -168,7 +168,7 @@ func (in *Ingestor) wouldDo(rec eventing.Record, rules map[string]eventing.Rule,
 	switch {
 	case d == cpsql.CorrCreated:
 		return "create", ""
-	case d == cpsql.CorrAttached:
+	case d == cpsql.CorrAttached, d == cpsql.CorrThrottled:
 		return "attach", ""
 	case d == "watch":
 		return "watch", ""

@@ -6,6 +6,7 @@ package workapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/store/cpsql"
@@ -339,5 +341,16 @@ func TestOperatorEvidence(t *testing.T) {
 	c, list := e.do(caller{user: "v", roles: "viewer"}, "GET", path, nil)
 	if c != http.StatusOK || len(list["items"].([]any)) != 1 {
 		t.Fatalf("list: %d %v", c, list)
+	}
+	// The Work's evidence budget (RFC §20.3) answers 409 once spent.
+	for i := 1; i < work.DefaultMaxEvidence; i++ {
+		if _, _, err := e.store.AddEvidence(e.ctx, evidence.Record{TenantID: "t1", WorkID: a.WorkID, SourceType: evidence.SourceHuman,
+			SourceRef: "api:filler", Summary: fmt.Sprintf("note %d", i), TrustTier: world.TrustUntrusted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ev["summary"] = "one more"
+	if c, out := e.do(caller{user: "oncall", roles: "operator"}, "POST", path, ev); c != http.StatusConflict || out["error"] != "limit_reached" {
+		t.Fatalf("over budget: %d %v", c, out)
 	}
 }

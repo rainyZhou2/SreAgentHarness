@@ -10,6 +10,7 @@ import (
 
 	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/evidence"
+	"go-sre-harness/internal/work"
 )
 
 var (
@@ -272,7 +273,32 @@ func (s *Store) AddEvidence(ctx context.Context, r evidence.Record) (evidence.Re
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO work_evidence (id, tenant_id, work_id, source_type, source_ref,
+		// Bounded per Work (RFC §20.3); locking the Work serializes the
+		// check with concurrent appends.
+		w, err := s.lockWork(ctx, tx, r.TenantID, r.WorkID)
+		if err != nil {
+			return err
+		}
+		size := `length(record)`
+		if s.d == Postgres {
+			size = `octet_length(record::text)`
+		}
+		var n, used int
+		if err := tx.QueryRowContext(ctx, s.q(`SELECT count(*), coalesce(sum(`+size+`), 0) FROM work_evidence
+			WHERE tenant_id=? AND work_id=?`), r.TenantID, r.WorkID).Scan(&n, &used); err != nil {
+			return err
+		}
+		body, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		if lim := w.Template.Limits.Evidence(); n >= lim {
+			return &work.LimitError{Limit: "max_evidence", Detail: fmt.Sprintf("%d records, limit %d", n, lim)}
+		}
+		if lim := w.Template.Limits.EvidenceBytes(); used+len(body) > lim {
+			return &work.LimitError{Limit: "max_evidence_bytes", Detail: fmt.Sprintf("%d + %d bytes, limit %d", used, len(body), lim)}
+		}
+		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO work_evidence (id, tenant_id, work_id, source_type, source_ref,
 			content_hash, supersedes, record, captured_at) VALUES (?,?,?,?,?,?,?,?,?)`),
 			r.ID, r.TenantID, r.WorkID, r.SourceType, r.SourceRef, r.ContentHash, nullStr(r.Supersedes), js(r), s.t(r.CapturedAt))
 		if isUnique(err, "") {

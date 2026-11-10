@@ -84,6 +84,17 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "Works in queue {{ $labels.queue }} have waited over 15m"
+      - alert: HarnessWorkLimitHits
+        expr: increase(harness_work_limit_total[30m]) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "Works hit the {{ $labels.limit }} bound; check for storms or a template limit set too low"
+      - alert: HarnessEventStorm
+        expr: rate(harness_event_ingested_total{decision="attached_throttled"}[5m]) > 1
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Correlated events are being throttled at the Work's max_event_rate"
       - alert: HarnessInboxDeadLetters
         expr: increase(harness_event_ingested_total{decision="failed"}[30m]) > 10 or harness_event_inbox_backlog{state="DEAD"} > 0
         labels: {severity: ticket}
