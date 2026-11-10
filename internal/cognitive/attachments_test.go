@@ -37,15 +37,15 @@ func TestResolveAttachments(t *testing.T) {
 		{StepSeq: 3, Tool: "small"},
 	}}
 	got := ResolveAttachments("t1", in, []domain.Attachment{
-		{Type: "link", URL: "javascript:alert(1)"},               // dropped
-		{Type: "link", URL: "file:///etc/passwd"},                // dropped
-		{Type: "link", URL: "https://u:p@example.com/"},          // dropped (credentials)
-		{Type: "image", URL: "data:image/png;base64,AAAA"},       // dropped
-		{Type: "file", Ref: "obs:step2", Title: "logs.json"},     // resolved
-		{Type: "file", Ref: "obs:step3"},                         // not offloaded: dropped
-		{Type: "file", Ref: "mem://t2/tool-output/x"},            // other tenant: dropped
-		{Type: "image", Ref: handle, MimeType: "image/svg+xml"},  // stored SVG: becomes a file
-		{Type: "html", URL: "https://example.com"},               // unknown type
+		{Type: "link", URL: "javascript:alert(1)"},              // dropped
+		{Type: "link", URL: "file:///etc/passwd"},               // dropped
+		{Type: "link", URL: "https://u:p@example.com/"},         // dropped (credentials)
+		{Type: "image", URL: "data:image/png;base64,AAAA"},      // dropped
+		{Type: "file", Ref: "obs:step2", Title: "logs.json"},    // resolved
+		{Type: "file", Ref: "obs:step3"},                        // not offloaded: dropped
+		{Type: "file", Ref: "mem://t2/tool-output/x"},           // other tenant: dropped
+		{Type: "image", Ref: handle, MimeType: "image/svg+xml"}, // stored SVG: becomes a file
+		{Type: "html", URL: "https://example.com"},              // unknown type
 		{Type: "table", Columns: []string{"a"}, Rows: [][]string{{"1", "2"}, {"3"}}},
 		{Type: "link", URL: " https://example.com/x ", Title: "X"},
 	})

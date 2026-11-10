@@ -19,11 +19,44 @@ var files embed.FS
 // Apply runs every not-yet-applied migration in lexical order, each in its own
 // transaction, under an advisory lock so concurrent processes do not race.
 func Apply(ctx context.Context, pool *pgxpool.Pool) error {
+	return ApplyUntil(ctx, pool, "")
+}
+
+// Versions lists the embedded migration versions in order.
+func Versions() []string {
+	names, _ := fs.Glob(files, "*.sql")
+	sort.Strings(names)
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = strings.TrimSuffix(n, ".sql")
+	}
+	return out
+}
+
+// Source returns the SQL of one migration version.
+func Source(version string) ([]byte, error) { return files.ReadFile(version + ".sql") }
+
+// ApplyUntil applies migrations up to and including version last (empty:
+// all). Upgrade tests use it to build an older schema, seed it, then
+// apply the rest.
+func ApplyUntil(ctx context.Context, pool *pgxpool.Pool, last string) error {
 	names, err := fs.Glob(files, "*.sql")
 	if err != nil {
 		return err
 	}
 	sort.Strings(names)
+	if last != "" {
+		known := false
+		for i, n := range names {
+			if strings.TrimSuffix(n, ".sql") == last {
+				names, known = names[:i+1], true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("unknown migration %q", last)
+		}
+	}
 
 	conn, err := pool.Acquire(ctx)
 	if err != nil {

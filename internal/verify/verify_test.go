@@ -10,8 +10,8 @@ import (
 )
 
 var ev = map[string]Evidence{
-	"obs:step2": {Ref: "obs:step2", Kind: "observation", OK: true, Text: "prom.query → {\"pool_in_use\":100,\"pool_max\":100}"},
-	"obs:step4": {Ref: "obs:step4", Kind: "observation", OK: false, Text: "logs.search → timeout"},
+	"obs:step2":   {Ref: "obs:step2", Kind: "observation", OK: true, Text: "prom.query → {\"pool_in_use\":100,\"pool_max\":100}"},
+	"obs:step4":   {Ref: "obs:step4", Kind: "observation", OK: false, Text: "logs.search → timeout"},
 	"memory:m1@1": {Ref: "memory:m1@1", Kind: "memory", OK: true, Text: "last time it was the pool"},
 }
 

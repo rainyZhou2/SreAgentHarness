@@ -31,12 +31,18 @@ func (f *fakeReasoningStore) GetMemory(_ context.Context, _, id string) (memory.
 	}
 	return memory.Memory{}, domain.ErrNotFound
 }
-func (f *fakeReasoningStore) ListCandidates(context.Context, string, string) ([]eval.Candidate, error) { return nil, nil }
-func (f *fakeReasoningStore) ActiveVersion(context.Context, string, string) (int64, error)          { return 2, nil }
+func (f *fakeReasoningStore) ListCandidates(context.Context, string, string) ([]eval.Candidate, error) {
+	return nil, nil
+}
+func (f *fakeReasoningStore) ActiveVersion(context.Context, string, string) (int64, error) {
+	return 2, nil
+}
 func (f *fakeReasoningStore) ProfileSpec(context.Context, string, string, int64) (json.RawMessage, error) {
 	return json.RawMessage(f.spec), nil
 }
-func (f *fakeReasoningStore) ListCases(context.Context, string, string, string) ([]eval.Case, error) { return nil, nil }
+func (f *fakeReasoningStore) ListCases(context.Context, string, string, string) ([]eval.Case, error) {
+	return nil, nil
+}
 func (f *fakeReasoningStore) ReasoningScore(context.Context, string, string) (reasoning.RunScore, error) {
 	return reasoning.RunScore{}, domain.ErrNotFound
 }

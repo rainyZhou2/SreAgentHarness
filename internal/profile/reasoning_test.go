@@ -1,8 +1,8 @@
 package profile
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )

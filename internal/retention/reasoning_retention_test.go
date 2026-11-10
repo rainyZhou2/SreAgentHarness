@@ -10,13 +10,15 @@ import (
 
 type fakeStore struct{ reasoningCutoff time.Time }
 
-func (f *fakeStore) DeletePublishedOutbox(context.Context, time.Time, int) (int64, error) { return 0, nil }
+func (f *fakeStore) DeletePublishedOutbox(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
 func (f *fakeStore) ExpiredSegments(context.Context, time.Time, int) ([]pg.ExpiredSegment, error) {
 	return nil, nil
 }
-func (f *fakeStore) DeleteSegment(context.Context, pg.ExpiredSegment) error              { return nil }
-func (f *fakeStore) ExpireMemories(context.Context, time.Time, int) (int64, error)       { return 0, nil }
-func (f *fakeStore) DeleteOldAudit(context.Context, time.Time, int) (int64, error)       { return 0, nil }
+func (f *fakeStore) DeleteSegment(context.Context, pg.ExpiredSegment) error        { return nil }
+func (f *fakeStore) ExpireMemories(context.Context, time.Time, int) (int64, error) { return 0, nil }
+func (f *fakeStore) DeleteOldAudit(context.Context, time.Time, int) (int64, error) { return 0, nil }
 func (f *fakeStore) DeleteOldReasoningScores(_ context.Context, c time.Time, _ int) (int64, error) {
 	f.reasoningCutoff = c
 	return 3, nil

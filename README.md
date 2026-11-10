@@ -328,6 +328,22 @@ HARNESS_PG_TEST_URL=postgres://localhost/harness_test go test -race ./...
 harness work-bench run bench/cases
 ```
 
+CI (`.github/workflows/ci.yml`) runs these as hard gates on every pull request:
+
+- **gofmt, go vet** (also with `-tags=integration`).
+- **Unit tests** on SQLite and PostgreSQL, plain and with `-race`.
+- **Migrations are append-only**: `migrations/checksums.sha256` pins every applied file. After adding a migration, record it with `go test ./migrations -run AppendOnly -update-checksums`; editing a recorded migration fails the build.
+- **Upgrade compatibility**: `TestUpgradeKeepsOldRecordsReadable` seeds records at old schema versions (v1.0, the last v1 schema, early v2), upgrades to the latest and reads them back with today's code.
+- **Fault injection** (`go test -tags=integration ./internal/orchestration -run Fault`): three replicas process the same Works while replicas crash mid-pass, commits are lost after they succeeded and the executor times out before or after applying. The gate: every effect is dispatched and applied at most once, nothing needing approval is dispatched without it, every SUCCEEDED Work has a SATISFIED outcome, and the only other end state is BLOCKED on an unknown effect for a human. The run logs its seed; set `HARNESS_CHAOS_SEED` to replay one.
+- **Bench and load**: the benchmark cases, then `harness work-bench load`, which reports p50/p95/p99 and throughput for Work creation, event correlation, wake lag (a Work becoming due until an orchestrator starts it) and world snapshots, and fails when a series breaks `bench/load-budget.json`:
+
+```bash
+harness work-bench load -budget bench/load-budget.json            # temporary SQLite store
+HARNESS_DATABASE_URL=postgres://localhost/scratch harness work-bench load -store postgres -works 2000 -events 20000
+```
+
+Point `-store postgres` at a migrated scratch database: the run writes Works, events and facts under tenant `load`.
+
 PostgreSQL tests (including the v2 control-plane contract tests, which always run on SQLite too) read `HARNESS_PG_TEST_URL` and are skipped when it is unset; use a UTF-8 database, since full-text search on `SQL_ASCII` drops CJK text. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
 
 ```bash

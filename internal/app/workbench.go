@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -21,11 +22,17 @@ const workBenchUsage = `usage:
   harness work-bench run <case.json|dir> [-baseline summary.json] [-out results.json] [-write-baseline summary.json]
   harness work-bench record -tenant <id> -work <id> [-out case.json]     (needs HARNESS_DATABASE_URL)
   harness work-bench replay -tenant <id> -work <id> [-out result.json]   (needs HARNESS_DATABASE_URL)
+  harness work-bench load [-store sqlite|postgres] [-works N] [-events N] [-snapshots N] [-concurrency N]
+                          [-replicas N] [-budget budget.json] [-out report.json]
 
 run executes benchmark cases on a simulated clock against an in-memory
 control plane and exits 1 when a case fails or the summary regresses
 against the baseline. record exports a Work as a replayable case; replay
-records it, runs it and compares the replay with the original scorecard.`
+records it, runs it and compares the replay with the original scorecard.
+load measures p50/p95/p99 of Work creation, event correlation, the wake
+lag of due Works and world snapshots on the real clock, and exits 1 when a
+series breaks the budget. -store postgres uses HARNESS_DATABASE_URL, which
+must be a migrated scratch database: load writes under tenant "load".`
 
 // WorkBench runs the work-bench subcommand and returns the exit code.
 func WorkBench(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
@@ -40,6 +47,15 @@ func WorkBench(ctx context.Context, args []string, getenv func(string) string, s
 	out := fs.String("out", "", "write the JSON output to this file instead of stdout")
 	tenant := fs.String("tenant", "", "tenant id (record, replay)")
 	workID := fs.String("work", "", "Work id (record, replay)")
+	lo := workbench.DefaultLoadOptions()
+	storeKind := fs.String("store", "sqlite", "load: sqlite (temporary file) or postgres (HARNESS_DATABASE_URL)")
+	budget := fs.String("budget", "", "load: JSON budget, e.g. {\"work_create\":{\"p95_ms\":50}}")
+	fs.IntVar(&lo.Works, "works", lo.Works, "load: Works to create")
+	fs.IntVar(&lo.Events, "events", lo.Events, "load: events to ingest")
+	fs.IntVar(&lo.Subjects, "subjects", lo.Subjects, "load: distinct subjects")
+	fs.IntVar(&lo.Snapshots, "snapshots", lo.Snapshots, "load: snapshots to build")
+	fs.IntVar(&lo.Concurrency, "concurrency", lo.Concurrency, "load: concurrent clients")
+	fs.IntVar(&lo.Replicas, "replicas", lo.Replicas, "load: orchestrator replicas")
 	cmd, rest := args[0], args[1:]
 	var path string
 	if cmd == "run" && len(rest) > 0 && rest[0] != "" && rest[0][0] != '-' {
@@ -115,6 +131,8 @@ func WorkBench(ctx context.Context, args []string, getenv func(string) string, s
 			return 1
 		}
 		return 0
+	case "load":
+		return workBenchLoad(ctx, *storeKind, lo, *budget, getenv, stderr, emit)
 	case "record", "replay":
 		if *tenant == "" || *workID == "" {
 			fmt.Fprintln(stderr, workBenchUsage)
@@ -180,4 +198,85 @@ func openControlPlane(ctx context.Context, getenv func(string) string) (*cpsql.S
 		return nil, nil, err
 	}
 	return cpsql.OpenPostgres(pool), pool.Close, nil
+}
+
+func workBenchLoad(ctx context.Context, kind string, opt workbench.LoadOptions, budgetPath string,
+	getenv func(string) string, stderr io.Writer, emit func(any) error) int {
+	var b workbench.LoadBudget
+	if budgetPath != "" {
+		raw, err := os.ReadFile(budgetPath)
+		if err == nil {
+			err = json.Unmarshal(raw, &b)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "work-bench: budget:", err)
+			return 2
+		}
+	}
+	var store *cpsql.Store
+	switch kind {
+	case "sqlite":
+		dir, err := os.MkdirTemp("", "harness-load-")
+		if err != nil {
+			fmt.Fprintln(stderr, "work-bench:", err)
+			return 1
+		}
+		defer os.RemoveAll(dir)
+		s, err := cpsql.OpenSQLite(filepath.Join(dir, "load.db"))
+		if err != nil {
+			fmt.Fprintln(stderr, "work-bench:", err)
+			return 1
+		}
+		defer s.Close()
+		store = s
+	case "postgres":
+		url := getenv("HARNESS_DATABASE_URL")
+		if url == "" {
+			fmt.Fprintln(stderr, "work-bench: HARNESS_DATABASE_URL is required for -store postgres")
+			return 2
+		}
+		cfg, err := pgxpool.ParseConfig(url)
+		if err != nil {
+			fmt.Fprintln(stderr, "work-bench:", err)
+			return 2
+		}
+		cfg.MaxConns = int32(max(opt.Concurrency, 1) + 4*max(opt.Replicas, 1) + 2)
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			fmt.Fprintln(stderr, "work-bench:", err)
+			return 2
+		}
+		defer pool.Close()
+		store = cpsql.OpenPostgres(pool)
+	default:
+		fmt.Fprintln(stderr, "work-bench: -store must be sqlite or postgres")
+		return 2
+	}
+	rep, err := workbench.Load(ctx, store, kind, opt)
+	if err != nil {
+		fmt.Fprintln(stderr, "work-bench:", err)
+		return 1
+	}
+	rep.Violations = b.Check(rep)
+	for _, name := range []string{workbench.LoadWorkCreate, workbench.LoadCorrelation, workbench.LoadWakeLag, workbench.LoadSnapshot} {
+		p := rep.Metrics[name]
+		fmt.Fprintf(stderr, "%-12s n=%-6d p50=%7.2fms p95=%7.2fms p99=%7.2fms max=%7.2fms %6.0f/s errors=%d\n",
+			name, p.Count, p.P50, p.P95, p.P99, p.Max, p.PerSecond, p.Errors)
+	}
+	for _, v := range rep.Violations {
+		fmt.Fprintln(stderr, "BUDGET ", v)
+	}
+	if err := emit(rep); err != nil {
+		fmt.Fprintln(stderr, "work-bench:", err)
+		return 1
+	}
+	if len(rep.Violations) > 0 {
+		return 1
+	}
+	for _, p := range rep.Metrics {
+		if p.Errors > 0 {
+			return 1
+		}
+	}
+	return 0
 }
