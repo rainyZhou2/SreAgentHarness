@@ -314,14 +314,14 @@ HARNESS_PG_TEST_URL=postgres://localhost/harness_test go test -race ./...
 harness work-bench run bench/cases
 ```
 
-CI（`.github/workflows/ci.yml`）在每个 PR 上把以下检查作为硬门禁：
+CI 门禁（RFC §24.3）如下；workflow 文件和 bench 用例只保存在本地，不进仓库：
 
 - **gofmt、go vet**（包括 `-tags=integration`）。
 - **单元测试**：SQLite 与 PostgreSQL，普通模式和 `-race` 各跑一遍。
 - **迁移只能追加**：`migrations/checksums.sha256` 固定了每个已发布迁移的校验和。新增迁移后执行 `go test ./migrations -run AppendOnly -update-checksums` 记录；修改已记录的迁移会让构建失败。
 - **升级兼容**：`TestUpgradeKeepsOldRecordsReadable` 在旧 schema（v1.0、最后一个 v1、早期 v2）写入记录，升级到最新后用当前代码读回。
 - **故障注入**（`go test -tags=integration ./internal/orchestration -run Fault`）：三个副本同时处理同一批 Work，期间随机崩溃、提交成功但返回错误、执行器在生效前或生效后超时。门禁要求：每个副作用最多下发、生效一次；需要审批的动作不会在无审批时下发；每个 SUCCEEDED 的 Work 都有 SATISFIED 结果；其余 Work 只能因“副作用未知”停在 BLOCKED 等人处理。日志会打印随机种子，设置 `HARNESS_CHAOS_SEED` 可复现。
-- **基准与压测**：先跑 bench 用例，再跑 `harness work-bench load`，输出 Work 创建、事件关联、唤醒延迟（Work 到期到被 orchestrator 开始处理）和世界快照的 p50/p95/p99 与吞吐，超出 `bench/load-budget.json` 即失败：
+- **基准与压测**：先跑 bench 用例，再跑 `harness work-bench load`，输出 Work 创建、事件关联、唤醒延迟（Work 到期到被 orchestrator 开始处理）和世界快照的 p50/p95/p99 与吞吐，超出 `-budget` 文件中的预算即失败：
 
 ```bash
 harness work-bench load -budget bench/load-budget.json            # 临时 SQLite

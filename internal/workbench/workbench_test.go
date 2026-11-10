@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,8 +14,19 @@ import (
 	"go-sre-harness/internal/workeval"
 )
 
+// benchDir is the local benchmark suite; it is not checked in, so tests
+// that replay it skip when it is absent.
+func benchDir(t *testing.T) string {
+	t.Helper()
+	const dir = "../../bench/cases"
+	if _, err := os.Stat(dir); err != nil {
+		t.Skip("bench/cases is not present (kept local, not in the repository)")
+	}
+	return dir
+}
+
 func TestShippedSuite(t *testing.T) {
-	cases, err := LoadCases("../../bench/cases")
+	cases, err := LoadCases(benchDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +49,7 @@ func TestShippedSuite(t *testing.T) {
 
 func load(t *testing.T, name string) Case {
 	t.Helper()
-	cs, err := LoadCases("../../bench/cases/" + name)
+	cs, err := LoadCases(benchDir(t) + "/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +111,7 @@ func TestExpectationFailuresAreReported(t *testing.T) {
 }
 
 func TestSuiteAndBaselineGate(t *testing.T) {
-	cases, err := LoadCases("../../bench/cases")
+	cases, err := LoadCases(benchDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

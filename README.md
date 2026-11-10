@@ -330,14 +330,14 @@ HARNESS_PG_TEST_URL=postgres://localhost/harness_test go test -race ./...
 harness work-bench run bench/cases
 ```
 
-CI (`.github/workflows/ci.yml`) runs these as hard gates on every pull request:
+The CI gates (RFC §24.3) are below; the workflow file and the benchmark cases are kept local, not in the repository:
 
 - **gofmt, go vet** (also with `-tags=integration`).
 - **Unit tests** on SQLite and PostgreSQL, plain and with `-race`.
 - **Migrations are append-only**: `migrations/checksums.sha256` pins every applied file. After adding a migration, record it with `go test ./migrations -run AppendOnly -update-checksums`; editing a recorded migration fails the build.
 - **Upgrade compatibility**: `TestUpgradeKeepsOldRecordsReadable` seeds records at old schema versions (v1.0, the last v1 schema, early v2), upgrades to the latest and reads them back with today's code.
 - **Fault injection** (`go test -tags=integration ./internal/orchestration -run Fault`): three replicas process the same Works while replicas crash mid-pass, commits are lost after they succeeded and the executor times out before or after applying. The gate: every effect is dispatched and applied at most once, nothing needing approval is dispatched without it, every SUCCEEDED Work has a SATISFIED outcome, and the only other end state is BLOCKED on an unknown effect for a human. The run logs its seed; set `HARNESS_CHAOS_SEED` to replay one.
-- **Bench and load**: the benchmark cases, then `harness work-bench load`, which reports p50/p95/p99 and throughput for Work creation, event correlation, wake lag (a Work becoming due until an orchestrator starts it) and world snapshots, and fails when a series breaks `bench/load-budget.json`:
+- **Bench and load**: the benchmark cases, then `harness work-bench load`, which reports p50/p95/p99 and throughput for Work creation, event correlation, wake lag (a Work becoming due until an orchestrator starts it) and world snapshots, and fails when a series breaks the `-budget` file:
 
 ```bash
 harness work-bench load -budget bench/load-budget.json            # temporary SQLite store
