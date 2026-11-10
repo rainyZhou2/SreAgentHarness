@@ -31,3 +31,7 @@ coverage.*
 
 # workspace-local MCP/IDE config
 /.comate/
+
+# CI workflow and benchmark data stay local
+/.github/
+/bench/

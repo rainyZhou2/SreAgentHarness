@@ -11,6 +11,9 @@ import (
 )
 
 func TestWorkBenchCLI(t *testing.T) {
+	if _, err := os.Stat("../../bench/cases"); err != nil {
+		t.Skip("bench/cases is not present (kept local, not in the repository)")
+	}
 	ctx := context.Background()
 	env := func(string) string { return "" }
 	dir := t.TempDir()
