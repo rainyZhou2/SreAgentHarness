@@ -364,6 +364,16 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 				return err
 			}
 		}
+		if len(m.Watches) > 0 {
+			var active int
+			if err := tx.QueryRowContext(ctx, s.q(`SELECT count(*) FROM work_watches WHERE tenant_id=? AND work_id=?
+				AND status='ACTIVE'`), w.TenantID, w.ID).Scan(&active); err != nil {
+				return err
+			}
+			if lim := w.Template.Limits.Watches(); active > lim {
+				return &work.LimitError{Limit: "max_watches", Detail: fmt.Sprintf("%d active, limit %d", active, lim)}
+			}
+		}
 		if ev := m.Outcome; ev != nil {
 			if ev.ID == "" {
 				ev.ID = cpkit.NewID()

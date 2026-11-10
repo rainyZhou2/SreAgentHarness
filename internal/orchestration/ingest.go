@@ -158,7 +158,7 @@ func (in *Ingestor) Process(ctx context.Context, rec eventing.Record) error {
 
 func metricDecision(d string) string {
 	switch {
-	case d == cpsql.CorrCreated, d == cpsql.CorrAttached, d == "watch", d == "no_rule", d == "ignored", d == "expired":
+	case d == cpsql.CorrCreated, d == cpsql.CorrAttached, d == cpsql.CorrThrottled, d == "watch", d == "no_rule", d == "ignored", d == "expired":
 		return d
 	case len(d) >= 6 && d[:6] == "shadow":
 		return "shadow"
@@ -246,11 +246,11 @@ func (in *Ingestor) attachPrior(ctx context.Context, rule eventing.Rule, group s
 		w, decision, err := in.Store.Correlate(ctx, cpsql.CorrelateRequest{TenantID: env.TenantID, GroupKey: group,
 			Rule: pr.Name, Window: window, Now: now, EventID: p.InboxID, Payload: map[string]any{"inbox_id": p.InboxID,
 				"type": pe.Type, "source": pe.Source, "subject_ref": pe.SubjectRef, "rule": pr.Name, "lookback": true}})
-		if err != nil || decision != cpsql.CorrAttached {
+		if err != nil || (decision != cpsql.CorrAttached && decision != cpsql.CorrThrottled) {
 			in.log().Warn("lookback: attach failed", "inbox_id", p.InboxID, "decision", decision, "err", err)
 			continue
 		}
-		if err := in.Store.MarkEvent(ctx, env.TenantID, p.InboxID, eventing.StateProcessed, w.ID, cpsql.CorrAttached, "", 1); err != nil {
+		if err := in.Store.MarkEvent(ctx, env.TenantID, p.InboxID, eventing.StateProcessed, w.ID, decision, "", 1); err != nil {
 			in.log().Warn("lookback: mark event failed", "inbox_id", p.InboxID, "err", err)
 		}
 	}

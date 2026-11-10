@@ -198,6 +198,8 @@ const (
 	CorrCreated  = "created"
 	CorrAttached = "attached"
 	CorrNoWork   = "no_open_work"
+	// CorrThrottled: attached past the Work's max_event_rate.
+	CorrThrottled = "attached_throttled"
 )
 
 // CorrelateRequest asks for the Work of a correlation group.
@@ -240,20 +242,42 @@ func (s *Store) Correlate(ctx context.Context, req CorrelateRequest) (work.Work,
 				return err
 			}
 			if !w.Status.Terminal() {
-				if err := s.appendEvents(ctx, tx, &w, "system", "correlator", now, []work.NewEvent{{Type: "work.event_attached",
-					CausationID: req.EventID, Payload: req.Payload}}); err != nil {
+				// Storm guard (RFC §20.3 max_event_rate): past the rate, the
+				// event stays linked through the inbox and the correlation
+				// count, but neither grows the timeline nor wakes the Work;
+				// one work.events_throttled marks each throttled minute.
+				attached, throttled, err := s.recentAttachments(ctx, tx, w, now.Add(-time.Minute))
+				if err != nil {
 					return err
 				}
-				if _, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET last_event_seq=?, wake_at=?, version=version+1,
-					updated_at=? WHERE tenant_id=? AND id=?`), w.LastSeq, s.t(now), s.t(now), w.TenantID, w.ID); err != nil {
-					return err
+				evs := []work.NewEvent{{Type: "work.event_attached", CausationID: req.EventID, Payload: req.Payload}}
+				decision = CorrAttached
+				if lim := w.Template.Limits.EventRate(); attached >= lim {
+					decision, evs = CorrThrottled, nil
+					if !throttled {
+						evs = []work.NewEvent{{Type: "work.events_throttled", CausationID: req.EventID,
+							Payload: map[string]any{"max_event_rate": lim, "window": "1m"}}}
+					}
+				}
+				if len(evs) > 0 {
+					if err := s.appendEvents(ctx, tx, &w, "system", "correlator", now, evs); err != nil {
+						return err
+					}
+					wake := any(s.t(now))
+					if decision == CorrThrottled {
+						wake = nil
+					}
+					if _, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET last_event_seq=?, wake_at=coalesce(?, wake_at),
+						version=version+1, updated_at=? WHERE tenant_id=? AND id=?`), w.LastSeq, wake, s.t(now), w.TenantID, w.ID); err != nil {
+						return err
+					}
+					w.Version++
 				}
 				if _, err := tx.ExecContext(ctx, s.q(`UPDATE work_correlations SET hits=hits+1, last_seen=?, expires_at=?
 					WHERE tenant_id=? AND group_key=?`), s.t(now), s.t(now.Add(req.Window)), req.TenantID, req.GroupKey); err != nil {
 					return err
 				}
-				w.Version++
-				out, decision = w, CorrAttached
+				out = w
 				return nil
 			}
 		}
@@ -403,4 +427,35 @@ func (s *Store) PurgeCorrelations(ctx context.Context, before time.Time, limit i
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// recentAttachments counts the Work's work.event_attached events since
+// `since` and reports whether a work.events_throttled was recorded since
+// then. It reads only the newest events, so a storm costs a bounded scan.
+func (s *Store) recentAttachments(ctx context.Context, tx *sql.Tx, w work.Work, since time.Time) (int, bool, error) {
+	limit := w.Template.Limits.EventRate() + 64
+	rows, err := tx.QueryContext(ctx, s.q(`SELECT type, occurred_at FROM work_events WHERE tenant_id=? AND work_id=?
+		ORDER BY event_seq DESC LIMIT ?`), w.TenantID, w.ID, limit)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	n, throttled := 0, false
+	for rows.Next() {
+		var typ string
+		var at ts
+		if err := rows.Scan(&typ, &at); err != nil {
+			return 0, false, err
+		}
+		if at.T.Before(since) {
+			break
+		}
+		switch typ {
+		case "work.event_attached":
+			n++
+		case "work.events_throttled":
+			throttled = true
+		}
+	}
+	return n, throttled, rows.Err()
 }

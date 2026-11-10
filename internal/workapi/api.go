@@ -304,6 +304,8 @@ func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeErr(w, http.StatusUnprocessableEntity, "idempotency_conflict", "the idempotency key was used with a different request")
 	case errors.As(err, &te), errors.Is(err, work.ErrInvalidTransition):
 		writeErr(w, http.StatusConflict, "invalid_transition", err.Error())
+	case errors.Is(err, work.ErrLimit):
+		writeErr(w, http.StatusConflict, "limit_reached", err.Error())
 	case errors.Is(err, work.ErrOwnerConflict):
 		writeErr(w, http.StatusConflict, "owner_conflict", err.Error())
 	case errors.Is(err, action.ErrInvalidState), errors.Is(err, action.ErrTargetBusy), errors.Is(err, action.ErrPendingEffect):

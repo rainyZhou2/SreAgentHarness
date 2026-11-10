@@ -124,7 +124,27 @@ type Limits struct {
 	MaxDuration cpkit.Duration `json:"max_duration,omitempty"`
 	MaxAgents   int            `json:"max_agents,omitempty"`
 	MaxActions  int            `json:"max_actions,omitempty"`
+	// MaxCostUSD caps the model spend of all the Work's runs together; no
+	// new run starts once it is reached (0 = unlimited; per-run spend is
+	// bounded by the run profile).
+	MaxCostUSD float64 `json:"max_cost_usd,omitempty"`
+	// MaxWatches caps the Work's active watches.
+	MaxWatches int `json:"max_watches,omitempty"`
+	// MaxEvidence and MaxEvidenceBytes cap the evidence records a Work
+	// keeps and their stored size.
+	MaxEvidence      int `json:"max_evidence,omitempty"`
+	MaxEvidenceBytes int `json:"max_evidence_bytes,omitempty"`
+	// MaxEventRate caps correlated events per minute that reach the Work's
+	// timeline and wake it; the rest stay linked in the inbox only.
+	MaxEventRate int `json:"max_event_rate,omitempty"`
 }
+
+// Watches, Evidence, EvidenceBytes and EventRate return the limit or its
+// default, so Works pinned before a limit existed are bounded too.
+func (l Limits) Watches() int       { return defInt(l.MaxWatches, DefaultMaxWatches) }
+func (l Limits) Evidence() int      { return defInt(l.MaxEvidence, DefaultMaxEvidence) }
+func (l Limits) EvidenceBytes() int { return defInt(l.MaxEvidenceBytes, DefaultMaxEvidenceBytes) }
+func (l Limits) EventRate() int     { return defInt(l.MaxEventRate, DefaultMaxEventRate) }
 
 // Defaults.
 const (
@@ -133,7 +153,13 @@ const (
 	DefaultMaxDuration = 48 * time.Hour
 	DefaultMaxAgents   = 4
 	DefaultMaxActions  = 5
-	MaxStages          = 32
+	// DefaultMaxWatches .. DefaultMaxEventRate apply when a template sets
+	// none (RFC §20.3); operators tune them per template.
+	DefaultMaxWatches       = 8
+	DefaultMaxEvidence      = 500
+	DefaultMaxEvidenceBytes = 4 << 20
+	DefaultMaxEventRate     = 120
+	MaxStages               = 32
 )
 
 // Template is a versioned lifecycle definition. It is pinned (copied) into
@@ -173,8 +199,17 @@ func (t *Template) Normalize() error {
 	if l.MaxDuration <= 0 {
 		l.MaxDuration = cpkit.Duration(DefaultMaxDuration)
 	}
-	if l.MaxRuns > 500 || l.MaxReplans > 50 || l.MaxAgents > 16 || l.MaxActions > 50 || l.MaxDuration.D() > 90*24*time.Hour {
+	l.MaxWatches = l.Watches()
+	l.MaxEvidence = l.Evidence()
+	l.MaxEvidenceBytes = l.EvidenceBytes()
+	l.MaxEventRate = l.EventRate()
+	if l.MaxRuns > 500 || l.MaxReplans > 50 || l.MaxAgents > 16 || l.MaxActions > 50 || l.MaxDuration.D() > 90*24*time.Hour ||
+		l.MaxWatches > 64 || l.MaxEvidence > 10000 || l.MaxEvidenceBytes > 64<<20 || l.MaxEventRate > 10000 ||
+		l.MaxCostUSD > 10000 {
 		return invalidf("template %s limits are too large", t.ID)
+	}
+	if l.MaxCostUSD < 0 {
+		return invalidf("template %s: max_cost_usd must not be negative", t.ID)
 	}
 	index := map[string]int{}
 	for i := range t.Stages {
