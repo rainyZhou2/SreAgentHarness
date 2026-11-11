@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,13 +29,16 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/envctx"
 	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/governance"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/obs"
+	"go-sre-harness/internal/observability"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/playbook"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
+	"go-sre-harness/internal/provenance"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/trigger"
 	"go-sre-harness/internal/work"
@@ -55,6 +59,17 @@ type Config struct {
 	// Pools overrides the resource pools; unset fields keep their defaults,
 	// -1 means unlimited.
 	Pools *orchestration.PoolLimits `json:"pools,omitempty"`
+	// Observability configures the Query Broker: endpoints, credentials,
+	// sources and limits.
+	Observability *ObservabilityConfig `json:"observability,omitempty"`
+	// Scheduling tunes claim fairness (aging, tenant weights).
+	Scheduling *SchedulingConfig `json:"scheduling,omitempty"`
+	// EventSources declares event sources: allowed types, signing key,
+	// lateness.
+	EventSources map[string]eventing.SourcePolicy `json:"event_sources,omitempty"`
+	// Authority names the authoritative sources per world predicate (adds
+	// to and overrides the defaults).
+	Authority provenance.Authority `json:"authority,omitempty"`
 }
 
 // Flags are the rollout switches.
@@ -83,6 +98,31 @@ type Flags struct {
 	// EvidencePlanning ranks read-only checks for run stages (RFC §12.4;
 	// HARNESS_EVIDENCE_PLANNING, default on).
 	EvidencePlanning bool
+	// Tier is the deployment tier (HARNESS_DEPLOYMENT_TIER: local, staging,
+	// production). It selects how strictly the governance gate judges the
+	// other flags; it never turns anything on by itself.
+	Tier governance.Tier
+	// ActionDryRun is rollout stage G3 (HARNESS_ACTION_DRY_RUN): actions
+	// are planned, preflighted and approved, dispatch is simulated.
+	ActionDryRun bool
+	// ActionAllowlist and ActionScope bound what may be dispatched (stage
+	// G4; HARNESS_ACTION_ALLOWLIST, HARNESS_ACTION_SCOPE, comma-separated).
+	ActionAllowlist []string
+	ActionScope     []string
+	// Preauthorized actions may run without a per-action approval for
+	// Works with production_writes=preauthorized (stage G5;
+	// HARNESS_ACTION_PREAUTHORIZED).
+	Preauthorized []string
+}
+
+func csv(v string) []string {
+	var out []string
+	for _, x := range strings.Split(v, ",") {
+		if x = strings.TrimSpace(x); x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // FlagsFromEnv reads the flags.
@@ -101,6 +141,15 @@ func FlagsFromEnv(getenv func(string) string) Flags {
 		f.ApprovalTTL = d
 	}
 	f.ModelMaxDataClass = strings.TrimSpace(getenv("HARNESS_MODEL_MAX_DATA_CLASS"))
+	// An unknown tier is treated as production: a typo must not relax the gate.
+	if t, err := governance.ParseTier(getenv("HARNESS_DEPLOYMENT_TIER")); err == nil {
+		f.Tier = t
+	} else {
+		f.Tier = governance.TierProduction
+	}
+	f.ActionDryRun = b("HARNESS_ACTION_DRY_RUN", false)
+	f.ActionAllowlist, f.ActionScope = csv(getenv("HARNESS_ACTION_ALLOWLIST")), csv(getenv("HARNESS_ACTION_SCOPE"))
+	f.Preauthorized = csv(getenv("HARNESS_ACTION_PREAUTHORIZED"))
 	f.TriggerMirror = b("HARNESS_TRIGGER_MIRROR", f.Shadow)
 	f.InboxPayloadRetention, f.InboxRecordRetention = 14*24*time.Hour, 90*24*time.Hour
 	if v := strings.TrimSpace(getenv("HARNESS_EVENT_PAYLOAD_RETENTION")); v != "" {
@@ -131,6 +180,12 @@ type Options struct {
 	// Embedder embeds Playbook candidates (default: the hashing embedder;
 	// the memory indexer re-embeds for the configured model).
 	Embedder memory.Embedder
+	// Deployment describes the process for the governance gate.
+	Deployment Deployment
+	// Schema reads the applied schema version (nil: assumed current).
+	Schema func(ctx context.Context) (string, error)
+	// Capabilities names the loaded domain capabilities (attestation).
+	Capabilities []string
 }
 
 // Engine is an assembled control plane.
@@ -149,6 +204,23 @@ type Engine struct {
 	Eval    *workeval.Evaluator
 	runners []plugin.WorkRunner
 	log     *slog.Logger
+	// Broker is the observability Query Broker.
+	Broker *observability.Broker
+	// Launch is the attestation the engine started with. Flags are the
+	// effective ones: a degraded deployment runs with actions off.
+	Launch governance.Attestation
+	Flags  Flags
+
+	store        *cpsql.Store
+	metrics      *orchestration.Metrics
+	obsCfg       *ObservabilityConfig
+	authority    provenance.Authority
+	deployment   Deployment
+	requested    Flags
+	schema       func(ctx context.Context) (string, error)
+	capabilities []string
+	actionDescs  []action.Descriptor
+	metricNames  []string
 }
 
 // New assembles the engine without starting it.
@@ -211,6 +283,57 @@ func New(o Options) (*Engine, error) {
 			runners = append(runners, r)
 		}
 	}
+	// The governance gate judges the requested flags before anything that
+	// could write is assembled. A refused deployment does not start; a
+	// degraded one runs in investigation mode with actions withheld.
+	if o.Deployment.Tier == "" {
+		o.Deployment.Tier = o.Flags.Tier
+	}
+	if o.Deployment.Tier == "" {
+		o.Deployment.Tier = governance.TierLocal
+	}
+	if o.Deployment.StoreKind == "" {
+		o.Deployment.StoreKind = "postgres"
+		if o.Store.Dialect() == cpsql.SQLite {
+			o.Deployment.StoreKind = "sqlite"
+		}
+	}
+	requested := o.Flags
+	schema := ExpectedSchema()
+	if o.Schema != nil {
+		if v, err := o.Schema(context.Background()); err == nil {
+			schema = v
+		}
+	}
+	names := make([]string, 0, len(metricSources))
+	for n := range metricSources {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if o.Config.Observability != nil {
+		if err := seedSources(context.Background(), o.Store, o.Config.Observability); err != nil {
+			return nil, err
+		}
+	}
+	att := governance.Evaluate(GateInput(o.Deployment, o.Flags, schema, o.Capabilities, reg.Descriptors(), names,
+		sourceStatuses(context.Background(), o.Store, o.Config.Observability), clock.Now()))
+	if !att.OK() {
+		return nil, fmt.Errorf("deployment gate refused to start (tier %s): %s", att.Tier, strings.Join(att.Reasons, "; "))
+	}
+	if att.Mode == governance.ModeInvestigation {
+		log.Warn("deployment gate: production actions are withheld; running in investigation mode",
+			"tier", att.Tier, "requested_stage", att.RequestedStage, "stage", att.Stage, "reasons", att.Reasons)
+		o.Flags.ActionV2, o.Flags.ActionDryRun, o.Flags.Preauthorized = false, false, nil
+	}
+	sources2, err := eventSources(o.Config.EventSources)
+	if err != nil {
+		return nil, err
+	}
+	authority := provenance.DefaultAuthority()
+	for pred, srcs := range o.Config.Authority {
+		authority[pred] = srcs
+	}
+	o.Store.Fairness = o.Config.Scheduling.fairness()
 	ev := &outcome.Evaluator{Metrics: metricSources, States: orchestration.WorldFacts{World: ws}, Events: o.Store}
 	var m *orchestration.Metrics
 	if o.Metrics != nil {
@@ -226,13 +349,16 @@ func New(o Options) (*Engine, error) {
 		rt = &action.Runtime{Store: o.Store, Registry: reg, Policy: gate, World: ws, Outcomes: ev, Clock: clock,
 			Log: log.With("component", "action"), ApprovalTTL: o.Flags.ApprovalTTL,
 			RequireKnownTarget: o.Flags.RequireKnownTarget, RequireDistinctApprover: o.Flags.RequireDistinctApprover,
-			Effects: o.Store}
+			Effects: o.Store, Identity: action.WorldIdentity{World: ws},
+			Quality: provenance.Quality{Health: o.Store, Authority: authority, Clock: clock},
+			DryRun:  o.Flags.ActionDryRun, Allowed: o.Flags.ActionAllowlist, Scope: o.Flags.ActionScope,
+			Preauthorized: o.Flags.Preauthorized}
 	}
 	runs := orchestration.KernelRuns{Server: o.Server}
 	ing := &orchestration.Ingestor{Store: o.Store, Router: router, Catalog: cat, Shadow: o.Flags.Shadow, Clock: clock,
-		Log: log, Metrics: m}
+		Log: log, Metrics: m, Sources: sources2, Changes: o.Store, Neighbors: neighbors(ws)}
 	svc := &orchestration.Service{Store: o.Store, Runs: runs, Catalog: cat, Clock: clock, Log: log,
-		AllowInlineTemplates: o.Flags.InlineTemplates}
+		AllowInlineTemplates: o.Flags.InlineTemplates, Queues: queues}
 	e := &Engine{
 		Service:  svc,
 		Ingestor: ing,
@@ -240,8 +366,10 @@ func New(o Options) (*Engine, error) {
 		World:    ws,
 		runners:  runners,
 		log:      log,
+		Launch:   att, Flags: o.Flags, store: o.Store, metrics: m, authority: authority, deployment: o.Deployment,
+		requested: requested, schema: o.Schema, capabilities: o.Capabilities, actionDescs: reg.Descriptors(), metricNames: names,
 		Orch: &orchestration.Orchestrator{Store: o.Store, Runs: runs, Actions: rt, Evaluator: ev, Clock: clock, Log: log,
-			Metrics: m, Owner: o.Owner, World: ws, Queues: queues, Pools: pools},
+			Metrics: m, Owner: o.Owner, World: ws, Queues: queues, Pools: pools, Catalog: cat},
 		Reconciler: &orchestration.Reconciler{Store: o.Store, Ingestor: ing, Actions: rt, Clock: clock, Log: log, Metrics: m,
 			Retention: inboxRetention(o.Flags)},
 		API: &workapi.API{Store: o.Store, Service: svc, Ingestor: ing, Actions: rt, World: ws, Clock: clock, Log: log,
@@ -257,6 +385,14 @@ func New(o Options) (*Engine, error) {
 		}
 	}
 	e.Orch.SetMaxDataClass(maxClass)
+	e.API.Attestation = func() governance.Attestation {
+		actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return e.Attestation(actx)
+	}
+	if err := e.wireObservability(context.Background(), o); err != nil {
+		return nil, err
+	}
 	e.wirePlaybooks(o)
 	e.wireEval(o)
 	if m != nil {
@@ -282,6 +418,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	if e.Playbooks != nil {
 		g.Go(func() error { e.sweepPlaybooks(ctx); return nil })
 	}
+	g.Go(func() error { e.probeSources(ctx); return nil })
 	env := plugin.WorkEnv{
 		AssertFact: func(ctx context.Context, f world.Fact) error {
 			_, _, err := e.World.Store.AssertFact(ctx, f)
@@ -297,6 +434,16 @@ func (e *Engine) Run(ctx context.Context) error {
 		},
 		RetractRelation: func(ctx context.Context, tenantID, from, typ, to, source string, at time.Time) error {
 			return e.World.Store.RetractRelation(ctx, tenantID, from, typ, to, source, at, at)
+		},
+		UpsertEntity: func(ctx context.Context, ent world.Entity) error {
+			_, err := e.World.Store.UpsertEntity(ctx, ent, e.World.Clock.Now())
+			return err
+		},
+		CollectorReport: func(ctx context.Context, tenantID, collector string, at time.Time, every time.Duration, cerr error) {
+			if err := e.store.RecordCollection(ctx, provenance.Report{TenantID: tenantID, Collector: collector, At: at,
+				Every: every, Err: cerr, Full: true}); err != nil {
+				e.log.Warn("record collector health", "collector", collector, "err", err)
+			}
 		},
 	}
 	for _, r := range e.runners {

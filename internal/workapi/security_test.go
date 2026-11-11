@@ -268,7 +268,7 @@ func TestBreakGlass(t *testing.T) {
 	e := newSecEnv(t)
 	a := e.heldAction("deployment://prod/checkout")
 	path := "/v1/actions/" + a.ID + "/break-glass"
-	good := map[string]any{"intent_hash": a.IntentHash,
+	good := map[string]any{"intent_hash": a.IntentHash, "incident_ref": "INC-2026-1110",
 		"justification": "SEV1: checkout down for all users, approvers unreachable, rollback is the documented fix"}
 
 	// Not implied by admin or approver.
@@ -288,12 +288,17 @@ func TestBreakGlass(t *testing.T) {
 	if c, _ := e.do(bg, "POST", path, map[string]any{"intent_hash": "sha256:00", "justification": good["justification"]}); c != http.StatusUnprocessableEntity {
 		t.Fatalf("wrong intent: %d", c)
 	}
+	// An R2 release must name its incident.
+	if c, _ := e.do(bg, "POST", path, map[string]any{"intent_hash": a.IntentHash, "justification": good["justification"]}); c != http.StatusUnprocessableEntity {
+		t.Fatalf("missing incident: %d", c)
+	}
 	c, out := e.do(bg, "POST", path, good)
 	if c != http.StatusOK || out["state"] != string(action.StateReady) {
 		t.Fatalf("break glass: %d %v", c, out)
 	}
 	got, _ := e.store.GetAction(e.ctx, "t1", a.ID)
-	if got.BreakGlass == nil || got.BreakGlass.Actor != "ic-alice" || got.BreakGlass.IntentHash != a.IntentHash {
+	if got.BreakGlass == nil || got.BreakGlass.Actor != "ic-alice" || got.BreakGlass.IntentHash != a.IntentHash ||
+		got.BreakGlass.IncidentRef != "INC-2026-1110" || got.BreakGlass.Scope != a.TargetRef || got.BreakGlass.ExpiresAt.IsZero() {
 		t.Fatalf("grant: %+v", got.BreakGlass)
 	}
 	if en := e.audit.find("action.break_glass", "applied"); en == nil || en.ActorID != "ic-alice" {

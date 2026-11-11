@@ -33,6 +33,17 @@ func TestDashboardsReferenceExportedMetrics(t *testing.T) {
 	m := obs.NewMetrics()
 	om := orchestration.NewMetrics(m.Reg, s)
 	om.GuardDenied("scope", "x") // counters export once touched
+	// v3 metrics are exported once touched too.
+	om.RunWake("woken")
+	om.Dispatch("deployment.rollback", "R2", "applied")
+	om.Reconciled("applied", time.Second)
+	om.ApprovalLag("approve", time.Second)
+	om.CollectorStale("stale")
+	om.Snapshot(time.Millisecond, "ok", 1, 0)
+	bm := NewBrokerMetrics(m.Reg)
+	bm.Query("metrics", "prometheus", "ok", time.Second, false)
+	bm.Denied("scope")
+	bm.Breaker("loki", "open")
 	var b strings.Builder
 	m.Reg.Write(context.Background(), &b)
 	exported := map[string]bool{}

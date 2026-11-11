@@ -62,6 +62,9 @@ var _ scheduler.ReconcileStore = (*pg.Store)(nil)
 //	harness api|worker|scheduler run a single role
 //	harness plugins              list compiled-in plugins and extension points
 //	harness hash-token <token>   print the SHA-256 for a static token file
+//	harness validate-config      check configuration and the deployment gate (connects to nothing)
+//	harness doctor               check database, migrations, artifacts, sources, events, actions
+//	harness release-gate         compare two launch attestations
 func Main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	mode := "all"
@@ -91,9 +94,14 @@ func Main() {
 		code := WorkBench(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
 		stop()
 		os.Exit(code)
+	case "validate-config", "doctor", "release-gate":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := Govern(ctx, mode, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
 	case "migrate", "all", "api", "worker", "scheduler":
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (migrate|all|api|worker|scheduler|plugins|hash-token|work-bench)\n", mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (migrate|all|api|worker|scheduler|plugins|hash-token|work-bench|validate-config|doctor|release-gate)\n", mode)
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -802,10 +810,22 @@ func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server
 	}
 	eng, err := workengine.New(workengine.Options{Store: cpsql.OpenPostgres(pool), Server: srv, Policy: a.Host.Policy,
 		Extensions: exts, Config: a.Config.Work, Flags: flags, Metrics: a.metrics.Reg, Log: a.log,
-		Owner: workengine.Owner(a.Mode), Embedder: a.Host.Embedder})
+		Owner: workengine.Owner(a.Mode), Embedder: a.Host.Embedder,
+		Deployment: deploymentOf(a.Config, a.env, srv.Audit != nil), Capabilities: capabilityNames(a.Config),
+		Schema: func(ctx context.Context) (string, error) {
+			var v string
+			err := pool.QueryRow(ctx, `SELECT coalesce(max(version), '') FROM schema_migrations`).Scan(&v)
+			return v, err
+		}})
 	if err != nil {
 		return err
 	}
+	// Run terminal events wake the owning Work at once (the stage poll and
+	// the reconciler stay as the safety net).
+	waker := eng.RunWaker()
+	hostname, _ := os.Hostname()
+	a.sinks = append(a.sinks, &eventsink.Dispatcher{ID: "work-run-waker", Sink: waker, Options: waker.SinkOptions(), Store: a.Store,
+		Owner: fmt.Sprintf("%s-%d", hostname, os.Getpid()), Log: a.log.With("event_sink", "work-run-waker"), Metrics: a.metrics})
 	srv.Extend(eng.API)
 	eng.MirrorTriggers(a.triggers, flags)
 	eng.AttachContext(a.envGatherer)
