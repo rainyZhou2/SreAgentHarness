@@ -14,10 +14,34 @@ import (
 )
 
 var (
-	_ action.Store        = (*Store)(nil)
-	_ evidence.Store      = (*Store)(nil)
-	_ action.EffectLedger = (*Store)(nil)
+	_ action.Store           = (*Store)(nil)
+	_ evidence.Store         = (*Store)(nil)
+	_ action.EffectLedger    = (*Store)(nil)
+	_ action.UnsettledFinder = (*Store)(nil)
 )
+
+// UnsettledActions lists actions on any of the refs whose external effect
+// is still open: dispatched without a result, unknown, or waiting for a
+// human. Both the name the action was planned under and the canonical ref
+// its lock was taken on are matched.
+func (s *Store) UnsettledActions(ctx context.Context, tenantID string, targetRefs []string, exceptID string, limit int) ([]action.Record, error) {
+	if len(targetRefs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	args := append([]any{tenantID}, anys(targetRefs)...)
+	args = append(args, exceptID, limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT record, version FROM work_actions WHERE tenant_id=?
+		AND target_ref IN (`+placeholders(len(targetRefs))+`) AND state IN ('DISPATCHED','EFFECT_UNKNOWN','MANUAL_RECOVERY')
+		AND id <> ? ORDER BY updated_at LIMIT ?`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRecords(rows)
+}
 
 // KernelEffects reads the kernel's tool effect ledger (PostgreSQL; the
 // SQLite control plane has no kernel tables and returns none).

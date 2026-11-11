@@ -25,15 +25,31 @@ type Observer interface {
 	Denied(reason string)
 	// BreakGlass: an emergency approval was used.
 	BreakGlass()
+	// Dispatch: one dispatch attempt of an action (operator-registered
+	// name), by risk and result: applied | not_applied | unknown | refused.
+	Dispatch(name, risk, result string)
+	// Reconciled: a read-only reconciliation, by result (applied |
+	// not_applied | unknown | error).
+	Reconciled(result string, d time.Duration)
+	// ApprovalLag: the wait from WAITING_APPROVAL to a decision (approve |
+	// reject | break_glass | expired).
+	ApprovalLag(decision string, d time.Duration)
+	// CollectorStale: a precondition was refused because the collector
+	// behind a required fact is stale or failing (stale | failing | conflict).
+	CollectorStale(reason string)
 }
 
 type nopObserver struct{}
 
-func (nopObserver) Preflight(string)            {}
-func (nopObserver) EffectUnknown(string)        {}
-func (nopObserver) Verify(State, time.Duration) {}
-func (nopObserver) Denied(string)               {}
-func (nopObserver) BreakGlass()                 {}
+func (nopObserver) Preflight(string)                  {}
+func (nopObserver) EffectUnknown(string)              {}
+func (nopObserver) Verify(State, time.Duration)       {}
+func (nopObserver) Denied(string)                     {}
+func (nopObserver) BreakGlass()                       {}
+func (nopObserver) Dispatch(string, string, string)   {}
+func (nopObserver) Reconciled(string, time.Duration)  {}
+func (nopObserver) ApprovalLag(string, time.Duration) {}
+func (nopObserver) CollectorStale(string)             {}
 
 func (rt *Runtime) obs() Observer {
 	if rt.Observer != nil {
