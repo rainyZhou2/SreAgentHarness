@@ -15,6 +15,7 @@ import (
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/impact"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
@@ -92,6 +93,16 @@ type Ingestor struct {
 	Log         *slog.Logger
 	Metrics     *Metrics
 	MaxAttempts int
+	// Sources are the operator-declared event sources: which types each may
+	// send and how late an event may open a Work (design §9.3). A source
+	// without an entry is bound by the caller's scope only.
+	Sources map[string]eventing.SourcePolicy
+	// Changes receives events that are changes (deploys, config, topology,
+	// manual operations) for the change ledger; nil disables it.
+	Changes impact.Store
+	// Neighbors returns the resources one dependency hop from a subject
+	// (topology-assisted correlation, §9.5); nil disables it.
+	Neighbors func(ctx context.Context, tenantID, subject string) ([]string, error)
 }
 
 func (in *Ingestor) log() *slog.Logger {
@@ -138,8 +149,19 @@ func (in *Ingestor) Process(ctx context.Context, rec eventing.Record) error {
 	start := time.Now()
 	ctx, sp := obs.Tracer().Start(ctx, "event.correlate", trace.WithAttributes(attribute.String("event.inbox_id", rec.InboxID),
 		attribute.String("event.type", rec.Envelope.Type), attribute.String("event.source", rec.Envelope.Source)))
-	workID, decision, state, err := in.route(ctx, rec)
+	dec := eventing.Decision{TenantID: rec.Envelope.TenantID, InboxID: rec.InboxID, Basis: "none", Shadow: in.Shadow}
+	workID, decision, state, err := in.route(ctx, rec, &dec)
 	in.Metrics.correlated(metricDecision(decision), time.Since(start))
+	if err == nil {
+		dec.Decision, dec.WorkID, dec.At = decision, workID, in.Clock.Now()
+		if dec.WorkID == "" && dec.Basis == "deterministic" {
+			dec.Basis = "none"
+		}
+		in.Metrics.decision(dec.Basis)
+		if derr := in.Store.RecordDecision(ctx, dec); derr != nil {
+			in.log().Warn("record correlation decision", "inbox_id", rec.InboxID, "err", derr)
+		}
+	}
 	if workID != "" {
 		sp.SetAttributes(attribute.String("work_id", workID))
 	}
@@ -158,7 +180,8 @@ func (in *Ingestor) Process(ctx context.Context, rec eventing.Record) error {
 
 func metricDecision(d string) string {
 	switch {
-	case d == cpsql.CorrCreated, d == cpsql.CorrAttached, d == cpsql.CorrThrottled, d == "watch", d == "no_rule", d == "ignored", d == "expired":
+	case d == cpsql.CorrCreated, d == cpsql.CorrAttached, d == cpsql.CorrThrottled, d == "watch", d == "no_rule", d == "ignored", d == "expired",
+		d == "related", d == "type_not_allowed":
 		return d
 	case len(d) >= 6 && d[:6] == "shadow":
 		return "shadow"
@@ -166,24 +189,51 @@ func metricDecision(d string) string {
 	return "other"
 }
 
-func (in *Ingestor) route(ctx context.Context, rec eventing.Record) (workID, decision, state string, err error) {
+func (in *Ingestor) route(ctx context.Context, rec eventing.Record, dec *eventing.Decision) (workID, decision, state string, err error) {
 	env := rec.Envelope
 	now := in.Clock.Now()
 	if env.Expired(now) {
+		dec.Reason = "the event expired before it was processed"
 		return "", "expired", eventing.StateIgnored, nil
 	}
+	policy, declared := in.Sources[env.Source]
+	if declared && !policy.AllowsType(env.Type) {
+		// The event is kept (it arrived, and that is worth knowing) but a
+		// source cannot act outside the types the operator gave it.
+		dec.Reason = "source " + env.Source + " is not allowed to send " + env.Type
+		return "", "type_not_allowed", eventing.StateIgnored, nil
+	}
+	// A change is a fact about the environment whatever happens to the
+	// event's routing: record it for the timeline and for correlation.
+	if in.Changes != nil {
+		if c, ok := impact.FromEvent(env); ok {
+			if _, _, cerr := in.Changes.RecordChange(ctx, c); cerr != nil {
+				in.log().Warn("record change", "inbox_id", rec.InboxID, "err", cerr)
+			}
+		}
+	}
+	dec.Late = policy.Late(&env, now)
 	firedWork, err := in.fireWatches(ctx, rec)
 	if err != nil {
 		return "", "", "", err
 	}
 	rule, ok := in.Router.Route(&env)
+	if ok {
+		dec.RuleName, dec.RuleVersion = rule.Name, rule.Version()
+	}
 	if !ok || rule.Action == "ignore" {
 		if firedWork != "" {
+			dec.Basis, dec.Reason = "deterministic", "a watch of the Work matched the event"
 			return firedWork, "watch", eventing.StateProcessed, nil
 		}
 		if ok {
+			dec.Reason = "rule " + rule.Name + " ignores the event"
 			return "", "ignored", eventing.StateIgnored, nil
 		}
+		if related := in.relate(ctx, rec, dec); related != "" {
+			return related, "related", eventing.StateProcessed, nil
+		}
+		dec.Reason = "no correlation rule matches"
 		return "", "no_rule", eventing.StateIgnored, nil
 	}
 	group := "rule:" + rule.GroupName() + "|" + rule.GroupKey(&env)
@@ -191,13 +241,20 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record) (workID, dec
 	if window <= 0 {
 		window = eventing.DefaultWindow
 	}
+	dec.GroupKey, dec.Basis = group, "deterministic"
 	if in.Shadow {
+		dec.Reason = "shadow mode: the decision is recorded, no Work is created"
 		return firedWork, "shadow:" + rule.Action + ":" + rule.Name, eventing.StateProcessed, nil
 	}
 	req := cpsql.CorrelateRequest{TenantID: env.TenantID, GroupKey: group, Rule: rule.Name, Window: window, Now: now,
 		EventID: rec.InboxID, Payload: map[string]any{"inbox_id": rec.InboxID, "type": env.Type, "source": env.Source,
 			"subject_ref": env.SubjectRef, "rule": rule.Name}}
-	if rule.Action != "attach" {
+	if dec.Late {
+		// A late event joins the Work that is open for its group; it never
+		// opens a new one and never restarts a closed generation.
+		dec.Reason = "late event: attach only"
+	}
+	if rule.Action != "attach" && !dec.Late {
 		n, err := in.newWork(rule, rec)
 		if err != nil {
 			return "", "", "", err
@@ -209,8 +266,14 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record) (workID, dec
 		return "", "", "", err
 	}
 	if decision == cpsql.CorrNoWork {
+		if related := in.relate(ctx, rec, dec); related != "" && firedWork == "" {
+			return related, "related", eventing.StateProcessed, nil
+		}
+		dec.Reason = firstNonEmpty(dec.Reason, "the correlation group has no open Work")
 		return firedWork, decision, eventing.StateIgnored, nil
 	}
+	dec.Candidates = append(dec.Candidates, eventing.Candidate{WorkID: w.ID, Relation: "same_group", Score: 1, Chosen: true,
+		Reason: "rule " + rule.Name + " keys the event to this Work"})
 	if decision == cpsql.CorrCreated {
 		in.log().Info("work created from event", "tenant", env.TenantID, "work_id", w.ID, "rule", rule.Name,
 			"inbox_id", rec.InboxID)
@@ -219,6 +282,55 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record) (workID, dec
 		}
 	}
 	return w.ID, decision, eventing.StateProcessed, nil
+}
+
+// relate looks for open Works on a dependency of the event's subject
+// (topology-assisted correlation, §9.5). A match is a lead: the event is
+// noted on the Work's timeline so an investigator sees it, but it does not
+// wake the Work, change its state or count as grounds for any action. The
+// best candidate's id is returned ("" when there is none).
+func (in *Ingestor) relate(ctx context.Context, rec eventing.Record, dec *eventing.Decision) string {
+	if in.Neighbors == nil || in.Shadow {
+		return ""
+	}
+	env := rec.Envelope
+	neighbors, err := in.Neighbors(ctx, env.TenantID, env.SubjectRef)
+	if err != nil || len(neighbors) == 0 {
+		return ""
+	}
+	if len(neighbors) > 16 {
+		neighbors = neighbors[:16]
+	}
+	best := ""
+	seen := map[string]bool{}
+	for _, n := range neighbors {
+		works, err := in.Store.ListWorks(ctx, work.Filter{TenantID: env.TenantID, Subject: n, Kind: work.KindIncident, Limit: 3,
+			Status: []work.Status{work.StatusActive, work.StatusWaiting, work.StatusVerifying, work.StatusBlocked}})
+		if err != nil {
+			continue
+		}
+		for _, w := range works {
+			if seen[w.ID] || len(dec.Candidates) >= 5 {
+				continue
+			}
+			seen[w.ID] = true
+			c := eventing.Candidate{WorkID: w.ID, Relation: "dependency", Score: 0.5,
+				Reason: env.SubjectRef + " is one hop from " + n + ", a subject of the Work"}
+			if err := in.Store.NoteWork(ctx, env.TenantID, w.ID, "work.related_event", "system", "event:"+env.Source, map[string]any{
+				"inbox_id": rec.InboxID, "type": env.Type, "subject_ref": env.SubjectRef, "via": n, "basis": "topology",
+				"note": "a lead for investigation; not correlated by rule"}); err != nil {
+				continue
+			}
+			if best == "" {
+				best, c.Chosen = w.ID, true
+			}
+			dec.Candidates = append(dec.Candidates, c)
+		}
+	}
+	if best != "" {
+		dec.Basis, dec.Reason = "topology", "noted on Works that depend on the subject; investigation lead only"
+	}
+	return best
 }
 
 // attachPrior attaches events of the same correlation group that arrived

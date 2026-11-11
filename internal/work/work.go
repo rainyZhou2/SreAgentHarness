@@ -211,6 +211,11 @@ type Work struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 	ClosedAt    *time.Time      `json:"closed_at,omitempty"`
+	// ParentID is the owning Work, RootID the top of the tree and Depth the
+	// distance from it (all empty/zero for a Work outside a graph).
+	ParentID string `json:"parent_work_id,omitempty"`
+	RootID   string `json:"root_work_id,omitempty"`
+	Depth    int    `json:"depth,omitempty"`
 }
 
 // CurrentStage returns the active stage (false when past the end).

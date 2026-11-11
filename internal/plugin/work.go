@@ -32,6 +32,12 @@ type WorkEnv struct {
 	// (the edge disappeared from the observed system).
 	AssertRelation  func(ctx context.Context, r world.Relation) error
 	RetractRelation func(ctx context.Context, tenantID, from, typ, to, source string, at time.Time) error
+	// UpsertEntity records the identity of a resource (optional).
+	UpsertEntity func(ctx context.Context, e world.Entity) error
+	// CollectorReport records one collection attempt of a named collector
+	// ("<capability>/<name>"): its success keeps the facts it feeds usable
+	// as action preconditions, its failures make them stale (optional).
+	CollectorReport func(ctx context.Context, tenantID, collector string, at time.Time, every time.Duration, err error)
 }
 
 // EventContributor is optionally implemented by a WorkExtension that ships

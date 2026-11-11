@@ -233,10 +233,17 @@ func (s *Set) CollectOnce(ctx context.Context, env plugin.WorkEnv, capID, name s
 	defer cancel()
 	now := s.opts.Clock.Now()
 	obs, err := entry.c.Collect(cctx, now)
-	if err != nil {
-		return err
+	if err == nil {
+		err = s.apply(ctx, env, *entry, obs, now)
 	}
-	return s.apply(ctx, env, *entry, obs, now)
+	// A failed collection asserts and retracts nothing: what was known
+	// stays known, and the report lets the framework treat it as stale.
+	if env.CollectorReport != nil && ctx.Err() == nil {
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		env.CollectorReport(rctx, s.opts.Tenant, capID+"/"+name, now, entry.every, err)
+		rcancel()
+	}
+	return err
 }
 
 func relKey(r world.Relation) string { return r.FromRef + "\x00" + r.Type + "\x00" + r.ToRef }
@@ -248,6 +255,14 @@ func (s *Set) apply(ctx context.Context, env plugin.WorkEnv, c collectorEntry, o
 		maxTrust = world.TrustAuthoritative
 	}
 	var errs []string
+	if env.UpsertEntity != nil {
+		for _, e := range o.Entities {
+			e.TenantID, e.Source = s.opts.Tenant, source
+			if err := env.UpsertEntity(ctx, e); err != nil {
+				errs = append(errs, fmt.Sprintf("entity %s: %v", e.Ref, err))
+			}
+		}
+	}
 	for _, f := range o.Facts {
 		f.TenantID = s.opts.Tenant
 		if f.Source == "" || !strings.HasPrefix(f.Source, source) {

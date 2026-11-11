@@ -60,6 +60,71 @@ type Record struct {
 	RunID        string     `json:"run_id,omitempty"`
 	AgentRole    string     `json:"agent_role,omitempty"`
 	ActorID      string     `json:"actor_id,omitempty"`
+
+	// Causal attributes (design §11.3). They are optional: records written
+	// before they existed read as observations of unknown quality.
+
+	// Kind is what the record is: observation | change | action_effect |
+	// human_report | inference.
+	Kind string `json:"kind,omitempty"`
+	// Relation is how the record bears on the claims it is cited for:
+	// supports | refutes | correlates | caused_by | temporally_precedes.
+	// "correlates" is never read as "caused_by".
+	Relation string `json:"relation,omitempty"`
+	// IndependenceGroup identifies the underlying observation (source +
+	// query digest + window). Records of one group are one piece of
+	// evidence, however many agents cite them.
+	IndependenceGroup string `json:"independence_group,omitempty"`
+	// Quality: valid | stale | partial | injected | unresolved.
+	Quality string `json:"quality,omitempty"`
+	// SourceID is the catalog source the record came from.
+	SourceID string `json:"source_id,omitempty"`
+	// SnapshotID is the world snapshot the conclusion was drawn against.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+}
+
+// Evidence kinds, relations and qualities.
+const (
+	KindObservation  = "observation"
+	KindChange       = "change"
+	KindActionEffect = "action_effect"
+	KindHumanReport  = "human_report"
+	KindInference    = "inference"
+
+	RelSupports   = "supports"
+	RelRefutes    = "refutes"
+	RelCorrelates = "correlates"
+	RelCausedBy   = "caused_by"
+	RelPrecedes   = "temporally_precedes"
+
+	QualityValid      = "valid"
+	QualityStale      = "stale"
+	QualityPartial    = "partial"
+	QualityInjected   = "injected"
+	QualityUnresolved = "unresolved"
+)
+
+var (
+	evidenceKinds = map[string]bool{"": true, KindObservation: true, KindChange: true, KindActionEffect: true,
+		KindHumanReport: true, KindInference: true}
+	evidenceRelations = map[string]bool{"": true, RelSupports: true, RelRefutes: true, RelCorrelates: true,
+		RelCausedBy: true, RelPrecedes: true}
+	evidenceQualities = map[string]bool{"": true, QualityValid: true, QualityStale: true, QualityPartial: true,
+		QualityInjected: true, QualityUnresolved: true}
+)
+
+// Usable reports whether the record may support a conclusion: stale,
+// partial, injected and unresolved evidence is kept for audit but does not
+// count toward a verdict.
+func (r Record) Usable() bool { return r.Quality == "" || r.Quality == QualityValid }
+
+// Group is the independence group of the record; records without one are
+// independent by content.
+func (r Record) Group() string {
+	if r.IndependenceGroup != "" {
+		return r.IndependenceGroup
+	}
+	return r.ContentHash
 }
 
 // Limits.
@@ -84,6 +149,16 @@ func (r *Record) Normalize(now time.Time) error {
 	}
 	if len(r.Claims) > MaxClaims {
 		return fmt.Errorf("%w: too many claims", ErrInvalid)
+	}
+	if !evidenceKinds[r.Kind] || !evidenceRelations[r.Relation] || !evidenceQualities[r.Quality] {
+		return fmt.Errorf("%w: unknown kind, relation or quality", ErrInvalid)
+	}
+	if len(r.IndependenceGroup) > 200 || len(r.SourceID) > 128 || len(r.SnapshotID) > 64 {
+		return fmt.Errorf("%w: causal attributes are too long", ErrInvalid)
+	}
+	if r.Relation == RelCausedBy && r.Kind == KindInference {
+		// A model inference may propose a cause; it cannot assert one.
+		r.Relation = RelCorrelates
 	}
 	r.Summary = cpkit.Truncate(r.Summary, MaxSummary)
 	if r.TrustTier == "" {

@@ -45,6 +45,19 @@ type Metrics struct {
 	limitHits      obs.Counter
 	plans          obs.Counter
 	planExcluded   obs.Counter
+
+	// v3 (design §6, §7.6, §10, §11).
+	reapedHolds   obs.Counter
+	shedWorks     obs.Counter
+	queuedLong    obs.Counter
+	dispatches    obs.Counter
+	reconcile     obs.Histogram
+	approvalLag   obs.Histogram
+	runWakes      obs.Counter
+	graphEvents   obs.Counter
+	findings      obs.Counter
+	sourceStale   obs.Counter
+	decisionKinds obs.Counter
 }
 
 var (
@@ -108,6 +121,28 @@ func NewMetrics(reg *obs.Registry, store *cpsql.Store) *Metrics {
 			"Tools kept out of evidence plans by the framework constraints, by reason.", "reason"),
 		limitHits: reg.Counter("harness_work_limit_total",
 			"Changes refused or dropped by a Work bound (RFC §20.3), by limit.", "limit"),
+
+		reapedHolds: reg.Counter("harness_admission_reservations_reaped_total",
+			"Admission reservations expired by the reaper (owner died before releasing)."),
+		shedWorks: reg.Counter("harness_work_shed_total", "New Works refused because their queue sheds load.", "queue"),
+		queuedLong: reg.Counter("harness_work_queued_long_total",
+			"Works processed later than their queue's admission deadline.", "queue"),
+		dispatches: reg.Counter("harness_action_dispatch_attempts_total",
+			"Action dispatch attempts by action, risk and result (applied, not_applied, unknown, refused).", "type", "risk", "result"),
+		reconcile: reg.Histogram("harness_action_reconcile_duration_seconds",
+			"Duration of read-only reconciliations of uncertain action effects.", fastBuckets, "result"),
+		approvalLag: reg.Histogram("harness_action_approval_lag_seconds",
+			"Time from an action waiting for approval to its decision.", lagBuckets, "decision"),
+		runWakes: reg.Counter("harness_work_run_wake_total",
+			"Works woken by a run terminal event, by result (woken, no_owner, terminal, error).", "result"),
+		graphEvents: reg.Counter("harness_work_graph_total",
+			"Work graph events (child_created, dependency_added, cycle_refused, limit_refused, released, cancelled).", "event"),
+		findings: reg.Counter("harness_agent_finding_total",
+			"Agent findings by verdict after synthesis validation (supported, refuted, insufficient, contested, rejected).", "verdict"),
+		sourceStale: reg.Counter("harness_world_collector_stale_total",
+			"Preconditions refused because the collector behind a required fact is stale or failing.", "reason"),
+		decisionKinds: reg.Counter("harness_event_correlation_decision_total",
+			"Recorded correlation decisions by kind (deterministic, topology, none).", "kind"),
 	}
 	if store != nil {
 		registerBacklog(reg, store)
@@ -390,4 +425,86 @@ func registerBacklog(reg *obs.Registry, store *cpsql.Store) {
 		emit("harness_watch_overdue_oldest_seconds", nil, b.OverdueWatches.Oldest.Seconds())
 		emit("harness_action_unapproved_dispatch", nil, float64(b.UnapprovedDispatches))
 	})
+}
+
+func (m *Metrics) reaped(n int) {
+	if m == nil {
+		return
+	}
+	m.reapedHolds.Add(float64(n))
+}
+
+func (m *Metrics) shed(queue string) {
+	if m == nil {
+		return
+	}
+	m.shedWorks.Inc(queue)
+}
+
+func (m *Metrics) queuedTooLong(queue string) {
+	if m == nil {
+		return
+	}
+	m.queuedLong.Inc(queue)
+}
+
+// RunWake counts run-completion wake signals.
+func (m *Metrics) RunWake(result string) {
+	if m == nil {
+		return
+	}
+	m.runWakes.Inc(result)
+}
+
+func (m *Metrics) graph(event string) {
+	if m == nil {
+		return
+	}
+	m.graphEvents.Inc(event)
+}
+
+func (m *Metrics) finding(verdict string) {
+	if m == nil {
+		return
+	}
+	m.findings.Inc(verdict)
+}
+
+func (m *Metrics) decision(kind string) {
+	if m == nil {
+		return
+	}
+	m.decisionKinds.Inc(kind)
+}
+
+// Dispatch implements action.Observer: one dispatch attempt.
+func (m *Metrics) Dispatch(name, risk, result string) {
+	if m == nil {
+		return
+	}
+	m.dispatches.Inc(name, risk, result)
+}
+
+// Reconciled implements action.Observer.
+func (m *Metrics) Reconciled(result string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.reconcile.Observe(d.Seconds(), result)
+}
+
+// ApprovalLag implements action.Observer.
+func (m *Metrics) ApprovalLag(decision string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.approvalLag.Observe(d.Seconds(), decision)
+}
+
+// CollectorStale implements action.Observer.
+func (m *Metrics) CollectorStale(reason string) {
+	if m == nil {
+		return
+	}
+	m.sourceStale.Inc(reason)
 }

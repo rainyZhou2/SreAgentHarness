@@ -23,6 +23,8 @@ import (
 	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/quota"
+	"go-sre-harness/internal/runbook"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/untrusted"
 	"go-sre-harness/internal/work"
@@ -71,6 +73,8 @@ type Orchestrator struct {
 	// every run a stage starts (label world_snapshot), so all agents of a
 	// stage reason over the same facts and the run can be replayed.
 	World *world.Service
+	// Catalog resolves the templates of child Works (children stages).
+	Catalog *Catalog
 	// Checks enables evidence planning (RFC §12.4): before a run or agents
 	// stage starts, the read-only checks that best separate the Work's
 	// hypotheses are ranked within the run's tool and policy constraints.
@@ -251,7 +255,15 @@ func (o *Orchestrator) Tick(ctx context.Context) (int, error) {
 
 func (o *Orchestrator) process(ctx context.Context, w work.Work) {
 	if w.WakeAt != nil {
-		o.Metrics.woke(o.now().Sub(*w.WakeAt))
+		lag := o.now().Sub(*w.WakeAt)
+		o.Metrics.woke(lag)
+		if dl := o.limit(w.Queue).AdmissionDeadline.D(); dl > 0 && lag > dl {
+			// Late, not lost: the Work is processed now and the delay is
+			// visible (alert on the counter; the Work is never dropped).
+			o.Metrics.queuedTooLong(string(w.Queue))
+			o.log().Warn("work waited past its admission deadline", "tenant", w.TenantID, "work_id", w.ID,
+				"queue", w.Queue, "lag", lag.Round(time.Millisecond), "deadline", dl)
+		}
 	}
 	ctx, sp := obs.Tracer().Start(ctx, "work.resume", trace.WithAttributes(attribute.String("work_id", w.ID),
 		attribute.String("work.kind", string(w.Kind)), attribute.String("work.status", string(w.Status)),
@@ -302,6 +314,10 @@ type stageState struct {
 	WatchID    string     `json:"watch_id,omitempty"`
 	ActionID   string     `json:"action_id,omitempty"`
 	Verdict    string     `json:"verdict,omitempty"`
+	// Holds are the model-run reservations of a running stage.
+	Holds []quotaHold `json:"holds,omitempty"`
+	// Children are the child Works a children stage spawned.
+	Children []stageChild `json:"children,omitempty"`
 }
 
 type stageRun struct {
@@ -312,6 +328,8 @@ type stageRun struct {
 	Done     bool                     `json:"done,omitempty"`
 	Result   *evidence.ResultEnvelope `json:"result,omitempty"`
 	Snapshot string                   `json:"world_snapshot,omitempty"`
+	// Deadline is when the assignment's time budget ends (zero: none).
+	Deadline time.Time `json:"deadline,omitempty"`
 }
 
 // step is one decision: a mutation, and whether to continue immediately.
@@ -377,6 +395,31 @@ func (d *driver) apply(ctx context.Context, m work.Mutation) error {
 	}
 	sp.SetAttributes(attribute.String("work.status", string(w.Status)), attribute.Int64("work.version", w.Version))
 	sp.End()
+	if w.Status.Terminal() || w.Stage != d.w.Stage || w.Generation != d.w.Generation {
+		// Left the stage (terminated, replanned, advanced): whatever the
+		// stage still reserved is returned. Runs of a stage that was left
+		// early are cancelled or ignored, never counted against the budget.
+		var st stageState
+		if len(d.w.StageState) > 0 && json.Unmarshal(d.w.StageState, &st) == nil && len(st.Holds) > 0 {
+			d.o.releaseHolds(ctx, w.TenantID, st.Holds)
+		}
+	}
+	if w.Stage > d.w.Stage && w.Generation == d.w.Generation {
+		// A completed stage is a signal other Works may wait for.
+		if prev, ok := d.w.CurrentStage(); ok {
+			if _, err := d.o.Store.SignalDependents(context.WithoutCancel(ctx), w.TenantID, w.ID, "stage:"+prev.ID); err != nil {
+				d.o.log().Warn("signal dependent works", "work_id", w.ID, "stage", prev.ID, "err", err)
+			}
+		}
+	}
+	if w.Status.Terminal() && w.Status != from {
+		d.recordRunbook(ctx, w)
+		// Settle the graph: release or close what waited for this Work and
+		// wake its parent. The reconciler repeats it if this is lost.
+		if err := d.o.Store.CompleteChild(context.WithoutCancel(ctx), w.TenantID, w.ID, 0); err != nil {
+			d.o.log().Warn("settle work graph", "work_id", w.ID, "err", err)
+		}
+	}
 	if w.Status != from {
 		d.o.Metrics.transition(string(w.Kind), string(w.Status))
 		d.o.Metrics.closed(w, m.Now)
@@ -426,6 +469,19 @@ func (d *driver) step(ctx context.Context) (step, error) {
 		return d.terminate(work.StatusFailed, "max_duration_exceeded"), nil
 	}
 	if w.Status == work.StatusNew {
+		// A Work held by a dependency does not start, whoever woke it: the
+		// graph releases it when its upstream Works are done.
+		unmet, err := d.o.Store.UnmetDependencies(ctx, w.TenantID, w.ID)
+		if err != nil {
+			return step{}, err
+		}
+		if len(unmet) > 0 {
+			reason := "held: waiting for work " + strings.Join(unmet, ", ")
+			if w.Reason == reason {
+				return step{}, nil
+			}
+			return step{m: work.Mutation{Reason: strPtr(reason)}}, nil
+		}
 		return step{m: work.Mutation{Status: statusPtr(work.StatusActive), Stage: intPtr(0), ClearState: true,
 			Events: []work.NewEvent{{Type: "work.started", Payload: map[string]any{"template": w.Template.ID,
 				"template_version": w.Template.Version}}}}, again: true}, nil
@@ -446,6 +502,8 @@ func (d *driver) step(ctx context.Context) (step, error) {
 		return d.verifyStage(ctx, stage, st)
 	case work.StageConfirm:
 		return d.confirmStage(ctx, stage, st)
+	case work.StageChildren:
+		return d.childrenStage(ctx, stage, st)
 	}
 	return d.block(fmt.Sprintf("unknown stage type %q", stage.Type)), nil
 }
@@ -556,39 +614,123 @@ func (d *driver) queued(pool, reason string, after time.Duration) (step, error) 
 	return step{}, deferred(pool, after)
 }
 
-// runBudget checks the tenant's model-run budget before n runs start: the
-// queue's own cap, then the pool total (critical-mitigation is exempt from
-// the total). A stage larger than a cap may start when nothing else runs.
-// The count is cluster-wide but not reserved, so concurrent replicas may
-// overshoot by at most their in-flight stages.
-func (o *Orchestrator) runBudget(ctx context.Context, w *work.Work, n int) (string, error) {
+// quotaHold is a model-run reservation a stage holds while its runs are in
+// flight (kept in the stage state so any replica can renew or release it).
+type quotaHold struct {
+	ID        string    `json:"id"`
+	Token     int64     `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// reservationTTL is the lease of a stage's model-run reservation.
+func (o *Orchestrator) reservationTTL() time.Duration {
+	if o.Pools != nil && o.Pools.Limits.ReservationTTL > 0 {
+		return o.Pools.Limits.ReservationTTL.D()
+	}
+	return 10 * time.Minute
+}
+
+// stageKey identifies a stage of one Work generation (reservation dedup).
+func stageKey(w *work.Work, stage work.Stage) string {
+	return fmt.Sprintf("stage:%s:g%d:%s", w.ID, w.Generation, stage.ID)
+}
+
+// admit reserves the model-run budget for the n runs a stage is about to
+// start: the queue's own budget, then the tenant total shared by every
+// queue except critical-mitigation (which is bounded only by its own queue
+// and for which CriticalReservedModelRuns is held back from the total).
+//
+// The reservation is taken in the store under the budget's row lock, so
+// replicas cannot admit more than the capacity together. It is idempotent
+// per stage and generation: a retried step re-reads the reservation it
+// already holds. A stage wider than a whole budget is admitted when
+// nothing else holds units, so it cannot starve forever. reason is the
+// human-readable cause when the budget is full.
+func (o *Orchestrator) admit(ctx context.Context, w *work.Work, stage work.Stage, n int) (holds []quotaHold, reason string, err error) {
 	qcap := o.limit(w.Queue).ModelRunsPerTenant
 	total := 0
 	if o.Pools != nil && w.Queue != work.QueueCritical {
-		total = o.Pools.Limits.ModelRunsPerTenant
+		if total = o.Pools.Limits.ModelRunsPerTenant; total > 0 {
+			total = max(total-o.Pools.Limits.CriticalReservedModelRuns, 1)
+		}
 	}
 	if qcap <= 0 && total <= 0 {
-		return "", nil
+		return nil, "", nil
 	}
-	counts, err := o.Store.ActiveWorkRuns(ctx, w.TenantID)
-	if err != nil {
-		return "", err
-	}
-	if cur := counts[w.Queue]; qcap > 0 && cur > 0 && cur+n > qcap {
-		return fmt.Sprintf("queued: %s model run budget (%d of %d active)", w.Queue, cur, qcap), nil
+	base := quota.LeaseRequest{TenantID: w.TenantID, WorkID: w.ID, Resource: quota.ResourceModelRun, Units: int64(n),
+		TTL: o.reservationTTL(), Owner: o.Owner, Oversize: true, Now: o.now()}
+	var reqs []quota.LeaseRequest
+	if qcap > 0 {
+		r := base
+		r.Queue, r.Capacity, r.DedupKey = string(w.Queue), int64(qcap), stageKey(w, stage)+":queue"
+		reqs = append(reqs, r)
 	}
 	if total > 0 {
-		cur := 0
-		for q, c := range counts {
-			if q != work.QueueCritical {
-				cur += c
-			}
+		r := base
+		r.Queue, r.Capacity, r.DedupKey = quota.AnyQueue, int64(total), stageKey(w, stage)+":tenant"
+		reqs = append(reqs, r)
+	}
+	held, err := quota.Group(ctx, o.Store, reqs...)
+	var ex *quota.ExhaustedError
+	switch {
+	case errors.As(err, &ex):
+		scope := string(w.Queue)
+		if ex.Budget.Queue == quota.AnyQueue {
+			scope = "tenant"
 		}
-		if cur > 0 && cur+n > total {
-			return fmt.Sprintf("queued: tenant model run budget (%d of %d active)", cur, total), nil
+		return nil, fmt.Sprintf("queued: %s model run budget (%d of %d reserved)", scope, ex.Budget.Reserved, ex.Budget.Capacity), nil
+	case err != nil:
+		return nil, "", err
+	}
+	for _, h := range held {
+		holds = append(holds, quotaHold{ID: h.ID, Token: h.Token, ExpiresAt: h.ExpiresAt})
+	}
+	return holds, "", nil
+}
+
+// renewHolds extends a running stage's reservations once half their lease
+// has passed. A reservation the reaper already freed is not an error: the
+// reaper renews reservations whose runs are in flight, so a lost hold
+// means this stage was considered dead and its budget is counted again
+// when the next stage reserves.
+func (o *Orchestrator) renewHolds(ctx context.Context, tenantID string, holds []quotaHold) bool {
+	ttl := o.reservationTTL()
+	now := o.now()
+	changed := false
+	for i := range holds {
+		if holds[i].ExpiresAt.Sub(now) > ttl/2 {
+			continue
+		}
+		if err := o.Store.Renew(ctx, tenantID, holds[i].ID, holds[i].Token, ttl); err != nil {
+			if !errors.Is(err, quota.ErrFenced) {
+				o.log().Warn("renew model run reservation", "tenant", tenantID, "reservation_id", holds[i].ID, "err", err)
+			}
+			continue
+		}
+		holds[i].ExpiresAt, changed = now.Add(ttl), true
+	}
+	return changed
+}
+
+// releaseHolds returns a stage's reservations (fenced; double release is a
+// no-op).
+func (o *Orchestrator) releaseHolds(ctx context.Context, tenantID string, holds []quotaHold) {
+	freed := 0
+	for _, h := range holds {
+		err := o.Store.Release(context.WithoutCancel(ctx), tenantID, h.ID, h.Token)
+		switch {
+		case err == nil:
+			freed++
+		case !errors.Is(err, quota.ErrFenced):
+			o.log().Warn("release model run reservation", "tenant", tenantID, "reservation_id", h.ID, "err", err)
 		}
 	}
-	return "", nil
+	if freed > 0 {
+		// Freed budget is offered to the Works waiting for it right away.
+		if _, err := o.Store.WakeDeferred(context.WithoutCancel(ctx), tenantID, o.now(), 4*freed); err != nil {
+			o.log().Warn("wake deferred works", "tenant", tenantID, "err", err)
+		}
+	}
 }
 
 // ---- run / agents ----
@@ -613,16 +755,20 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			return d.terminate(work.StatusFailed, fmt.Sprintf("max_cost_exceeded: spent $%.2f of $%.2f",
 				float64(w.CostMicros)/1e6, lim)), nil
 		}
-		if reason, err := d.o.runBudget(ctx, w, len(specs)); err != nil {
+		holds, reason, err := d.o.admit(ctx, w, stage, len(specs))
+		if err != nil {
 			return step{}, err
-		} else if reason != "" {
+		}
+		if reason != "" {
 			return d.queued("model_runs", reason, 10*time.Second)
 		}
+		st.Holds = holds
 		summaries, err := d.summaries(ctx)
 		if err != nil {
 			return step{}, err
 		}
 		var links []work.RunLink
+		var assignments []Assignment
 		snapID := d.o.pinSnapshot(ctx, w)
 		keys := make([]string, len(specs))
 		for i, a := range specs {
@@ -632,6 +778,7 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		for i, a := range specs {
 			goal, err := d.o.modelGoal(a.Goal, w, summaries, plan.text[a.Role])
 			if err != nil {
+				d.o.releaseHolds(ctx, w.TenantID, holds)
 				return d.fail(stage, work.OnFailBlock, err.Error()), nil
 			}
 			key := keys[i]
@@ -645,18 +792,30 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			if err != nil {
 				var rej *domain.RejectedError
 				if errors.As(err, &rej) {
+					d.o.releaseHolds(ctx, w.TenantID, holds)
 					return d.fail(stage, stage.OnFailure, "run rejected: "+rej.Reason), nil
 				}
 				return step{}, err
 			}
-			st.Runs = append(st.Runs, stageRun{RunID: runID, Role: a.Role, Required: a.Required, Snapshot: snapID})
+			sr := stageRun{RunID: runID, Role: a.Role, Required: a.Required, Snapshot: snapID}
+			as := Assignment{WorkID: w.ID, StageID: stage.ID, Role: a.Role, Goal: cpkit.Truncate(a.Goal, 300), RunID: runID,
+				SnapshotID: snapID, EvidenceScope: w.Goal.SubjectRefs, Required: a.Required}
+			if a.Budget != nil {
+				as.Budget = *a.Budget
+				if dl := a.Budget.MaxDuration.D(); dl > 0 {
+					sr.Deadline = now.Add(dl)
+					as.Deadline = sr.Deadline
+				}
+			}
+			assignments = append(assignments, as)
+			st.Runs = append(st.Runs, sr)
 			links = append(links, work.RunLink{RunID: runID, Role: work.RoleOwner, Phase: stage.Phase, StageID: stage.ID,
 				AgentRole: a.Role, Generation: w.Generation, Required: a.Required})
 		}
 		d.o.Metrics.stage(string(stage.Type), "started")
 		m := work.Mutation{StageState: mustJSON(st), Links: links, AddRuns: len(links),
 			Events: []work.NewEvent{{Type: "work.runs_started", Payload: map[string]any{"stage_id": stage.ID,
-				"runs": st.Runs}}}}
+				"runs": st.Runs, "assignments": assignments}}}}
 		if plan.event != nil {
 			m.Events = append(m.Events, *plan.event)
 		}
@@ -683,6 +842,17 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		if rs.Status != r.Status {
 			r.Status, changed = rs.Status, true
 			linkStatus[r.RunID] = rs.Status
+		}
+		if !rs.Terminal && !r.Deadline.IsZero() && !now.Before(r.Deadline) {
+			// The assignment's time budget is spent: stop the run and record
+			// a timeout. The stage goes on with what the other agents found.
+			if err := d.o.Runs.CancelRun(ctx, w.TenantID, r.RunID, "work:"+w.ID, "assignment time budget exceeded",
+				"budget:"+r.RunID); err != nil {
+				return step{}, fmt.Errorf("cancel run %s: %w", r.RunID, err)
+			}
+			rs = RunState{Status: "TIMEOUT", Terminal: true, FailureReason: "assignment time budget exceeded"}
+			r.Status, changed = rs.Status, true
+			linkStatus[r.RunID] = "CANCELLED"
 		}
 		if !rs.Terminal {
 			allDone = false
@@ -719,6 +889,9 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 	}
 	if !allDone {
 		m := work.Mutation{LinkStatus: linkStatus, LinkResults: linkResults, AddCost: cost}
+		if d.o.renewHolds(ctx, w.TenantID, st.Holds) {
+			changed = true
+		}
 		if changed {
 			m.StageState = mustJSON(st)
 		}
@@ -742,6 +915,9 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		return step{m: m, wake: &wake}, nil
 	}
 
+	// Every run of the stage ended: its model-run budget is free again. A
+	// retry of this step after a failed commit finds nothing to release.
+	d.o.releaseHolds(ctx, w.TenantID, st.Holds)
 	var envs []evidence.ResultEnvelope
 	var proposed []json.RawMessage
 	for _, r := range st.Runs {
@@ -761,6 +937,14 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 	if len(rep.NextChecks) > 0 {
 		payload["next_checks"] = rep.NextChecks
 	}
+	syn, err := d.synthesize(ctx, envs)
+	if err != nil {
+		return step{}, err
+	}
+	if len(syn.Findings) > 0 || len(syn.Unavailable) > 0 {
+		payload["findings"] = map[string]any{"count": len(syn.Findings), "contested": syn.Contested,
+			"rejected_refs": syn.Rejected, "unavailable": syn.Unavailable, "distinguishing_checks": syn.NextChecks}
+	}
 	if max := w.Goal.Constraints.MaxCostUSD; max > 0 && float64(w.CostMicros+cost)/1e6 > max {
 		s := d.block(fmt.Sprintf("cost budget exceeded (%.2f USD > %.2f USD)", float64(w.CostMicros+cost)/1e6, max))
 		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
@@ -778,6 +962,36 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 	s := d.advance(stage, payload)
 	s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
 	return s, nil
+}
+
+// synthesize validates the agents' hypotheses against the Work's evidence
+// ledger and records the findings (design §11.2). Recording is idempotent,
+// so a retried step stores nothing twice.
+func (d *driver) synthesize(ctx context.Context, envs []evidence.ResultEnvelope) (Synthesis, error) {
+	has := false
+	for _, e := range envs {
+		has = has || len(e.Hypotheses) > 0 || e.Status != "COMPLETED"
+	}
+	if !has {
+		return Synthesis{}, nil
+	}
+	ledger, err := d.o.Store.ListEvidence(ctx, d.w.TenantID, d.w.ID, 1000)
+	if err != nil {
+		return Synthesis{}, err
+	}
+	syn := Synthesize(envs, ledger, d.o.now())
+	for i := range syn.Findings {
+		f, _, err := d.o.Store.AddFinding(ctx, d.w.TenantID, d.w.ID, syn.Findings[i])
+		if err != nil {
+			return syn, err
+		}
+		syn.Findings[i] = f
+		d.o.Metrics.finding(f.Verdict)
+	}
+	for i := 0; i < syn.Rejected; i++ {
+		d.o.Metrics.finding("rejected")
+	}
+	return syn, nil
 }
 
 // assignmentOutcome classifies how an agent assignment ended.
@@ -986,6 +1200,14 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 			}
 			args = rendered
 		}
+		// A template that is a runbook may only carry a production action
+		// while the runbook is active, in date, rehearsed and written for
+		// this action. Otherwise a human decides what to do.
+		if probs, err := d.runbookProblems(ctx, name); err != nil {
+			return step{}, err
+		} else if len(probs) > 0 {
+			return d.fail(stage, work.OnFailBlock, strings.Join(probs, "; ")), nil
+		}
 		owner := w.OwnerActor
 		if owner == "" {
 			owner = "work:" + w.ID
@@ -1101,6 +1323,44 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 		return d.block(fmt.Sprintf("action %s effect is unknown; reconcile or resolve it", rec.ID)), nil
 	default:
 		return d.block(fmt.Sprintf("action %s is %s", rec.ID, rec.State)), nil
+	}
+}
+
+// runbookProblems checks the runbook behind the Work's template.
+func (d *driver) runbookProblems(ctx context.Context, actionName string) ([]string, error) {
+	ref := d.w.Template.Runbook
+	if ref == nil {
+		return nil, nil
+	}
+	rb, err := d.o.Store.GetRunbook(ctx, d.w.TenantID, ref.ID, ref.Version)
+	switch {
+	case errors.Is(err, runbook.ErrNotFound):
+		return []string{fmt.Sprintf("runbook %s is not registered", ref.ID)}, nil
+	case err != nil:
+		return nil, err
+	}
+	return rb.Problems(actionName, d.o.now()), nil
+}
+
+// recordRunbook adds a closed Work to its runbook's track record.
+func (d *driver) recordRunbook(ctx context.Context, w work.Work) {
+	ref := w.Template.Runbook
+	if ref == nil {
+		return
+	}
+	cctx := context.WithoutCancel(ctx)
+	rb, err := d.o.Store.GetRunbook(cctx, w.TenantID, ref.ID, ref.Version)
+	if err != nil {
+		return
+	}
+	res := runbook.Result{Succeeded: w.Status == work.StatusSucceeded}
+	if acts, err := d.o.Store.ListActions(cctx, w.TenantID, w.ID); err == nil {
+		for _, a := range acts {
+			res.UnknownEffect = res.UnknownEffect || a.State == action.StateEffectUnknown || a.State == action.StateManualRecovery
+		}
+	}
+	if err := d.o.Store.RecordExecution(cctx, w.TenantID, rb.ID, rb.Version, res); err != nil {
+		d.o.log().Warn("record runbook execution", "work_id", w.ID, "runbook", rb.ID, "err", err)
 	}
 }
 
