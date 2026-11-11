@@ -202,6 +202,15 @@ type Plan struct {
 	IntentHash string `json:"intent_hash"`
 	// EffectKey is the stable idempotency key passed downstream.
 	EffectKey string `json:"effect_key"`
+	// TargetIdentity is the digest of the resolved resource identity and
+	// TargetUID its immutable id, when an identity resolver is configured.
+	// Both are inside the intent hash: an approval for a resource that was
+	// deleted and recreated under the same name does not carry over.
+	TargetIdentity string `json:"target_identity,omitempty"`
+	TargetUID      string `json:"target_uid,omitempty"`
+	// DescriptorHash pins the executor contract (schema, risk, idempotency)
+	// the plan was built against; a changed contract invalidates the plan.
+	DescriptorHash string `json:"descriptor_hash,omitempty"`
 }
 
 // IntentSchemaVersion of IntentHash.
@@ -228,9 +237,13 @@ func (p *Plan) Seal() {
 		SnapshotDigest string `json:"preflight_snapshot_digest"`
 		Generation     int    `json:"plan_generation"`
 		Expiry         int64  `json:"approval_expiry"`
+		// Omitted when empty, so plans sealed before these fields existed
+		// keep their hash.
+		Identity   string `json:"target_identity,omitempty"`
+		Descriptor string `json:"descriptor_hash,omitempty"`
 	}{IntentSchemaVersion, p.TenantID, p.ActorScope, p.WorkID, p.RunID, p.ActionName, p.ActionVersion, p.TargetRef,
 		p.TargetVersion, p.ArgsHash, p.PolicyVersion, string(p.Risk), p.BlastRadius, p.SnapshotDigest, p.Generation,
-		p.ExpiresAt.Unix()})
+		p.ExpiresAt.Unix(), p.TargetIdentity, p.DescriptorHash})
 	p.PlanHash = cpkit.MustHash(struct {
 		Intent  string
 		Stage   string
@@ -240,12 +253,29 @@ func (p *Plan) Seal() {
 	p.EffectKey = "action:" + p.TenantID + ":" + p.PlanHash[7:39]
 }
 
-// BreakGlassGrant records an emergency release of a held action.
+// BreakGlassGrant records an emergency release of a held action. The grant
+// is single-use (it releases one plan, which dispatches at most once),
+// short-lived, and bound to one target.
 type BreakGlassGrant struct {
 	Actor         string    `json:"actor"`
 	Justification string    `json:"justification"`
 	IntentHash    string    `json:"intent_hash"`
 	At            time.Time `json:"at"`
+	// IncidentRef is the incident the release belongs to (required for R2).
+	IncidentRef string `json:"incident_ref,omitempty"`
+	// Scope is the one resource the grant covers.
+	Scope string `json:"scope,omitempty"`
+	// ExpiresAt bounds the grant: a release not dispatched by then lapses.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// Review is the mandatory after-the-fact review by a second person.
+	Review *BreakGlassReview `json:"review,omitempty"`
+}
+
+// BreakGlassReview is the second-person review of an emergency release.
+type BreakGlassReview struct {
+	Reviewer string    `json:"reviewer"`
+	Comment  string    `json:"comment,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // Approval is one decision on an action.
@@ -278,6 +308,47 @@ type Record struct {
 	// MayHaveDispatched is true once DISPATCHED was committed: the external
 	// call may have reached the downstream even if no result was recorded.
 	MayHaveDispatched bool `json:"may_have_dispatched"`
+	// LockRef is the canonical ref the target lock was taken on (the
+	// resolved identity; empty: TargetRef).
+	LockRef string `json:"lock_ref,omitempty"`
+	// DispatchClass says what is known about the external call (§7.3):
+	// definitely_not_sent | possibly_dispatched | confirmed_applied.
+	DispatchClass string `json:"dispatch_class,omitempty"`
+	// DryRun marks a plan that passed every dispatch check at a rollout
+	// stage where dispatch is simulated; nothing was sent.
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// Dispatch classes.
+const (
+	DefinitelyNotSent  = "definitely_not_sent"
+	PossiblyDispatched = "possibly_dispatched"
+	ConfirmedApplied   = "confirmed_applied"
+)
+
+// LockKey is the ref the action's target lock is held on.
+func (r Record) LockKey() string {
+	if r.LockRef != "" {
+		return r.LockRef
+	}
+	return r.TargetRef
+}
+
+// ContractHash identifies the parts of a descriptor a plan depends on. An
+// executor whose schema, risk, idempotency or required facts changed (a
+// plugin upgrade) no longer matches plans built against the old contract,
+// even when its version string was not bumped (F24).
+func (d Descriptor) ContractHash() string {
+	return cpkit.MustHash(struct {
+		Name, Version string
+		Kinds         []string
+		Risk          string
+		Schema        string
+		Idem          string
+		Facts         []string
+		VersionFact   string
+		Blast         string
+	}{d.Name, d.Version, d.ResourceKinds, string(d.Risk), string(d.InputSchema), d.IdempotencyMode, d.RequiredFacts, d.VersionFact, d.BlastRadius})
 }
 
 // Store errors.

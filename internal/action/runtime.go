@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/tools"
@@ -106,6 +107,28 @@ type Runtime struct {
 	Effects EffectLedger
 	// Observer receives metric signals (optional).
 	Observer Observer
+
+	// Identity resolves a target ref to its stable identity and aliases
+	// (design §7.2). With it, the target lock, the kernel-effect check and
+	// the intent hash follow the resource, not the name it was called by.
+	Identity IdentityResolver
+	// Quality refuses plans whose required facts come from a collector that
+	// stopped reporting, or on which sources disagree without an authority.
+	Quality FactQuality
+	// DryRun is rollout stage G3: plans are preflighted, approved and
+	// checked for dispatch, but nothing is sent.
+	DryRun bool
+	// Allowed, when non-empty, lists the only actions that may be proposed
+	// (rollout stage G4); Scope the only resources they may target.
+	Allowed []string
+	Scope   []string
+	// Preauthorized are actions a Work with production_writes=preauthorized
+	// may run without a per-action approval (rollout stage G5). Only
+	// idempotent or inspectable actions inside Scope qualify, and never
+	// where the policy denies.
+	Preauthorized []string
+	// BreakGlassTTL bounds an emergency release (default 15m).
+	BreakGlassTTL time.Duration
 }
 
 func (rt *Runtime) now() time.Time { return rt.Clock.Now() }
@@ -152,6 +175,10 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record,
 		return Record{}, fmt.Errorf("%w: unknown action %q", ErrNotApplied, req.Name)
 	}
 	desc := exec.Descriptor()
+	if len(rt.Allowed) > 0 && !slices.Contains(rt.Allowed, desc.Name) {
+		rt.obs().Denied("allowlist")
+		return Record{}, fmt.Errorf("%w: action %q is not enabled at this rollout stage", ErrNotApplied, desc.Name)
+	}
 	now := rt.now()
 	ttl := rt.ApprovalTTL
 	if ttl <= 0 {
@@ -160,7 +187,8 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record,
 	p := Plan{ID: cpkit.NewID(), TenantID: req.TenantID, WorkID: req.WorkID, RunID: req.RunID, StageID: req.StageID,
 		Generation: req.Generation, ActorScope: "work:" + req.WorkID, ActionName: desc.Name, ActionVersion: desc.Version,
 		Risk: desc.Risk, BlastRadius: desc.BlastRadius, Effect: req.Effect, CompensatesID: req.CompensatesID,
-		ProposedBy: req.ProposedBy, CreatedAt: now, ExpiresAt: now.Add(ttl).Truncate(time.Second)}
+		ProposedBy: req.ProposedBy, CreatedAt: now, ExpiresAt: now.Add(ttl).Truncate(time.Second),
+		DescriptorHash: desc.ContractHash()}
 	var reasons []string
 	target, err := cpkit.NormalizeRef(req.Target)
 	if err != nil {
@@ -170,10 +198,28 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record,
 	if !slices.Contains(desc.ResourceKinds, cpkit.RefScheme(target)) {
 		reasons = append(reasons, fmt.Sprintf("action %s cannot target %s resources", desc.Name, cpkit.RefScheme(target)))
 	}
+	inScope := len(rt.Scope) == 0
+	for _, sc := range rt.Scope {
+		inScope = inScope || cpkit.RefMatches(sc, target)
+	}
+	if !inScope {
+		reasons = append(reasons, "target is outside the resources enabled at this rollout stage")
+	}
+	var id ResourceIdentity
+	if rt.Identity != nil {
+		if id, _, _, err = rt.identity(ctx, req.TenantID, target); err != nil {
+			if !errors.Is(err, ErrAmbiguousTarget) {
+				return Record{}, err
+			}
+			reasons = append(reasons, err.Error())
+		} else {
+			p.TargetIdentity, p.TargetUID = id.Digest(), id.UID
+		}
+	}
 	if len(req.AllowedTargets) > 0 {
 		in := false
 		for _, a := range req.AllowedTargets {
-			if cpkit.RefMatches(a, target) {
+			if cpkit.RefMatches(a, target) || (id.Ref != "" && cpkit.RefMatches(a, id.Ref)) {
 				in = true
 			}
 		}
@@ -252,10 +298,11 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record,
 		p.SnapshotID, p.SnapshotDigest = snap.ID, snap.Digest
 		pf.SnapshotID, pf.SnapshotDigest = snap.ID, snap.Digest
 		reasons = append(reasons, freshnessProblems(&snap, target, required)...)
+		reasons = append(reasons, rt.qualityProblems(ctx, req.TenantID, target, required, &snap)...)
 		if desc.VersionFact != "" {
 			if f, ok, conflict := snap.Value(target, desc.VersionFact); ok {
 				p.TargetVersion = f.Value
-				if conflict {
+				if conflict && rt.Quality == nil {
 					reasons = append(reasons, "sources disagree on "+desc.VersionFact)
 				}
 			}
@@ -285,12 +332,19 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record,
 	}
 	pf.Allowed = len(reasons) == 0
 	pf.Reasons = reasons
-	rec := Record{Plan: p, State: StateProposed, Version: 1, Preflight: &pf, UpdatedAt: now}
+	rec := Record{Plan: p, State: StateProposed, Version: 1, Preflight: &pf, UpdatedAt: now, LockRef: id.Ref}
 	switch {
 	case !pf.Allowed:
 		rec.State, rec.Reason = StateRejected, strings.Join(reasons, "; ")
 	case d.Verdict == policy.Allow && p.Approvals == 0:
 		rec.State = StateReady
+	case rt.preauthorized(req, desc, d):
+		// Strict pre-authorization (INV-03): the operator listed this
+		// action for this scope ahead of time. It is recorded like an
+		// approval, bound to this plan's intent hash.
+		rec.State, rec.Reason = StateReady, "pre-authorized by operator policy"
+		rec.ApprovalLog = append(rec.ApprovalLog, Approval{ApproverID: "preauthorization:" + desc.Name, Decision: "preauthorized",
+			IntentHash: p.IntentHash, Comment: "production_writes=preauthorized within the configured scope", At: now})
 	default:
 		rec.State = StateWaitingApproval
 	}
@@ -309,6 +363,36 @@ func (rt *Runtime) Propose(ctx context.Context, req ProposeRequest) (out Record,
 			"action", out.ActionName, "target", out.TargetRef, "state", out.State)
 	}
 	return out, err
+}
+
+// preauthorized reports whether a plan may skip the per-action approval:
+// the Work asked for it, the operator listed the action, a resource scope
+// is configured (and already matched), the downstream is idempotent or
+// inspectable, and the policy does not deny. R3 never qualifies.
+func (rt *Runtime) preauthorized(req ProposeRequest, desc Descriptor, d policy.Decision) bool {
+	return req.WritesMode == "preauthorized" && slices.Contains(rt.Preauthorized, desc.Name) && len(rt.Scope) > 0 &&
+		desc.IdempotencyMode != IdemNone && desc.IdempotencyMode != "" && d.Verdict != policy.Deny &&
+		desc.Risk != domain.RiskR3 && d.Risk != domain.RiskR3
+}
+
+// qualityProblems asks the fact-quality policy (collector health, source
+// authority) about the facts a plan relies on.
+func (rt *Runtime) qualityProblems(ctx context.Context, tenantID, target string, required []string, snap *world.Snapshot) []string {
+	if rt.Quality == nil || len(required) == 0 {
+		return nil
+	}
+	probs := rt.Quality.Problems(ctx, tenantID, target, required, snap)
+	for _, p := range probs {
+		switch {
+		case strings.Contains(p, "conflict"):
+			rt.obs().CollectorStale("conflict")
+		case strings.Contains(p, "failing"):
+			rt.obs().CollectorStale("failing")
+		default:
+			rt.obs().CollectorStale("stale")
+		}
+	}
+	return probs
 }
 
 func freshnessProblems(s *world.Snapshot, target string, required []string) []string {
@@ -376,7 +460,11 @@ func (rt *Runtime) Decide(ctx context.Context, tenantID, actionID, approver, dec
 		}
 	}
 	rec.UpdatedAt = now
-	return rt.Store.UpdateAction(ctx, rec, prev)
+	out, err := rt.Store.UpdateAction(ctx, rec, prev)
+	if err == nil && out.State != StateWaitingApproval {
+		rt.obs().ApprovalLag(decision, now.Sub(rec.CreatedAt))
+	}
+	return out, err
 }
 
 // MinJustification is the shortest break-glass justification accepted.
@@ -387,7 +475,13 @@ const MinJustification = 20
 // approval, cannot outlive the plan, and cannot release what the policy
 // denies (R3 and policy denials never reach WAITING_APPROVAL). The grant is
 // stored on the record; callers write the separate audit trail.
-func (rt *Runtime) BreakGlass(ctx context.Context, tenantID, actionID, actor, intentHash, justification string) (Record, error) {
+//
+// A release of an R2 action must name the incident it belongs to. The grant
+// covers the plan's one target, lapses after BreakGlassTTL when it was not
+// dispatched, and stays open for a second person's review
+// (ReviewBreakGlass). While an effect on the target is unknown, nothing —
+// not even break-glass — dispatches another write to it (Execute).
+func (rt *Runtime) BreakGlass(ctx context.Context, tenantID, actionID, actor, intentHash, justification, incidentRef string) (Record, error) {
 	rec, err := rt.Store.GetAction(ctx, tenantID, actionID)
 	if err != nil {
 		return Record{}, err
@@ -406,6 +500,13 @@ func (rt *Runtime) BreakGlass(ctx context.Context, tenantID, actionID, actor, in
 	if rec.Risk == "R3" || rec.PolicyVerdict == "deny" {
 		return rec, fmt.Errorf("%w: the framework floor cannot be overridden", ErrApprovalMismatch)
 	}
+	incidentRef = strings.TrimSpace(incidentRef)
+	if rec.Risk == domain.RiskR2 && incidentRef == "" {
+		return rec, fmt.Errorf("%w: a break-glass release of an R2 action must name its incident", ErrApprovalMismatch)
+	}
+	if len(incidentRef) > 200 {
+		return rec, fmt.Errorf("%w: incident reference is too long", ErrApprovalMismatch)
+	}
 	now := rt.now()
 	prev := rec.Version
 	if !now.Before(rec.ExpiresAt) {
@@ -415,15 +516,47 @@ func (rt *Runtime) BreakGlass(ctx context.Context, tenantID, actionID, actor, in
 	j := cpkit.Truncate(justification, 2000)
 	rec.ApprovalLog = append(rec.ApprovalLog, Approval{ApproverID: actor, Decision: "break_glass",
 		IntentHash: intentHash, Comment: j, At: now})
-	rec.BreakGlass = &BreakGlassGrant{Actor: actor, Justification: j, IntentHash: intentHash, At: now}
+	bgTTL := rt.BreakGlassTTL
+	if bgTTL <= 0 {
+		bgTTL = 15 * time.Minute
+	}
+	until := now.Add(bgTTL)
+	if rec.ExpiresAt.Before(until) {
+		until = rec.ExpiresAt
+	}
+	rec.BreakGlass = &BreakGlassGrant{Actor: actor, Justification: j, IntentHash: intentHash, At: now,
+		IncidentRef: incidentRef, Scope: rec.LockKey(), ExpiresAt: until}
 	rec.State, rec.Reason, rec.UpdatedAt = StateReady, "released by break-glass ("+actor+")", now
 	out, err := rt.Store.UpdateAction(ctx, rec, prev)
 	if err == nil {
 		rt.obs().BreakGlass()
+		rt.obs().ApprovalLag("break_glass", now.Sub(rec.CreatedAt))
 		rt.log().Warn("action released by break-glass", "tenant", tenantID, "work_id", out.WorkID,
 			"action_id", out.ID, "action", out.ActionName, "target", out.TargetRef, "risk", out.Risk, "actor", actor)
 	}
 	return out, err
+}
+
+// ReviewBreakGlass records the after-the-fact review of an emergency
+// release by a second person. The reviewer cannot be the releaser.
+func (rt *Runtime) ReviewBreakGlass(ctx context.Context, tenantID, actionID, reviewer, comment string) (Record, error) {
+	rec, err := rt.Store.GetAction(ctx, tenantID, actionID)
+	if err != nil {
+		return Record{}, err
+	}
+	switch {
+	case rec.BreakGlass == nil:
+		return rec, fmt.Errorf("%w: action %s was not released by break-glass", ErrInvalidState, rec.ID)
+	case rec.BreakGlass.Review != nil:
+		return rec, nil // idempotent: the first review stands
+	case reviewer == "" || reviewer == rec.BreakGlass.Actor:
+		return rec, fmt.Errorf("%w: a break-glass release is reviewed by a second person", ErrApprovalMismatch)
+	}
+	prev := rec.Version
+	now := rt.now()
+	rec.BreakGlass.Review = &BreakGlassReview{Reviewer: reviewer, Comment: cpkit.Truncate(comment, 2000), At: now}
+	rec.UpdatedAt = now
+	return rt.Store.UpdateAction(ctx, rec, prev)
 }
 
 // ErrApprovalMismatch is returned for approvals that do not bind the plan.
@@ -437,6 +570,7 @@ func (rt *Runtime) Expire(ctx context.Context, tenantID, actionID string) (Recor
 	}
 	prev := rec.Version
 	rec.State, rec.Reason, rec.UpdatedAt = StateRejected, "approval window expired", rt.now()
+	rt.obs().ApprovalLag("expired", rec.UpdatedAt.Sub(rec.CreatedAt))
 	return rt.Store.UpdateAction(ctx, rec, prev)
 }
 
@@ -455,12 +589,24 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 	}
 	exec, ok := rt.Registry.Lookup(rec.ActionName)
 	if !ok || exec.Descriptor().Version != rec.ActionVersion {
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "refused")
 		return rt.reject(ctx, rec, "action implementation changed since the plan was approved")
 	}
 	desc := exec.Descriptor()
+	if rec.DescriptorHash != "" && desc.ContractHash() != rec.DescriptorHash {
+		// Same version string, different contract (schema, risk,
+		// idempotency): the approved plan must not be read as new arguments.
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "refused")
+		return rt.reject(ctx, rec, "action implementation changed since the plan was approved (descriptor contract differs)")
+	}
 	now := rt.now()
 	if !now.Before(rec.ExpiresAt) {
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "refused")
 		return rt.reject(ctx, rec, "plan expired before dispatch")
+	}
+	if g := rec.BreakGlass; g != nil && !g.ExpiresAt.IsZero() && !now.Before(g.ExpiresAt) {
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "refused")
+		return rt.reject(ctx, rec, "plan expired before dispatch: the break-glass grant lapsed")
 	}
 	// Policy re-check: a stricter policy since approval wins.
 	gate := rt.Policy
@@ -487,12 +633,15 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 		if err != nil {
 			return rec, err
 		}
-		if probs := freshnessProblems(&snap, rec.TargetRef, required); len(probs) > 0 {
+		probs := append(freshnessProblems(&snap, rec.TargetRef, required),
+			rt.qualityProblems(ctx, tenantID, rec.TargetRef, required, &snap)...)
+		if len(probs) > 0 {
+			rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "refused")
 			return rt.reject(ctx, rec, "precondition failed: "+strings.Join(probs, "; "))
 		}
 		if desc.VersionFact != "" {
 			f, _, conflict := snap.Value(rec.TargetRef, desc.VersionFact)
-			if conflict {
+			if conflict && rt.Quality == nil {
 				return rt.reject(ctx, rec, "precondition failed: sources disagree on "+desc.VersionFact)
 			}
 			if f.Value != rec.TargetVersion {
@@ -501,8 +650,40 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 			}
 		}
 	}
+	// The target as a resource, not as a name: every alias of it is checked
+	// against both ledgers and locked under one canonical ref.
+	id, refs, effectTargets, err := rt.identity(ctx, tenantID, rec.TargetRef)
+	if err != nil {
+		if errors.Is(err, ErrAmbiguousTarget) {
+			return rt.reject(ctx, rec, "precondition failed: "+err.Error())
+		}
+		return rec, err
+	}
+	if rec.TargetIdentity != "" && rt.Identity != nil && id.Digest() != rec.TargetIdentity {
+		// Same name, different resource (recreated, re-pointed alias): the
+		// approval was for the old one.
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "refused")
+		return rt.reject(ctx, rec, "precondition failed: target identity changed since the plan was approved")
+	}
+	lockKey := rec.LockKey()
+	if rt.Identity != nil {
+		lockKey = id.Ref
+	}
+	if uf, ok := rt.Store.(UnsettledFinder); ok {
+		// An unknown effect outlives its lock: while one is open on the
+		// resource, no other write is dispatched to it (INV-05).
+		open, err := uf.UnsettledActions(ctx, tenantID, refs, rec.ID, 1)
+		if err != nil {
+			return rec, err
+		}
+		if len(open) > 0 {
+			rt.obs().Denied("target_busy")
+			return rec, fmt.Errorf("%w: action %s on %s is %s; reconcile or resolve it first", ErrTargetBusy, open[0].ID,
+				open[0].TargetRef, open[0].State)
+		}
+	}
 	if rt.Effects != nil {
-		open, err := rt.Effects.KernelEffects(ctx, tenantID, EffectTargets(rec.TargetRef), true, 5)
+		open, err := rt.Effects.KernelEffects(ctx, tenantID, effectTargets, true, 5)
 		if err != nil {
 			return rec, fmt.Errorf("read kernel effect ledger: %w", err)
 		}
@@ -518,14 +699,28 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 	if lockTTL <= 0 {
 		lockTTL = time.Hour
 	}
-	got, holder, err := rt.Store.LockTarget(ctx, tenantID, rec.TargetRef, rec.ID, now.Add(lockTTL), now)
+	if rt.DryRun {
+		// Stage G3: everything a dispatch would check has passed. Nothing is
+		// locked or sent, and the record says so — it is never APPLIED.
+		prev := rec.Version
+		rec.State, rec.DryRun, rec.DispatchClass, rec.UpdatedAt = StateRejected, true, DefinitelyNotSent, now
+		rec.Reason = "dry-run: the plan passed every dispatch check; dispatch is simulated at this rollout stage"
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "dry_run")
+		out, err := rt.Store.UpdateAction(ctx, rec, prev)
+		if err != nil {
+			return rec, err
+		}
+		return out, fmt.Errorf("%w: %s", ErrPrecondition, out.Reason)
+	}
+	got, holder, err := rt.Store.LockTarget(ctx, tenantID, lockKey, rec.ID, now.Add(lockTTL), now)
 	if err != nil {
 		return rec, err
 	}
 	if !got {
 		rt.obs().Denied("target_busy")
-		return rec, fmt.Errorf("%w: %s is held by action %s", ErrTargetBusy, rec.TargetRef, holder)
+		return rec, fmt.Errorf("%w: %s is held by action %s", ErrTargetBusy, lockKey, holder)
 	}
+	rec.LockRef = lockKey
 	// Ledger first: once DISPATCHED is committed the call may happen, and a
 	// crash from here on is an unknown effect, never a silent retry.
 	prev := rec.Version
@@ -549,12 +744,16 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 	rec.UpdatedAt = done
 	switch {
 	case xerr == nil:
-		rec.State, rec.Result = StateApplied, boundJSON(result)
+		rec.State, rec.Result, rec.DispatchClass = StateApplied, boundJSON(result), ConfirmedApplied
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "applied")
 	case errors.Is(xerr, ErrNotApplied):
-		rec.State, rec.LastError = StateFailed, cpkit.Truncate(xerr.Error(), 1000)
+		rec.State, rec.LastError, rec.DispatchClass = StateFailed, cpkit.Truncate(xerr.Error(), 1000), DefinitelyNotSent
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "not_applied")
 	default:
-		rec.State, rec.LastError = StateEffectUnknown, cpkit.Truncate(xerr.Error(), 1000)
+		// Anything the executor cannot prove harmless may have been sent.
+		rec.State, rec.LastError, rec.DispatchClass = StateEffectUnknown, cpkit.Truncate(xerr.Error(), 1000), PossiblyDispatched
 		rt.obs().EffectUnknown("dispatch_error")
+		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "unknown")
 	}
 	out, err = rt.Store.UpdateAction(context.WithoutCancel(ctx), rec, prev)
 	if err != nil {
@@ -564,7 +763,7 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 		return rec, fmt.Errorf("record action result: %w", err)
 	}
 	if out.State == StateFailed {
-		_ = rt.Store.UnlockTarget(ctx, tenantID, out.TargetRef, out.ID)
+		_ = rt.Store.UnlockTarget(ctx, tenantID, out.LockKey(), out.ID)
 	}
 	rt.log().Info("action dispatched", "tenant", tenantID, "work_id", out.WorkID, "action_id", out.ID,
 		"action", out.ActionName, "target", out.TargetRef, "state", out.State)
@@ -631,16 +830,27 @@ func (rt *Runtime) Reconcile(ctx context.Context, tenantID, actionID string) (Re
 	exec, ok := rt.Registry.Lookup(rec.ActionName)
 	var ir InspectResult
 	var ierr error = ErrUnsupported
+	started := time.Now()
 	if ok && exec.Descriptor().IdempotencyMode != IdemNone {
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		ir, ierr = exec.Inspect(cctx, rec.Plan)
 		cancel()
 	}
+	result := "unknown"
+	switch {
+	case ierr != nil && !errors.Is(ierr, ErrUnsupported):
+		result = "error"
+	case ierr == nil && ir.Applied != nil && *ir.Applied:
+		result = "applied"
+	case ierr == nil && ir.Applied != nil:
+		result = "not_applied"
+	}
+	rt.obs().Reconciled(result, time.Since(started))
 	prev := rec.Version
 	rec.UpdatedAt = rt.now()
 	switch {
 	case ierr == nil && ir.Applied != nil && *ir.Applied:
-		rec.State, rec.Inspect = StateApplied, &ir
+		rec.State, rec.Inspect, rec.DispatchClass = StateApplied, &ir, ConfirmedApplied
 	case ierr == nil && ir.Applied != nil:
 		// Proven not applied. It is still not retried automatically: a
 		// human (or a new plan) decides whether to try again.
@@ -677,7 +887,7 @@ func (rt *Runtime) Resolve(ctx context.Context, tenantID, actionID, actor string
 	}
 	out, err := rt.Store.UpdateAction(ctx, rec, prev)
 	if err == nil && out.State == StateFailed {
-		_ = rt.Store.UnlockTarget(ctx, tenantID, out.TargetRef, out.ID)
+		_ = rt.Store.UnlockTarget(ctx, tenantID, out.LockKey(), out.ID)
 	}
 	return out, err
 }
@@ -735,7 +945,7 @@ func (rt *Runtime) VerifyEffect(ctx context.Context, tenantID, actionID string, 
 	}
 	out, err = rt.Store.UpdateAction(ctx, rec, prev)
 	if err == nil && out.State.Settled() {
-		_ = rt.Store.UnlockTarget(ctx, tenantID, out.TargetRef, out.ID)
+		_ = rt.Store.UnlockTarget(ctx, tenantID, out.LockKey(), out.ID)
 		if out.DispatchedAt != nil {
 			rt.obs().Verify(out.State, now.Sub(*out.DispatchedAt))
 		}

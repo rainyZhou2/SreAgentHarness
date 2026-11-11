@@ -698,6 +698,12 @@ func (r *recObserver) Verify(s action.State, _ time.Duration) {
 }
 func (r *recObserver) Denied(reason string) { r.add("denied:" + reason) }
 func (r *recObserver) BreakGlass()          { r.add("break_glass") }
+func (r *recObserver) Dispatch(name, risk, result string) {
+	r.add("dispatch:" + name + ":" + risk + ":" + result)
+}
+func (r *recObserver) Reconciled(res string, _ time.Duration)  { r.add("reconciled:" + res) }
+func (r *recObserver) ApprovalLag(dec string, _ time.Duration) { r.add("approval:" + dec) }
+func (r *recObserver) CollectorStale(reason string)            { r.add("collector:" + reason) }
 func (r *recObserver) has(s string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
