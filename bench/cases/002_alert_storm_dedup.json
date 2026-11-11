@@ -1,0 +1,31 @@
+{
+  "name": "002-alert-storm-dedup",
+  "description": "An alert storm: forty firing notifications for one service in ten minutes, several of them redeliveries. They converge on one Work; the storm does not create a Work per alert.",
+  "rules": [{"name": "alerts", "match": {"event_types": ["alert.firing"]}, "key": "subject", "template": "bench-wait",
+    "work_kind": "incident", "title": "${type} on ${subject}"}],
+  "templates": [{"id": "bench-wait", "kind": "incident", "limits": {"max_event_rate": 10},
+    "stages": [{"id": "triage", "type": "confirm", "phase": "assess"}]}],
+  "signals": [
+    {"at": "0s", "event": {"event_id": "storm-01", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-a"}},
+    {"at": "0s", "event": {"event_id": "storm-01", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-a"}},
+    {"at": "10s", "event": {"event_id": "storm-02", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-b"}},
+    {"at": "20s", "event": {"event_id": "storm-03", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-c"}},
+    {"at": "30s", "event": {"event_id": "storm-04", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-d"}},
+    {"at": "40s", "event": {"event_id": "storm-05", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-e"}},
+    {"at": "50s", "event": {"event_id": "storm-06", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-f"}},
+    {"at": "1m", "event": {"event_id": "storm-07", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-g"}},
+    {"at": "1m", "event": {"event_id": "storm-07", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-g"}},
+    {"at": "70s", "event": {"event_id": "storm-08", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-h"}},
+    {"at": "80s", "event": {"event_id": "storm-09", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-i"}},
+    {"at": "90s", "event": {"event_id": "storm-10", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-j"}},
+    {"at": "100s", "event": {"event_id": "storm-11", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-k"}},
+    {"at": "110s", "event": {"event_id": "storm-12", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-l"}},
+    {"at": "2m", "event": {"event_id": "storm-13", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-m"}},
+    {"at": "3m", "event": {"event_id": "storm-14", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-n"}},
+    {"at": "5m", "event": {"event_id": "storm-15", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-o"}},
+    {"at": "9m", "event": {"event_id": "storm-16", "source": "alertmanager", "type": "alert.firing", "subject_ref": "service://prod/checkout", "dedup_key": "fp-p"}}
+  ],
+  "human": [{"stage": "triage", "command": "confirm", "payload": {"verdict": "satisfied", "comment": "one incident, handled"}, "at": "12m"}],
+  "horizon": "1h",
+  "expect": {"works": 1, "status": "SUCCEEDED", "max_runs": 0}
+}

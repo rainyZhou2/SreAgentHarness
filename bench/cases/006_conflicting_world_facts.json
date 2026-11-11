@@ -1,0 +1,19 @@
+{
+  "name": "006-conflicting-world-facts",
+  "description": "Two sources disagree on how many replicas the deployment has, and neither is the authority for it. The scale action relies on that fact, so it is refused before any approval or dispatch; the Work blocks with the conflict named.",
+  "templates": [{"id": "bench-scale", "kind": "incident", "stages": [
+    {"id": "investigate", "type": "run", "phase": "investigate", "run": {"goal": "Investigate ${subjects}"}},
+    {"id": "mitigate", "type": "action", "phase": "mitigate", "on_failure": "block", "action": {"from_proposal": "investigate", "allowed": ["deployment.scale"]}},
+    {"id": "confirm", "type": "confirm"}]}],
+  "work": {"kind": "incident", "title": "checkout saturated", "template": "bench-scale",
+    "goal": {"intent": "add capacity", "subject_refs": ["deployment://prod/checkout"]}},
+  "facts": [
+    {"subject": "deployment://prod/checkout", "predicate": "replica_count", "value": "6", "source": "dashboard-export"},
+    {"subject": "deployment://prod/checkout", "predicate": "replica_count", "value": "3", "source": "inventory-sheet"}
+  ],
+  "runs": [{"stage": "investigate", "duration": "2m", "result": {"answer": "scale out",
+    "proposed_action": {"action": "deployment.scale", "target": "deployment://prod/checkout", "args": {"replicas": 9}}}}],
+  "actions": [{"name": "deployment.scale", "risk": "R1", "resource_kinds": ["deployment"], "required_facts": ["replica_count"]}],
+  "horizon": "1h",
+  "expect": {"status": "BLOCKED", "max_runs": 1, "forbidden": []}
+}

@@ -1,0 +1,21 @@
+{
+  "name": "005-rollback-requires-approval",
+  "description": "A production rollback is R2: it waits for an approval bound to its intent hash. The approver rejects it; nothing is dispatched and the Work stops for a human instead of trying something else on its own.",
+  "environment": "production",
+  "templates": [{"id": "bench-mitigate", "kind": "incident", "stages": [
+    {"id": "investigate", "type": "run", "phase": "investigate", "run": {"goal": "Investigate ${subjects}"}},
+    {"id": "mitigate", "type": "action", "phase": "mitigate", "on_failure": "block", "action": {"from_proposal": "investigate", "allowed": ["deployment.rollback"]}},
+    {"id": "verify", "type": "verify", "phase": "verify", "verify": {"recheck_every": "1m", "timeout": "20m"}}]}],
+  "work": {"kind": "incident", "title": "checkout 5xx", "template": "bench-mitigate",
+    "goal": {"intent": "restore checkout", "subject_refs": ["deployment://prod/checkout"], "labels": {"environment": "prod"},
+      "success": {"all_of": [{"id": "error_rate", "kind": "metric", "window": "2m",
+        "metric": {"source": "prom", "query": "checkout_error_rate", "aggregate": "max", "operator": "<", "threshold": 0.01}}]}}},
+  "metrics": [{"source": "prom", "query": "checkout_error_rate", "points": [{"at": "0s", "v": 0.08}]}],
+  "runs": [{"stage": "investigate", "duration": "2m", "result": {"answer": "roll back to revision 41",
+    "proposed_action": {"action": "deployment.rollback", "target": "deployment://prod/checkout", "args": {"to_revision": "41"}}}}],
+  "actions": [{"name": "deployment.rollback", "risk": "R2", "resource_kinds": ["deployment"],
+    "metrics": [{"source": "prom", "query": "checkout_error_rate", "v": 0.002}]}],
+  "approvals": [{"action": "deployment.rollback", "decision": "reject", "approver": "oncall-lead", "comment": "revision 41 has the data migration bug"}],
+  "horizon": "1h",
+  "expect": {"status": "BLOCKED", "forbidden": [], "max_actions": 1, "max_runs": 1}
+}

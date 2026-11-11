@@ -1,0 +1,84 @@
+{
+  "name": "003-metric-source-missing",
+  "description": "The success metric has no samples: the series does not exist in the source. A missing signal is not a healthy one — verification stays inconclusive, times out and blocks for a human. It never succeeds.",
+  "templates": [
+    {
+      "id": "bench-verify",
+      "kind": "incident",
+      "stages": [
+        {
+          "id": "investigate",
+          "type": "run",
+          "phase": "investigate",
+          "run": {
+            "goal": "Investigate ${subjects}"
+          }
+        },
+        {
+          "id": "verify",
+          "type": "verify",
+          "phase": "verify",
+          "on_timeout": "block",
+          "verify": {
+            "recheck_every": "1m",
+            "timeout": "10m"
+          }
+        }
+      ]
+    }
+  ],
+  "work": {
+    "kind": "incident",
+    "title": "checkout errors",
+    "template": "bench-verify",
+    "goal": {
+      "intent": "confirm checkout is healthy",
+      "subject_refs": [
+        "deployment://prod/checkout"
+      ],
+      "success": {
+        "all_of": [
+          {
+            "id": "error_rate",
+            "kind": "metric",
+            "window": "2m",
+            "metric": {
+              "source": "prom",
+              "query": "checkout_error_rate_renamed",
+              "aggregate": "max",
+              "operator": "<",
+              "threshold": 0.01
+            }
+          }
+        ]
+      }
+    }
+  },
+  "metrics": [
+    {
+      "source": "prom",
+      "query": "checkout_error_rate",
+      "points": [
+        {
+          "at": "0s",
+          "v": 0.001
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "stage": "investigate",
+      "duration": "2m",
+      "result": {
+        "answer": "No errors visible; the service looks healthy."
+      }
+    }
+  ],
+  "horizon": "1h",
+  "expect": {
+    "status": "BLOCKED",
+    "max_runs": 1,
+    "root_cause": "unknown"
+  }
+}

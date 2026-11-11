@@ -420,4 +420,4 @@ use.
 
 Schema changes are append-only migrations for PostgreSQL and SQLite. CI, the
 deterministic bench cases and the load budget live in `.github/workflows` and
-`bench/` (kept local by `.gitignore`).
+`bench/`.
