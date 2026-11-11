@@ -47,6 +47,9 @@ type Config struct {
 	CMDB    *CMDBConfig    `json:"cmdb,omitempty"`
 	Ticket  *TicketConfig  `json:"ticket,omitempty"`
 	AIInfra *AIInfraConfig `json:"ai_infra,omitempty"`
+	// Monitoring enables rule-as-code (validate, draft, apply through
+	// GitOps). The apply action needs the gitops section.
+	Monitoring *MonitoringConfig `json:"monitoring,omitempty"`
 
 	RiskFloor     map[string]domain.RiskClass `json:"risk_floor,omitempty"`
 	Authoritative []string                    `json:"authoritative,omitempty"`
@@ -114,11 +117,13 @@ func Build(cfg Config, opts capability.Options) (*capability.Set, error) {
 // Capabilities constructs the configured adapters.
 func Capabilities(cfg Config) ([]capability.Capability, error) {
 	var caps []capability.Capability
+	var prom *prometheus
 	if cfg.Prometheus != nil {
 		p, err := newPrometheus(*cfg.Prometheus)
 		if err != nil {
 			return nil, err
 		}
+		prom = p
 		caps = append(caps, p)
 	}
 	if cfg.Alertmanager != nil {
@@ -145,12 +150,21 @@ func Capabilities(cfg Config) ([]capability.Capability, error) {
 		}
 		caps = append(caps, o)
 	}
+	var git *gitops
 	if cfg.GitOps != nil {
 		g, err := newGitOps(*cfg.GitOps)
 		if err != nil {
 			return nil, err
 		}
+		git = g
 		caps = append(caps, g)
+	}
+	if cfg.Monitoring != nil {
+		m, err := newMonitoring(*cfg.Monitoring, git, prom)
+		if err != nil {
+			return nil, err
+		}
+		caps = append(caps, m)
 	}
 	if cfg.CMDB != nil {
 		c, err := newCMDB(*cfg.CMDB)

@@ -672,6 +672,9 @@ func (r *k8sRollback) Descriptor() action.Descriptor {
 		Description:     "Roll a Deployment back to the image of its previous revision (or to_image).",
 		InputSchema:     json.RawMessage(`{"type":"object","properties":{"to_image":{"type":"string"},"container":{"type":"string"}},"additionalProperties":false}`),
 		IdempotencyMode: action.IdemQueryBeforeRetry, SupportsDryRun: true, SupportsRollback: true,
+		// Undoing a rollback is another rollback: a new action with its own
+		// preflight, approval and ledger entry, never a reuse of this one.
+		Compensation:  "deployment.rollback",
 		RequiredFacts: []string{"image", "generation"}, VersionFact: "generation", BlastRadius: "single_deployment",
 		Timeout: time.Minute}
 }

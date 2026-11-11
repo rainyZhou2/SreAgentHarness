@@ -63,6 +63,22 @@ type InferenceService struct {
 	TTFTSLO float64 `json:"ttft_slo_seconds"`
 	// QueueLimit marks queue saturation in diagnosis (default 16).
 	QueueLimit float64 `json:"queue_limit,omitempty"`
+	// TPOTSLO and E2ESLO are the p95 time-per-output-token and end-to-end
+	// latency objectives in seconds (optional).
+	TPOTSLO float64 `json:"tpot_slo_seconds,omitempty"`
+	E2ESLO  float64 `json:"e2e_slo_seconds,omitempty"`
+	// Metrics overrides the engine's series names by key (ttft, tpot, e2e,
+	// queue, running, kv, gen, prompt, cache_hits, cache_queries). Engine
+	// versions rename their metrics; set the names your exporter serves.
+	Metrics map[string]string `json:"metrics,omitempty"`
+	// Prefill and Decode describe the pools of a prefill/decode-separated
+	// deployment. With them the diagnosis tells a prefill backlog from
+	// decode back-pressure and the serving.scale_* actions are available.
+	Prefill *ServingPool `json:"prefill,omitempty"`
+	Decode  *ServingPool `json:"decode,omitempty"`
+	// GPUsPerReplica and Cost feed the cost guard and the cost queries.
+	GPUsPerReplica int        `json:"gpus_per_replica,omitempty"`
+	Cost           *CostModel `json:"cost,omitempty"`
 }
 
 // TrainingConfig configures training-job collection.
@@ -90,10 +106,20 @@ var engines = map[string]engineMetrics{
 }
 
 // inferenceQueries are the named queries of the "inference" metric source.
-var inferenceQueries = []string{"ttft_p95", "ttft_p99", "queue_depth", "running", "kv_cache_usage", "gen_tokens_per_s"}
+var inferenceQueries = []string{"ttft_p95", "ttft_p99", "queue_depth", "running", "kv_cache_usage", "gen_tokens_per_s",
+	"tpot_p95", "e2e_p95", "prompt_tokens_per_s", "cache_hit_rate", "prefill_queue", "decode_queue", "gpu_count",
+	"tokens_per_gpu_second", "hourly_cost_usd"}
 
 func (s InferenceService) expr(query string) (string, error) {
+	if e, ok, err := s.exprV3(query); ok || err != nil {
+		return e, err
+	}
 	m := engines[s.Engine]
+	for key, dst := range map[string]*string{"ttft": &m.ttft, "queue": &m.queue, "running": &m.running, "kv": &m.kv, "gen": &m.gen} {
+		if v := s.Metrics[key]; v != "" {
+			*dst = v
+		}
+	}
 	sel := "{" + s.Selector + "}"
 	switch query {
 	case "ttft_p95", "ttft_p99":
@@ -210,7 +236,7 @@ func newAIInfra(cfg AIInfraConfig, k *kubernetes) ([]capability.Capability, erro
 		if g.MaxGPUs <= 0 {
 			g.MaxGPUs = 4096
 		}
-		caps = append(caps, &gpuCap{cfg: g, p: p})
+		caps = append(caps, &gpuCap{cfg: g, p: p, lastUUID: map[string]string{}, lastMIG: map[string]string{}})
 	}
 	if len(cfg.Inference) > 0 {
 		inf := &inference{p: p, every: cfg.InferenceEvery.D(), group: group, byRef: map[string]InferenceService{}}
@@ -235,11 +261,17 @@ func newAIInfra(cfg AIInfraConfig, k *kubernetes) ([]capability.Capability, erro
 			if s.QueueLimit <= 0 {
 				s.QueueLimit = 16
 			}
+			if err := s.validateV3(); err != nil {
+				return nil, fmt.Errorf("ai_infra: %s: %w", ref, err)
+			}
 			if _, dup := inf.byRef[ref]; dup {
 				return nil, fmt.Errorf("ai_infra: %s configured twice", ref)
 			}
 			inf.byRef[ref] = s
 			inf.order = append(inf.order, ref)
+		}
+		if k != nil {
+			inf.k = k.k
 		}
 		caps = append(caps, inf)
 	}
@@ -276,6 +308,12 @@ type gpuCap struct {
 	capability.Base
 	cfg GPUConfig
 	p   promAPI
+
+	// What each slot held at the last collection, to notice a replaced
+	// card or a changed MIG layout (see identity).
+	mu       sync.Mutex
+	lastUUID map[string]string
+	lastMIG  map[string]string
 }
 
 func (g *gpuCap) ID() string      { return "gpu" }
@@ -305,7 +343,13 @@ func (g *gpuCap) RegisterEvents(r capability.EventRegistry) error {
 type gpuRow struct {
 	Host, Index, UUID, Model, Namespace, Pod string
 	Util, MemUsed, MemFree, Temp, XID        float64
-	has                                      map[string]bool
+	// ECC double-bit errors, NVLink CRC/replay errors and PCIe replays
+	// since the driver loaded (monotonic counters).
+	ECCDBE, NVLinkErr, PCIeReplay float64
+	// MIG maps a GPU instance id to its profile ("1g.10gb") when the card
+	// is partitioned.
+	MIG map[string]string
+	has map[string]bool
 }
 
 func gpuKey(l map[string]string) string { return l["Hostname"] + "/" + l["gpu"] }
@@ -314,7 +358,9 @@ func (g *gpuCap) rows(ctx context.Context, filter string) ([]*gpuRow, error) {
 	byKey := map[string]*gpuRow{}
 	var keys []string
 	for _, m := range []struct{ name, metric string }{{"util", "DCGM_FI_DEV_GPU_UTIL"}, {"mem", "DCGM_FI_DEV_FB_USED"},
-		{"free", "DCGM_FI_DEV_FB_FREE"}, {"temp", "DCGM_FI_DEV_GPU_TEMP"}, {"xid", "DCGM_FI_DEV_XID_ERRORS"}} {
+		{"free", "DCGM_FI_DEV_FB_FREE"}, {"temp", "DCGM_FI_DEV_GPU_TEMP"}, {"xid", "DCGM_FI_DEV_XID_ERRORS"},
+		{"ecc", "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL"}, {"nvlink", "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL"},
+		{"pcie", "DCGM_FI_DEV_PCIE_REPLAY_COUNTER"}} {
 		expr := m.metric
 		if filter != "" {
 			expr += "{" + filter + "}"
@@ -341,6 +387,12 @@ func (g *gpuCap) rows(ctx context.Context, filter string) ([]*gpuRow, error) {
 			if r.Pod == "" && s.Labels["pod"] != "" {
 				r.Namespace, r.Pod = s.Labels["namespace"], s.Labels["pod"]
 			}
+			if gi := s.Labels["GPU_I_ID"]; gi != "" {
+				if r.MIG == nil {
+					r.MIG = map[string]string{}
+				}
+				r.MIG[gi] = s.Labels["GPU_I_PROFILE"]
+			}
 			r.has[m.name] = true
 			switch m.name {
 			case "util":
@@ -353,6 +405,12 @@ func (g *gpuCap) rows(ctx context.Context, filter string) ([]*gpuRow, error) {
 				r.Temp = s.Value
 			case "xid":
 				r.XID = s.Value
+			case "ecc":
+				r.ECCDBE = s.Value
+			case "nvlink":
+				r.NVLinkErr = s.Value
+			case "pcie":
+				r.PCIeReplay = s.Value
 			}
 		}
 	}
@@ -408,7 +466,21 @@ func (g *gpuCap) collect(ctx context.Context, now time.Time) (capability.Observa
 		if r.has["temp"] && r.Temp >= g.cfg.TempLimitC {
 			health = "overheating"
 		}
+		if r.has["ecc"] {
+			f("ecc_dbe_total", strconv.FormatFloat(r.ECCDBE, 'f', 0, 64))
+			if r.ECCDBE > 0 {
+				// A double-bit ECC error is uncorrectable memory corruption.
+				health = "faulted"
+			}
+		}
+		if r.has["nvlink"] {
+			f("nvlink_errors_total", strconv.FormatFloat(r.NVLinkErr, 'f', 0, 64))
+		}
+		if r.has["pcie"] {
+			f("pcie_replay_total", strconv.FormatFloat(r.PCIeReplay, 'f', 0, 64))
+		}
 		f("health", health)
+		g.identity(&o, r, ref, node, health, now)
 		o.Relations = append(o.Relations, world.Relation{FromRef: node, Type: "has_gpu", ToRef: ref})
 		if r.Pod != "" && dns1123.MatchString(r.Namespace) && dns1123.MatchString(r.Pod) {
 			o.Relations = append(o.Relations, world.Relation{FromRef: "pod://" + r.Namespace + "/" + r.Pod, Type: "uses_gpu", ToRef: ref})
@@ -491,6 +563,9 @@ type inference struct {
 	group string
 	byRef map[string]InferenceService
 	order []string
+	// k is the Kubernetes client the serving.scale_* actions use (nil:
+	// the actions are not registered).
+	k *kube
 }
 
 func (i *inference) ID() string      { return "inference" }
@@ -541,6 +616,13 @@ type snapshot struct {
 	Running   *float64 `json:"running,omitempty"`
 	KVCache   *float64 `json:"kv_cache_usage,omitempty"`
 	GenTokens *float64 `json:"gen_tokens_per_s,omitempty"`
+	// The fields below are read when the service configures them.
+	TPOTp95      *float64 `json:"tpot_p95_seconds,omitempty"`
+	E2Ep95       *float64 `json:"e2e_p95_seconds,omitempty"`
+	PromptTokens *float64 `json:"prompt_tokens_per_s,omitempty"`
+	CacheHitRate *float64 `json:"cache_hit_rate,omitempty"`
+	PrefillQueue *float64 `json:"prefill_queue,omitempty"`
+	DecodeQueue  *float64 `json:"decode_queue,omitempty"`
 }
 
 func (i *inference) snapshot(ctx context.Context, s InferenceService) (snapshot, error) {
@@ -559,6 +641,7 @@ func (i *inference) snapshot(ctx context.Context, s InferenceService) (snapshot,
 			*q.dst = &v
 		}
 	}
+	i.snapshotV3(ctx, s, &snap)
 	return snap, nil
 }
 
@@ -586,6 +669,11 @@ func (i *inference) collect(ctx context.Context, now time.Time) (capability.Obse
 		add("queue_depth", snap.Queue)
 		add("kv_cache_usage", snap.KVCache)
 		add("gen_tokens_per_s", snap.GenTokens)
+		add("tpot_p95_seconds", snap.TPOTp95)
+		add("e2e_p95_seconds", snap.E2Ep95)
+		add("cache_hit_rate", snap.CacheHitRate)
+		add("prefill_queue", snap.PrefillQueue)
+		add("decode_queue", snap.DecodeQueue)
 		o.Facts = append(o.Facts, world.Fact{SubjectRef: ref, Predicate: "serving_engine", Value: s.Engine, TrustTier: t3})
 		if snap.TTFTp95 == nil {
 			continue
@@ -632,6 +720,9 @@ func diagnose(s InferenceService, snap snapshot, gpus []*gpuRow) Diagnosis {
 			d.Suggested = "node.cordon on node://" + strings.ToLower(g.Host)
 			return d
 		}
+	}
+	if d2, ok := diagnosePD(s, snap); ok {
+		return d2
 	}
 	queue := snap.Queue != nil && *snap.Queue >= s.QueueLimit
 	kv := snap.KVCache != nil && *snap.KVCache >= 0.9
