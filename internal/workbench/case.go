@@ -83,6 +83,9 @@ type Fact struct {
 	Predicate string         `json:"predicate"`
 	Value     string         `json:"value"`
 	Trust     string         `json:"trust,omitempty"` // default T2
+	// Source names who reports the fact (default "bench"). Two sources
+	// reporting different values for one predicate is a conflict.
+	Source string `json:"source,omitempty"`
 }
 
 // Series is a scripted metric: a step function through its points.
@@ -133,6 +136,9 @@ type SimAction struct {
 	// Inspect result: applied | not_applied | unknown (default follows
 	// Outcome).
 	Inspect string `json:"inspect,omitempty"`
+	// RequiredFacts must be present, fresh and undisputed for the target
+	// before the action is planned or dispatched.
+	RequiredFacts []string `json:"required_facts,omitempty"`
 	// Effects applied when the action takes effect.
 	Facts   []FactEffect   `json:"facts,omitempty"`
 	Metrics []MetricEffect `json:"metrics,omitempty"`
