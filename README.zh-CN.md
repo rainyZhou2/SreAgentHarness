@@ -338,8 +338,25 @@ ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "审批后重启 check
 
 ## 已知限制
 
-- GPU 推理（vLLM/SGLang 路由、KV offload）未实现。
-- Artifact 仅提供文件系统实现，生产建议以插件接入 S3/MinIO。
+- vLLM/SGLang 的模型路由与 KV cache offload 控制未实现；推理健康、诊断和 prefill/decode 池扩缩容已实现。
+- Artifact：文件系统实现仅适合单机，生产使用 `s3`（S3/MinIO）存储。
 - 离线评估使用独立内存账本，成本不计入租户预算。
 - 计划回放用录制的节点结果驱动 flow 状态机；含有限循环的图会做编译与安全检查，但不做逐步回放。
-- 插件配置在启动时读取，修改后需要重启。
+- 插件配置在启动时读取，修改后需要重启。可观测数据源例外：它们在目录中带版本，可通过 API 在线变更并回滚。
+
+
+## 生产控制平面
+
+Work 引擎（`HARNESS_WORK_ENGINE_ENABLED`）在可恢复的 run 内核之上运行长生命周期目标。关闭时下面的能力都不会运行，run API 保持不变。本节列出生产使用所提供的能力。
+
+- **部署门禁。** `HARNESS_DEPLOYMENT_TIER=local|staging|production`。`harness validate-config --tier production` 不连接任何外部系统，只按层级评估各开关，并推导出发布阶段（G0 旧路径、G1 影子、G2 只读、G3 演练、G4 受限生产、G5 范围内自动化）。生产部署缺少任一保护（自定义策略、审计汇、已知目标与不同审批人检查、动作白名单与范围、健康的必需数据源）时会被拒绝启动，或以*调查模式*运行（动作被保留）。`harness doctor` 检查运行中的部署；`harness release-gate` 对比两份证明；`GET /v1/governance/attestation` 返回当前证明。
+- **集群级准入。** 模型 run 预算是事务化预约，多个副本不会超配；预约带 fence、按阶段幂等，并会被回收（run 仍在进行时续期而不是释放）。支持租户加权公平、优先级老化、为紧急止损保留容量、准入期限，以及对 batch 队列的过载拒绝。run 终态事件会立即唤醒所属 Work；轮询和 reconciler 仍是兜底。
+- **可观测查询代理（Query Broker）。** 按租户隔离的数据源目录（地址与凭据只是运维配置的引用）；Prometheus/VictoriaMetrics/Mimir、Loki、Tempo、Jaeger 与变更账本 provider；范围与预算检查、熔断、缓存、脱敏、提示注入标记、制品存储和审计。结果状态为 `ok|partial|empty|stale|unavailable|unauthorized|denied`，只有完整的证据包才能支撑“健康”的结论。语义工具：`sre.service_health`、`sre.latency_diagnose`、`sre.error_diagnose`、`sre.dependency_health`、`sre.gpu_health`、`sre.inference_health`、`sre.change_correlation`。
+- **动作安全。** 资源身份（别名共享同一把锁，重建的资源使旧审批失效）、descriptor 契约哈希、未知效果会阻断对同一目标的后续写入、演练 / 白名单 / 范围 / 严格预授权、带事件号并需第二人复核的 break-glass，以及用于执行器契约的 `actiontest.Certify`。
+- **World 质量。** 采集器健康、来源权威度与冲突检测对生产动作失败关闭；过期事实被保留，不会被删除。
+- **Work 图。** 受父 Work 权限上限约束的子 Work、带原子环检测的依赖边、`children` 阶段、取消级联；按证据账本校验的结构化 agent Finding（看独立证据，不按多数票）；Runbook 注册表、由复盘生成的 Improvement Work 和意图路由。
+- **事件与协议。** 带版本的事件信封、签名来源、迟到事件处理、可追溯的关联决策与基于拓扑的线索。稳定的事件契约（`?protocol=1`）、统一的 `/v1/works/{id}/view`，以及支持断线续传 `Subscribe` 的 Go SDK。
+- **AI 基础设施。** 基于 UUID 的 GPU 身份（换卡与 MIG 变化）、ECC/NVLink/PCIe 信号、TPOT/E2E/缓存/prefill/decode 信号、prefill/decode 诊断、带守卫的 `serving.scale_prefill|decode`、成本模型，以及 S3/MinIO 制品存储。
+- **规则即代码。** `monitoring.rule_validate`、`monitoring.rule_propose`（R0）和 `monitoring.apply_via_gitops`（R2，仅通过 pull request）。
+
+数据库变更是面向 PostgreSQL 与 SQLite 的追加式迁移。CI、确定性 bench 用例和负载预算位于 `.github/workflows` 与 `bench/`（由 `.gitignore` 保持在本地）。

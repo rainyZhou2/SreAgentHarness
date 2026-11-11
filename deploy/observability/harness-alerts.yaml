@@ -128,3 +128,61 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "p95 World snapshot build above 1s"
+      # ---- admission, observability broker, actions, work graph ----
+      - alert: HarnessWorkQueuedLong
+        expr: sum by (queue) (rate(harness_work_queued_long_total[10m])) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Works are processed after their queue's admission deadline"
+      - alert: HarnessWorkShedding
+        expr: sum by (queue) (rate(harness_work_shed_total[10m])) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "A queue is refusing new Works (backlog limit)"
+      - alert: HarnessReservationsReaped
+        expr: sum(rate(harness_admission_reservations_reaped_total[30m])) > 0
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: "Admission reservations keep expiring: replicas die while holding model-run budget"
+      - alert: HarnessActionEffectUnknown
+        expr: sum(increase(harness_action_effect_unknown_total[15m])) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "An action has an unknown effect; reconcile or resolve it. No further write is dispatched to its target."
+      - alert: HarnessActionDispatchedUnapproved
+        expr: harness_action_dispatch_attempts_total{result="refused"} > 0 and on() (increase(harness_action_dispatch_attempts_total{result="refused"}[10m]) > 5)
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Many action dispatches are refused at the final check (stale target, policy change, descriptor change)"
+      - alert: HarnessObservabilitySourceFailing
+        expr: sum by (backend) (rate(harness_observability_query_total{status=~"unavailable|unauthorized"}[10m])) / clamp_min(sum by (backend) (rate(harness_observability_query_total[10m])), 1e-9) > 0.5
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "More than half of the queries to an observability backend fail; evidence is partial"
+      - alert: HarnessObservabilityBreakerOpen
+        expr: sum by (backend) (increase(harness_observability_breaker_total{state="open"}[15m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A source circuit breaker opened"
+      - alert: HarnessCollectorStale
+        expr: sum by (reason) (increase(harness_world_collector_stale_total[15m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "Action preconditions were refused because a world collector stopped reporting or sources disagree"
+      - alert: HarnessFindingsRejected
+        expr: sum(rate(harness_agent_finding_total{verdict="rejected"}[1h])) > 0
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "Agents cite evidence that is not in the ledger (made-up or unusable references)"
+      - alert: HarnessRunWakeErrors
+        expr: sum(rate(harness_work_run_wake_total{result="error"}[10m])) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Run terminal events fail to wake Works; stages fall back to polling"

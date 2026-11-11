@@ -354,8 +354,70 @@ ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout afte
 
 ## Known limitations
 
-- GPU serving (vLLM/SGLang routing, KV offload) is not implemented.
-- Artifacts only have a filesystem store; use an S3/MinIO plugin in production.
+- Model routing and KV-cache offload control for vLLM/SGLang are not implemented; serving health, diagnosis and prefill/decode pool scaling are.
+- Artifacts: the filesystem store is single-node; use the `s3` store (S3/MinIO) in production.
 - Offline evaluation uses its own in-memory ledger; its cost is not charged to the tenant budget.
 - Plan replay drives the flow state machine with recorded node results; graphs with bounded loops are compiled and safety-checked but not step-replayed.
-- Plugin config is read at startup; changes need a restart.
+- Plugin config is read at startup; changes need a restart. Observability sources are the exception: they are versioned in the catalog and change online through the API (with rollback).
+
+
+## Production control plane
+
+The Work engine (`HARNESS_WORK_ENGINE_ENABLED`) runs long-lived goals on top
+of the durable run kernel. With it off, nothing below runs and the run API is
+unchanged. This section lists what the control plane provides for production
+use.
+
+- **Deployment gate.** `HARNESS_DEPLOYMENT_TIER=local|staging|production`.
+  `harness validate-config --tier production` evaluates the flags against the
+  tier without connecting to anything and derives the rollout stage
+  (G0 legacy, G1 shadow, G2 read-only, G3 dry-run, G4 bounded production,
+  G5 scoped automation). A production deployment missing a safeguard (custom
+  policy, audit sink, known-target and distinct-approver checks, an action
+  allow-list and scope, healthy required sources) is refused or runs in
+  *investigation mode* with actions withheld. `harness doctor` checks a
+  running deployment; `harness release-gate` compares two attestations;
+  `GET /v1/governance/attestation` serves the current one.
+- **Cluster-wide admission.** Model-run budgets are transactional
+  reservations, so replicas cannot oversubscribe; reservations are fenced,
+  idempotent per stage and reaped (renewed when the run is really in flight).
+  Weighted tenant fairness, priority aging, reserved critical capacity,
+  admission deadlines and load shedding for batch queues. Run terminal events
+  wake the owning Work at once; polling and the reconciler remain the safety
+  net.
+- **Observability Query Broker.** A tenant-scoped Source Catalog (endpoints
+  and credentials are operator-owned references), Prometheus/VictoriaMetrics/
+  Mimir, Loki, Tempo, Jaeger and change-ledger providers, scope and budget
+  checks, circuit breakers, caching, redaction, prompt-injection flagging,
+  artifact storage and an audit trail. Results are `ok|partial|empty|stale|
+  unavailable|unauthorized|denied`; only a complete bundle can support a
+  "healthy" statement. Semantic tools: `sre.service_health`,
+  `sre.latency_diagnose`, `sre.error_diagnose`, `sre.dependency_health`,
+  `sre.gpu_health`, `sre.inference_health`, `sre.change_correlation`.
+- **Action safety.** Resource identity (aliases share one lock; a recreated
+  resource invalidates old approvals), descriptor contract hashing, unknown
+  effects block further writes to the target, dry-run / allow-list / scope /
+  strict pre-authorization, break-glass with incident reference, expiry and a
+  second-person review, and `actiontest.Certify` for executor contracts.
+- **World quality.** Collector health, source authority and conflict
+  detection fail closed for production actions; stale facts are kept, never
+  deleted.
+- **Work graph.** Child Works inside the parent's ceiling, dependency edges
+  with atomic cycle rejection, a `children` stage, cancellation cascade,
+  structured agent findings validated against the evidence ledger (independent
+  evidence, no majority vote), a runbook registry, Improvement Works from
+  postmortems and an intent router.
+- **Events and protocol.** A versioned event envelope, signed sources,
+  late-event handling, recorded correlation decisions and topology-assisted
+  leads. A stable event contract (`?protocol=1`), a unified
+  `/v1/works/{id}/view`, and a Go SDK with a resumable `Subscribe`.
+- **AI infrastructure.** UUID-based GPU identity (replacement and MIG
+  changes), ECC/NVLink/PCIe signals, TPOT/E2E/cache/prefill/decode signals,
+  prefill/decode diagnosis, guarded `serving.scale_prefill|decode`, a cost
+  model, and an S3/MinIO artifact store.
+- **Rule-as-code.** `monitoring.rule_validate`, `monitoring.rule_propose` (R0)
+  and `monitoring.apply_via_gitops` (R2, pull request only).
+
+Schema changes are append-only migrations for PostgreSQL and SQLite. CI, the
+deterministic bench cases and the load budget live in `.github/workflows` and
+`bench/` (kept local by `.gitignore`).
