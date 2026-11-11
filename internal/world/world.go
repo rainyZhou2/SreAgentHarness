@@ -635,3 +635,33 @@ func (f Fact) SeenBy(knownAt time.Time) time.Time {
 	}
 	return f.ObservedAt
 }
+
+// Neighbors returns the refs within depth relation hops of subject with
+// their distance (the subject itself is 0), as known now. Edges are
+// followed in both directions: a dependency and its dependents are both
+// "near" for the purpose of looking for related changes and events.
+func (s *Service) Neighbors(ctx context.Context, tenantID, subject string, depth int) (map[string]int, error) {
+	if depth <= 0 || depth > MaxDepth {
+		depth = 1
+	}
+	now := s.Clock.Now()
+	out := map[string]int{subject: 0}
+	frontier := []string{subject}
+	for d := 1; d <= depth && len(frontier) > 0 && len(out) < MaxNodes; d++ {
+		rels, err := s.Store.RelationsAt(ctx, tenantID, frontier, now, now)
+		if err != nil {
+			return nil, err
+		}
+		var next []string
+		for _, r := range rels {
+			for _, ref := range []string{r.FromRef, r.ToRef} {
+				if _, seen := out[ref]; !seen && len(out) < MaxNodes {
+					out[ref] = d
+					next = append(next, ref)
+				}
+			}
+		}
+		frontier = next
+	}
+	return out, nil
+}

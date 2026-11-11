@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,6 +26,8 @@ type Service struct {
 	// catalog id (admin-only at the HTTP layer).
 	AllowInlineTemplates bool
 	Metrics              *Metrics
+	// Queues are the queue limits (load shedding reads MaxBacklog).
+	Queues map[work.Queue]QueueLimit
 	// OnClose is called after a command closed a Work (see Orchestrator).
 	OnClose func(ctx context.Context, w work.Work)
 }
@@ -85,9 +88,44 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (work.Work, boo
 	if actorType == "" {
 		actorType = "user"
 	}
+	if err := s.shed(ctx, req, tpl); err != nil {
+		return work.Work{}, false, err
+	}
 	return s.Store.CreateWork(ctx, work.NewWork{TenantID: req.TenantID, Kind: req.Kind, Title: req.Title, Goal: req.Goal,
 		Template: tpl, Priority: req.Priority, Queue: req.Queue, ActorType: actorType, ActorID: req.ActorID,
 		IdempotencyKey: req.IdempotencyKey, Subjects: subjects, Now: s.Clock.Now()})
+}
+
+// ErrOverloaded refuses a new Work while its queue sheds load (HTTP 429).
+// Only batch and background queues shed; an incident is always admitted,
+// and events are persisted in the inbox before any limit applies.
+var ErrOverloaded = errors.New("queue is shedding load")
+
+// shed applies the queue's backlog limit to a new Work. A replay of an
+// existing idempotency key is never refused: the Work already exists.
+func (s *Service) shed(ctx context.Context, req CreateRequest, tpl work.Template) error {
+	q := req.Queue
+	if q == "" {
+		q = work.DefaultQueue(req.Kind, tpl)
+	}
+	lim := s.Queues[q].MaxBacklog
+	if lim <= 0 || q == work.QueueCritical || q == work.QueueIncident {
+		return nil
+	}
+	if _, err := s.Store.WorkByIdempotencyKey(ctx, req.TenantID, req.IdempotencyKey); err == nil {
+		return nil
+	} else if !errors.Is(err, work.ErrNotFound) {
+		return err
+	}
+	depth, err := s.Store.QueueDepth(ctx, q, s.Clock.Now())
+	if err != nil {
+		return err
+	}
+	if depth >= lim {
+		s.Metrics.shed(string(q))
+		return fmt.Errorf("%w: %s has %d due Works (limit %d); retry later", ErrOverloaded, q, depth, lim)
+	}
+	return nil
 }
 
 // CommandRequest is an operator command.
@@ -282,13 +320,44 @@ func (s *Service) Command(ctx context.Context, req CommandRequest) (work.Work, e
 	}
 	if req.Type == work.CmdCancel {
 		s.cancelRuns(ctx, w, req.ActorID)
+		s.cancelChildren(ctx, w, req.ActorID, 0)
 	}
 	return w, nil
 }
 
 // cancelRuns cancels the owner runs of a cancelled Work (best effort; the
 // kernel cancel is idempotent). Dispatched actions are not undone.
+// cancelChildren cancels the open child Works of a cancelled Work and
+// settles the graph. Cancelling stops further scheduling; an action a child
+// already dispatched is not undone and stays tracked on that child.
+func (s *Service) cancelChildren(ctx context.Context, w work.Work, actor string, depth int) {
+	if err := s.Store.CompleteChild(context.WithoutCancel(ctx), w.TenantID, w.ID, 0); err != nil {
+		s.log().Warn("settle graph of cancelled work failed", "work_id", w.ID, "err", err)
+	}
+	if depth > work.DefaultMaxDepth+8 {
+		return
+	}
+	kids, err := s.Store.Children(ctx, w.TenantID, w.ID)
+	if err != nil {
+		s.log().Warn("list children of cancelled work failed", "work_id", w.ID, "err", err)
+		return
+	}
+	for _, k := range kids {
+		if k.Status.Terminal() {
+			continue
+		}
+		if _, err := s.Command(ctx, CommandRequest{TenantID: w.TenantID, WorkID: k.ID, ActorID: actor,
+			IdempotencyKey: "parent-cancel:" + w.ID, Type: work.CmdCancel, Reason: "parent work " + w.ID + " was cancelled"}); err != nil {
+			s.log().Warn("cancel child work failed", "work_id", k.ID, "parent", w.ID, "err", err)
+		}
+	}
+}
+
 func (s *Service) cancelRuns(ctx context.Context, w work.Work, actor string) {
+	// The cancelled Work admits nothing more: its model-run budget is free.
+	if err := s.Store.ReleaseWorkReservations(context.WithoutCancel(ctx), w.TenantID, w.ID); err != nil {
+		s.log().Warn("release reservations of cancelled work failed", "work_id", w.ID, "err", err)
+	}
 	if s.Runs == nil {
 		return
 	}

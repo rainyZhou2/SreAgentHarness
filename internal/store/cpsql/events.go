@@ -459,3 +459,51 @@ func (s *Store) recentAttachments(ctx context.Context, tx *sql.Tx, w work.Work, 
 	}
 	return n, throttled, rows.Err()
 }
+
+// RecordDecision stores why an event was routed where it went. A
+// reprocessed event replaces its decision (the latest routing is the one
+// in force).
+func (s *Store) RecordDecision(ctx context.Context, d eventing.Decision) error {
+	if d.At.IsZero() {
+		d.At = s.now()
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO event_correlation_decisions (tenant_id, inbox_id, rule_name, rule_version,
+		decision, work_id, detail, created_at) VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT (tenant_id, inbox_id) DO UPDATE SET rule_name=excluded.rule_name, rule_version=excluded.rule_version,
+		decision=excluded.decision, work_id=excluded.work_id, detail=excluded.detail, created_at=excluded.created_at`),
+		d.TenantID, d.InboxID, nullStr(d.RuleName), nullStr(d.RuleVersion), d.Decision, nullStr(d.WorkID), js(d), s.t(d.At))
+	return err
+}
+
+// GetDecision reads the routing decision of an inbox record.
+func (s *Store) GetDecision(ctx context.Context, tenantID, inboxID string) (eventing.Decision, bool, error) {
+	var body jb
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT detail FROM event_correlation_decisions WHERE tenant_id=? AND inbox_id=?`),
+		tenantID, inboxID).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return eventing.Decision{}, false, nil
+	}
+	if err != nil {
+		return eventing.Decision{}, false, err
+	}
+	var d eventing.Decision
+	return d, true, json.Unmarshal(body, &d)
+}
+
+// NoteWork appends a timeline event to an open Work without waking it or
+// changing its state (a related event, an annotation).
+func (s *Store) NoteWork(ctx context.Context, tenantID, workID, typ, actorType, actorID string, payload any) error {
+	now := s.now()
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		w, err := s.lockWork(ctx, tx, tenantID, workID)
+		if err != nil || w.Status.Terminal() {
+			return err
+		}
+		if err := s.appendEvents(ctx, tx, &w, actorType, actorID, now, []work.NewEvent{{Type: typ, Payload: payload}}); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, s.q(`UPDATE agent_works SET last_event_seq=?, version=version+1, updated_at=? WHERE tenant_id=? AND id=?`),
+			w.LastSeq, s.t(now), tenantID, workID)
+		return err
+	})
+}

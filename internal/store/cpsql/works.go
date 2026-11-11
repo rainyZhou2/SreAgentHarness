@@ -12,6 +12,7 @@ import (
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/quota"
 	"go-sre-harness/internal/work"
 )
 
@@ -19,17 +20,17 @@ var _ work.Store = (*Store)(nil)
 
 const workCols = `id, tenant_id, kind, status, title, goal, goal_hash, template, generation, stage, stage_state,
 	replans, runs_started, cost_micros, reason, priority, owner_actor, source_event, version, last_event_seq,
-	wake_at, lease_owner, lease_until, created_at, updated_at, closed_at, queue`
+	wake_at, lease_owner, lease_until, created_at, updated_at, closed_at, queue, parent_work_id, root_work_id, depth`
 
 func scanWork(r rowScanner) (work.Work, error) {
 	var w work.Work
 	var goal, tpl, state jb
-	var reason, owner, source, leaseOwner ns
+	var reason, owner, source, leaseOwner, parent, root ns
 	var wake, leaseUntil, created, updated, closed ts
 	var kind, status, queue string
 	err := r.Scan(&w.ID, &w.TenantID, &kind, &status, &w.Title, &goal, &w.GoalHash, &tpl, &w.Generation, &w.Stage,
 		&state, &w.Replans, &w.RunsStarted, &w.CostMicros, &reason, &w.Priority, &owner, &source, &w.Version,
-		&w.LastSeq, &wake, &leaseOwner, &leaseUntil, &created, &updated, &closed, &queue)
+		&w.LastSeq, &wake, &leaseOwner, &leaseUntil, &created, &updated, &closed, &queue, &parent, &root, &w.Depth)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, work.ErrNotFound
 	}
@@ -37,6 +38,7 @@ func scanWork(r rowScanner) (work.Work, error) {
 		return w, err
 	}
 	w.Kind, w.Status, w.Queue = work.Kind(kind), work.Status(status), work.Queue(queue)
+	w.ParentID, w.RootID = parent.S(), root.S()
 	if err := json.Unmarshal(goal, &w.Goal); err != nil {
 		return w, fmt.Errorf("work %s goal: %w", w.ID, err)
 	}
@@ -639,9 +641,11 @@ func (s *Store) ClaimQueue(ctx context.Context, owner string, queue work.Queue, 
 			args = append(args, string(queue))
 		}
 		args = append(args, limit)
-		rows, err := tx.QueryContext(ctx, s.q(`SELECT id FROM agent_works WHERE wake_at IS NOT NULL AND wake_at <= ?
+		fair, fairArgs := s.fairOrder(now)
+		args = append(args[:len(args)-1], append(fairArgs, limit)...)
+		rows, err := tx.QueryContext(ctx, s.q(`SELECT id FROM agent_works w WHERE wake_at IS NOT NULL AND wake_at <= ?
 			AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)`+where+`
-			ORDER BY `+order+`priority DESC, wake_at LIMIT ?`+s.skipLocked()), args...)
+			ORDER BY `+order+fair+`, wake_at LIMIT ?`+s.skipLocked()), args...)
 		if err != nil {
 			return err
 		}
@@ -677,6 +681,146 @@ func (s *Store) ClaimQueue(ctx context.Context, owner string, queue work.Queue, 
 	return out, err
 }
 
+// Fairness orders the Works of one queue at claim time (design §6.3). The
+// zero value is the plain order: priority, then wake time.
+type Fairness struct {
+	// Aging raises the effective priority of a waiting Work by one for
+	// every Aging it has been due, up to MaxBoost, so low-priority Works are
+	// not starved by a steady stream of higher ones. It reorders Works
+	// inside a queue only: it never moves a Work to another queue and never
+	// touches policy or approval.
+	Aging    time.Duration
+	MaxBoost int
+	// TenantWeights enables weighted fair queuing between tenants: among
+	// Works of equal effective priority, the tenant with the fewest leased
+	// Works per unit of weight goes first (default weight 1). A large
+	// tenant can use idle capacity but cannot starve the others.
+	TenantWeights map[string]int
+	// FairTenants turns tenant fairness on without explicit weights.
+	FairTenants bool
+}
+
+// fairOrder renders the ORDER BY terms of the claim query and their args.
+func (s *Store) fairOrder(now time.Time) (string, []any) {
+	f := s.Fairness
+	prio := "priority"
+	var args []any
+	if f.Aging > 0 && f.MaxBoost > 0 {
+		waited := "(? - wake_at) / 1000000.0"
+		if s.d == Postgres {
+			waited = "EXTRACT(EPOCH FROM (?::timestamptz - wake_at))"
+		}
+		prio = "(priority + CASE WHEN " + waited + " / ? > ? THEN ? ELSE CAST(" + waited + " / ? AS INTEGER) END)"
+		secs := f.Aging.Seconds()
+		args = append(args, s.t(now), secs, f.MaxBoost, f.MaxBoost, s.t(now), secs)
+	}
+	out := prio + " DESC"
+	if f.FairTenants || len(f.TenantWeights) > 0 {
+		weight := "1.0"
+		if len(f.TenantWeights) > 0 {
+			weight = "CASE w.tenant_id"
+			for tenant, wgt := range f.TenantWeights {
+				if wgt <= 0 {
+					continue
+				}
+				weight += " WHEN ? THEN ?"
+				args = append(args, tenant, float64(wgt))
+			}
+			weight += " ELSE 1.0 END"
+			if weight == "CASE w.tenant_id ELSE 1.0 END" {
+				weight = "1.0"
+			}
+		}
+		out += `, (SELECT count(*) FROM agent_works x WHERE x.tenant_id = w.tenant_id AND x.queue = w.queue
+			AND x.lease_until IS NOT NULL AND x.lease_until >= ?) / ` + weight
+		args = append(args, s.t(now))
+	}
+	return out, args
+}
+
+// WorkByIdempotencyKey returns the Work created under a key (ErrNotFound
+// when the key is unused).
+func (s *Store) WorkByIdempotencyKey(ctx context.Context, tenantID, key string) (work.Work, error) {
+	return scanWork(s.db.QueryRowContext(ctx, s.q(`SELECT `+workCols+` FROM agent_works
+		WHERE tenant_id=? AND create_idempotency_key=?`), tenantID, key))
+}
+
+// QueueDepth counts the Works of a queue that are due and not leased (load
+// shedding looks at it before admitting batch and background Works).
+func (s *Store) QueueDepth(ctx context.Context, queue work.Queue, now time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM agent_works WHERE queue=? AND wake_at IS NOT NULL AND wake_at <= ?
+		AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)`),
+		string(queue), s.t(now), s.t(now)).Scan(&n)
+	return n, err
+}
+
+// WakeDeferred makes up to limit of a tenant's Works that wait for a
+// resource budget due now, most urgent first, so freed budget is used at
+// once instead of at the Works' own retry time. Only parked Works are
+// woken: a Work a replica is deferring right now would overwrite the wake
+// with its own retry time. It appends no event: the Works only retry the
+// step they deferred.
+func (s *Store) WakeDeferred(ctx context.Context, tenantID string, now time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=? WHERE tenant_id=? AND id IN (
+		SELECT id FROM agent_works WHERE tenant_id=? AND reason LIKE 'queued: %' AND wake_at IS NOT NULL AND wake_at > ?
+		AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)
+		ORDER BY `+queueRank+`, priority DESC, wake_at LIMIT ?)`), s.t(now), tenantID, tenantID, s.t(now), s.t(now), limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// WorkHasActiveRuns reports whether an open Work has owner runs that were
+// not observed terminal (the reservation reaper asks before it frees an
+// expired model-run reservation).
+func (s *Store) WorkHasActiveRuns(ctx context.Context, tenantID, workID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM work_run_links l
+		JOIN agent_works w ON w.tenant_id = l.tenant_id AND w.id = l.work_id
+		WHERE l.tenant_id=? AND l.work_id=? AND l.role='owner' AND l.generation = w.generation
+		AND w.status NOT IN ('SUCCEEDED','FAILED','CANCELLED')
+		AND (l.status IS NULL OR l.status NOT IN ('COMPLETED','FAILED','CANCELLED'))`), tenantID, workID).Scan(&n)
+	return n > 0, err
+}
+
+// ReleaseWorkReservations returns every reservation a Work still holds
+// (cancellation; the reaper is the backstop).
+func (s *Store) ReleaseWorkReservations(ctx context.Context, tenantID, workID string) error {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT reservation_id, fence_token FROM admission_reservations
+		WHERE tenant_id=? AND work_id=? AND status='ACTIVE'`), tenantID, workID)
+	if err != nil {
+		return err
+	}
+	type held struct {
+		id    string
+		token int64
+	}
+	var hs []held
+	for rows.Next() {
+		var h held
+		if err := rows.Scan(&h.id, &h.token); err != nil {
+			rows.Close()
+			return err
+		}
+		hs = append(hs, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, h := range hs {
+		if err := s.Release(ctx, tenantID, h.id, h.token); err != nil && !errors.Is(err, quota.ErrFenced) {
+			return err
+		}
+	}
+	return nil
+}
+
 // ActiveWorkRuns counts a tenant's model runs started by open Works and
 // not yet observed terminal, per queue (the cluster-wide model-run pool).
 func (s *Store) ActiveWorkRuns(ctx context.Context, tenantID string) (map[work.Queue]int, error) {
@@ -704,8 +848,14 @@ func (s *Store) ActiveWorkRuns(ctx context.Context, tenantID string) (map[work.Q
 // ReleaseWork drops a lease without changing the Work (e.g. after a
 // processing error); the wake time stays, so it is retried.
 func (s *Store) ReleaseWork(ctx context.Context, tenantID, workID, owner string, retryAt time.Time) error {
+	// PostgreSQL cannot infer the type of a bare parameter inside CASE (it
+	// falls back to text), so the timestamp is cast there.
+	at := "?"
+	if s.d == Postgres {
+		at = "CAST(? AS TIMESTAMPTZ)"
+	}
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET lease_owner=NULL, lease_until=NULL,
-		wake_at=CASE WHEN status IN ('SUCCEEDED','FAILED','CANCELLED') THEN NULL ELSE ? END
+		wake_at=CASE WHEN status IN ('SUCCEEDED','FAILED','CANCELLED') THEN NULL ELSE `+at+` END
 		WHERE tenant_id=? AND id=? AND lease_owner=?`), s.t(retryAt), tenantID, workID, owner)
 	return err
 }
@@ -730,6 +880,22 @@ func (s *Store) WakeWork(ctx context.Context, tenantID, workID, reason, actorTyp
 			WHERE tenant_id=? AND id=?`), s.t(now), w.LastSeq, s.t(now), tenantID, workID)
 		return err
 	})
+}
+
+// WakeWorkQuiet makes an open Work due now without writing to its
+// timeline or bumping its version: it is a scheduling hint (a run ended, a
+// child finished), not a state change, so it can be repeated freely and
+// never conflicts with a pass in progress. It reports whether the wake time
+// moved.
+func (s *Store) WakeWorkQuiet(ctx context.Context, tenantID, workID string, now time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=? WHERE tenant_id=? AND id=?
+		AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUSPENDED','BLOCKED','NEW') AND (wake_at IS NULL OR wake_at > ?)`),
+		s.t(now), tenantID, workID, s.t(now))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // CountByStatus counts Works by kind and status (low-cardinality gauge).

@@ -48,7 +48,9 @@ type Store struct {
 	// TxRetries re-runs transactions PostgreSQL rolled back (deadlock,
 	// serialization failure, lock timeout).
 	TxRetries int
-	ownsDB    bool
+	// Fairness orders Works at claim time (aging, tenant fairness).
+	Fairness Fairness
+	ownsDB   bool
 }
 
 // OpenPostgres wraps an existing pool. The schema comes from the versioned

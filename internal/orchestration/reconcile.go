@@ -8,6 +8,7 @@ import (
 	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/quota"
 	"go-sre-harness/internal/store/cpsql"
 )
 
@@ -111,6 +112,27 @@ func (r *Reconciler) Sweep(ctx context.Context) {
 		}
 		if _, err := r.Actions.RecoverStale(ctx, age, 50); err != nil && ctx.Err() == nil {
 			r.log().Warn("action recovery failed", "err", err)
+		}
+	}
+	// Model-run reservations whose owner died: a reservation whose runs are
+	// really in flight is renewed, the others return their units.
+	if n, err := r.Store.ReapReservations(ctx, r.Clock.Now(), 500, func(ctx context.Context, res quota.Reservation) (bool, error) {
+		return r.Store.WorkHasActiveRuns(ctx, res.TenantID, res.WorkID)
+	}, 10*time.Minute); err != nil && ctx.Err() == nil {
+		r.log().Warn("reservation reaper failed", "err", err)
+	} else if n > 0 {
+		r.log().Info("expired admission reservations reaped", "count", n)
+		r.Metrics.reaped(n)
+	}
+	// Terminal Works whose dependents were not settled (the process died
+	// between the commit and the graph update).
+	if pending, err := r.Store.UnsettledTerminalWorks(ctx, 200); err != nil && ctx.Err() == nil {
+		r.log().Warn("work graph sweep failed", "err", err)
+	} else {
+		for _, p := range pending {
+			if err := r.Store.CompleteChild(ctx, p[0], p[1], 0); err != nil && ctx.Err() == nil {
+				r.log().Warn("settle work graph", "tenant", p[0], "work_id", p[1], "err", err)
+			}
 		}
 	}
 	if _, err := r.Store.PurgeCorrelations(ctx, r.Clock.Now(), 1000); err != nil && ctx.Err() == nil {

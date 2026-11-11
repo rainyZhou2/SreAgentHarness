@@ -35,6 +35,9 @@ const (
 	StageVerify StageType = "verify"
 	// StageConfirm waits for a human confirmation.
 	StageConfirm StageType = "confirm"
+	// StageChildren starts child Works from the template graph and waits
+	// until the required ones ended (template_version 2).
+	StageChildren StageType = "children"
 )
 
 // Failure policies.
@@ -53,6 +56,19 @@ type RunSpec struct {
 	ProfileID      string `json:"profile_id,omitempty"`
 	ProfileVersion int64  `json:"profile_version,omitempty"`
 	Mode           string `json:"mode,omitempty"`
+	// Budget bounds this assignment (optional). The run profile bounds what
+	// the kernel spends; the duration is enforced by the Work: a run past
+	// it is cancelled and reported as a timeout, and the other agents'
+	// results stand.
+	Budget *AgentBudget `json:"budget,omitempty"`
+}
+
+// AgentBudget bounds one agent assignment.
+type AgentBudget struct {
+	MaxModelCalls int            `json:"max_model_calls,omitempty"`
+	MaxToolCalls  int            `json:"max_tool_calls,omitempty"`
+	MaxCostUSD    float64        `json:"max_cost_usd,omitempty"`
+	MaxDuration   cpkit.Duration `json:"max_duration,omitempty"`
 }
 
 // AgentSpec is one investigator of an agents stage.
@@ -109,6 +125,8 @@ type Stage struct {
 	Action  *ActionSpec      `json:"action,omitempty"`
 	Verify  *VerifySpec      `json:"verify,omitempty"`
 	Confirm *ConfirmSpec     `json:"confirm,omitempty"`
+	// Children configures a children stage.
+	Children *ChildrenSpec `json:"children,omitempty"`
 	// OnFailure: block (default) | fail | skip | <stage id> to replan from
 	// an earlier stage (bounded by Limits.MaxReplans).
 	OnFailure string `json:"on_failure,omitempty"`
@@ -183,6 +201,18 @@ type Template struct {
 	// Queue is the default scheduling queue of Works created from this
 	// template (empty: by kind).
 	Queue Queue `json:"queue,omitempty"`
+	// Graph declares child Works and the limits of the Work tree
+	// (optional; templates without it behave as before).
+	Graph *GraphSpec `json:"graph,omitempty"`
+	// Runbook is operator metadata about the template as a runbook
+	// (owner, validity, rehearsal); it never changes how stages run.
+	Runbook *RunbookRef `json:"runbook,omitempty"`
+}
+
+// RunbookRef points a template at its runbook registry entry.
+type RunbookRef struct {
+	ID      string `json:"id"`
+	Version int    `json:"version,omitempty"`
 }
 
 var stageIDRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)
@@ -221,9 +251,32 @@ func (t *Template) Normalize() error {
 	if l.MaxCostUSD < 0 {
 		return invalidf("template %s: max_cost_usd must not be negative", t.ID)
 	}
+	if t.Graph != nil {
+		if err := t.Graph.normalize(); err != nil {
+			return invalidf("template %s graph: %v", t.ID, err)
+		}
+	}
+	childKeys := map[string]bool{}
+	if t.Graph != nil {
+		for _, c := range t.Graph.Children {
+			childKeys[c.Key] = true
+		}
+	}
 	index := map[string]int{}
 	for i := range t.Stages {
 		s := &t.Stages[i]
+		if s.Type == StageChildren {
+			if len(childKeys) == 0 {
+				return invalidf("stage %s: a children stage needs graph.children", s.ID)
+			}
+			if s.Children != nil {
+				for _, k := range s.Children.Keys {
+					if !childKeys[k] {
+						return invalidf("stage %s: unknown child %q", s.ID, k)
+					}
+				}
+			}
+		}
 		if !stageIDRe.MatchString(s.ID) {
 			return invalidf("stage id %q is invalid", s.ID)
 		}
@@ -273,7 +326,8 @@ func defInt(v, d int) int {
 
 func (s *Stage) normalize(l *Limits) error {
 	n := 0
-	for _, set := range []bool{s.Run != nil, len(s.Agents) > 0, s.Wait != nil, s.Action != nil, s.Verify != nil, s.Confirm != nil} {
+	for _, set := range []bool{s.Run != nil, len(s.Agents) > 0, s.Wait != nil, s.Action != nil, s.Verify != nil, s.Confirm != nil,
+		s.Children != nil} {
 		if set {
 			n++
 		}
@@ -287,7 +341,7 @@ func (s *Stage) normalize(l *Limits) error {
 		}
 	}
 	need := map[StageType]bool{StageRun: s.Run != nil, StageAgents: len(s.Agents) > 0, StageWait: s.Wait != nil,
-		StageAction: s.Action != nil, StageVerify: true, StageConfirm: true}
+		StageAction: s.Action != nil, StageVerify: true, StageConfirm: true, StageChildren: true}
 	ok, known := need[s.Type]
 	if !known {
 		return fmt.Errorf("unknown type %q", s.Type)
@@ -315,6 +369,10 @@ func (s *Stage) normalize(l *Limits) error {
 			roles[a.Role] = true
 			if strings.TrimSpace(a.Goal) == "" {
 				return fmt.Errorf("agent %s needs a goal", a.Role)
+			}
+			if b := a.Budget; b != nil && (b.MaxModelCalls < 0 || b.MaxToolCalls < 0 || b.MaxCostUSD < 0 || b.MaxDuration < 0 ||
+				b.MaxDuration.D() > 24*time.Hour) {
+				return fmt.Errorf("agent %s: budget is out of range", a.Role)
 			}
 		}
 	case StageWait:

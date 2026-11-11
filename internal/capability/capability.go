@@ -108,6 +108,10 @@ func (f CollectorFunc) Collect(ctx context.Context, now time.Time) (Observation,
 
 // Observation is one collection.
 type Observation struct {
+	// Entities carry identity: the immutable id of a resource (attribute
+	// "uid") and, for another name of the same resource, the canonical ref
+	// it stands for (attribute "identity").
+	Entities  []world.Entity
 	Facts     []world.Fact
 	Relations []world.Relation
 	// Events are submitted to the inbox (e.g. a node turned NotReady).

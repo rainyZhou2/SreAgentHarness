@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/work"
 )
 
@@ -19,17 +20,25 @@ type QueueLimit struct {
 	// ModelRunsPerTenant caps the active model runs a tenant's Works of
 	// this queue may have (cluster-wide; 0 = only the pool total applies).
 	ModelRunsPerTenant int `json:"model_runs_per_tenant,omitempty"`
+	// AdmissionDeadline is the target delay from a Work being due to its
+	// processing. A Work claimed later is marked queued_long (timeline event
+	// and metric); it is never dropped.
+	AdmissionDeadline cpkit.Duration `json:"admission_deadline,omitempty"`
+	// MaxBacklog sheds load: new Works are refused (429) while this many
+	// Works of the queue are due and unclaimed. It applies to batch and
+	// background queues only; incident queues and the event inbox never shed.
+	MaxBacklog int `json:"max_backlog,omitempty"`
 }
 
 // DefaultQueueLimits gives mitigation the most room and keeps evaluation
 // and background improvement from crowding out incidents.
 func DefaultQueueLimits() map[work.Queue]QueueLimit {
 	return map[work.Queue]QueueLimit{
-		work.QueueCritical:   {Concurrency: 8, Batch: 16},
-		work.QueueIncident:   {Concurrency: 4, Batch: 16},
-		work.QueueRoutine:    {Concurrency: 2, Batch: 8, ModelRunsPerTenant: 8},
-		work.QueueBatch:      {Concurrency: 1, Batch: 4, ModelRunsPerTenant: 4},
-		work.QueueBackground: {Concurrency: 1, Batch: 4, ModelRunsPerTenant: 2},
+		work.QueueCritical:   {Concurrency: 8, Batch: 16, AdmissionDeadline: cpkit.Duration(3 * time.Second)},
+		work.QueueIncident:   {Concurrency: 4, Batch: 16, AdmissionDeadline: cpkit.Duration(10 * time.Second)},
+		work.QueueRoutine:    {Concurrency: 2, Batch: 8, ModelRunsPerTenant: 8, AdmissionDeadline: cpkit.Duration(time.Minute)},
+		work.QueueBatch:      {Concurrency: 1, Batch: 4, ModelRunsPerTenant: 4, MaxBacklog: 2000},
+		work.QueueBackground: {Concurrency: 1, Batch: 4, ModelRunsPerTenant: 2, MaxBacklog: 2000},
 	}
 }
 
@@ -41,6 +50,13 @@ type PoolLimits struct {
 	// its own queue limit so that mitigation never waits behind routine
 	// work (cluster-wide, counted in the store; 0 = unlimited).
 	ModelRunsPerTenant int `json:"model_runs_per_tenant,omitempty"`
+	// CriticalReservedModelRuns is taken out of ModelRunsPerTenant for the
+	// other queues, so that capacity stays free for mitigation even when
+	// every other queue is at its budget.
+	CriticalReservedModelRuns int `json:"critical_reserved_model_runs,omitempty"`
+	// ReservationTTL is the lease of a model-run reservation (default 10m);
+	// a running stage renews it, the reaper frees it after a crash.
+	ReservationTTL cpkit.Duration `json:"reservation_ttl,omitempty"`
 	// Actions and ActionsPerTenant cap concurrent production action
 	// dispatches and reconciliations per replica (0 = unlimited).
 	Actions          int `json:"actions,omitempty"`
@@ -53,7 +69,7 @@ type PoolLimits struct {
 
 // DefaultPoolLimits are conservative defaults; operators tune them.
 func DefaultPoolLimits() PoolLimits {
-	return PoolLimits{ModelRunsPerTenant: 32, Actions: 16, ActionsPerTenant: 4, Snapshots: 16}
+	return PoolLimits{ModelRunsPerTenant: 32, CriticalReservedModelRuns: 4, Actions: 16, ActionsPerTenant: 4, Snapshots: 16}
 }
 
 // ValidateQueueLimits rejects unknown queues and negative limits.
@@ -64,7 +80,8 @@ func ValidateQueueLimits(m map[string]QueueLimit) (map[work.Queue]QueueLimit, er
 		if !work.ValidQueue(q) {
 			return nil, fmt.Errorf("work.queues: unknown queue %q", name)
 		}
-		if l.Concurrency < 0 || l.Batch < 0 || l.ModelRunsPerTenant < 0 || l.Concurrency > 256 || l.Batch > 512 {
+		if l.Concurrency < 0 || l.Batch < 0 || l.ModelRunsPerTenant < 0 || l.Concurrency > 256 || l.Batch > 512 ||
+			l.AdmissionDeadline < 0 || l.MaxBacklog < 0 {
 			return nil, fmt.Errorf("work.queues.%s: limits out of range", name)
 		}
 		d := out[q]
@@ -76,6 +93,15 @@ func ValidateQueueLimits(m map[string]QueueLimit) (map[work.Queue]QueueLimit, er
 		}
 		if l.ModelRunsPerTenant > 0 {
 			d.ModelRunsPerTenant = l.ModelRunsPerTenant
+		}
+		if l.AdmissionDeadline > 0 {
+			d.AdmissionDeadline = l.AdmissionDeadline
+		}
+		if l.MaxBacklog > 0 {
+			if q == work.QueueCritical || q == work.QueueIncident {
+				return nil, fmt.Errorf("work.queues.%s: incident queues never shed load (max_backlog)", name)
+			}
+			d.MaxBacklog = l.MaxBacklog
 		}
 		out[q] = d
 	}
@@ -233,6 +259,10 @@ func MergePoolLimits(base PoolLimits, o *PoolLimits) PoolLimits {
 		return b
 	}
 	base.ModelRunsPerTenant = pick(base.ModelRunsPerTenant, o.ModelRunsPerTenant)
+	base.CriticalReservedModelRuns = pick(base.CriticalReservedModelRuns, o.CriticalReservedModelRuns)
+	if o.ReservationTTL > 0 {
+		base.ReservationTTL = o.ReservationTTL
+	}
 	base.Actions = pick(base.Actions, o.Actions)
 	base.ActionsPerTenant = pick(base.ActionsPerTenant, o.ActionsPerTenant)
 	base.Snapshots = pick(base.Snapshots, o.Snapshots)
