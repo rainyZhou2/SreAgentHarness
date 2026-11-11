@@ -267,7 +267,8 @@ func (e *simExecutor) Descriptor() action.Descriptor {
 		kinds = []string{"*"}
 	}
 	return action.Descriptor{Name: e.spec.Name, Version: "bench", ResourceKinds: kinds, Risk: domain.RiskClass(e.spec.Risk),
-		IdempotencyMode: action.IdemNative, BlastRadius: "single_resource", Description: "simulated by the Work bench"}
+		IdempotencyMode: action.IdemNative, BlastRadius: "single_resource", Description: "simulated by the Work bench",
+		RequiredFacts: e.spec.RequiredFacts}
 }
 
 func (e *simExecutor) Preflight(context.Context, action.Plan) (action.PreflightResult, error) {

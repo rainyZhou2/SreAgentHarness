@@ -20,6 +20,7 @@ import (
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/postmortem"
+	"go-sre-harness/internal/provenance"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/workeval"
@@ -146,7 +147,11 @@ func (r *Runner) setup(ctx context.Context, c Case, path string) (*env, error) {
 		}
 	}
 	acts := &action.Runtime{Store: s, Registry: reg, World: ws, Outcomes: ev, Clock: clock.Now, Log: log,
-		Policy: policy.Engine{Version: "bench", Environment: c.Environment, AllowR1WithoutApproval: c.Environment != "production"}}
+		Policy:   policy.Engine{Version: "bench", Environment: c.Environment, AllowR1WithoutApproval: c.Environment != "production"},
+		Identity: action.WorldIdentity{World: ws},
+		// The production fact-quality policy: disputed or orphaned facts do
+		// not justify an action in a benchmark either.
+		Quality: provenance.Quality{Health: s, Authority: provenance.DefaultAuthority(), Clock: clock.Now}}
 	cat, err := orchestration.NewCatalog(c.Templates)
 	if err != nil {
 		s.Close()
@@ -158,10 +163,10 @@ func (r *Runner) setup(ctx context.Context, c Case, path string) (*env, error) {
 		return nil, err
 	}
 	runs := newSimRuns(clock, c.Runs)
-	ing := &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Clock: clock.Now, Log: log}
+	ing := &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Clock: clock.Now, Log: log, Changes: s}
 	e := &env{c: c, ctx: ctx, clock: clock, store: s, runs: runs, metrics: metrics, world: ws, acts: acts, ing: ing,
 		orch: &orchestration.Orchestrator{Store: s, Runs: runs, Actions: acts, Evaluator: ev, Clock: clock.Now, Owner: "bench",
-			RunPoll: min(5*time.Second, c.Tick.D()), Log: log},
+			RunPoll: min(5*time.Second, c.Tick.D()), Log: log, Catalog: cat},
 		svc: &orchestration.Service{Store: s, Runs: runs, Catalog: cat, Clock: clock.Now, Log: log},
 		rec: &orchestration.Reconciler{Store: s, Ingestor: ing, Actions: acts, Clock: clock.Now, Log: log}}
 	return e, nil
@@ -244,7 +249,7 @@ func (e *env) applyDue(fx *fixtures, now time.Time) error {
 		fx.facts[i] = true
 		trust := firstNonEmpty(f.Trust, world.TrustFirstParty)
 		if _, _, err := e.store.AssertFact(e.ctx, world.Fact{TenantID: c.Tenant, SubjectRef: f.Subject, Predicate: f.Predicate,
-			Value: f.Value, Source: "bench", TrustTier: trust, ValidFrom: now, ObservedAt: now}); err != nil {
+			Value: f.Value, Source: firstNonEmpty(f.Source, "bench"), TrustTier: trust, ValidFrom: now, ObservedAt: now}); err != nil {
 			return fmt.Errorf("fact %s/%s: %w", f.Subject, f.Predicate, err)
 		}
 	}
