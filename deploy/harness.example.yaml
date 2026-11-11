@@ -160,3 +160,45 @@ tool_overlays: {}
 #   prometheus.query_range:
 #     time_args: {start: start, end: end, format: rfc3339, lookback: 1h}
 #     max_inline_bytes: 32768
+
+# ---- production control plane (HARNESS_WORK_ENGINE_ENABLED=true) ----
+# Rollout is governed by HARNESS_DEPLOYMENT_TIER (local|staging|production)
+# and the flags HARNESS_EVENT_SHADOW_MODE, HARNESS_ACTION_DRY_RUN,
+# HARNESS_ACTION_V2_ENABLED, HARNESS_ACTION_ALLOWLIST / _SCOPE and
+# HARNESS_ACTION_PREAUTHORIZED. `harness validate-config --tier production`
+# judges them without connecting to anything; a production deployment that
+# lacks a safeguard runs in investigation mode (actions withheld).
+# work:
+#   scheduling: {aging: 2m, max_boost: 20, fair_tenants: true, tenant_weights: {acme: 2}}
+#   queues:
+#     batch-evaluation: {max_backlog: 2000}
+#     routine-work: {admission_deadline: 1m}
+#   pools: {model_runs_per_tenant: 32, critical_reserved_model_runs: 4}
+#   event_sources:
+#     alertmanager: {event_types: ["alert.*"], secret_env: ALERTMANAGER_HMAC_KEY, max_lateness: 6h}
+#   authority: {replicas: [kubernetes]}
+#   observability:
+#     endpoints:                       # operator-owned; sources refer to them by name
+#       prom-prod: {url: "http://prometheus:9090"}
+#       loki-prod: {url: "http://loki:3100", org_id: acme-prod}
+#     credentials:                     # where a secret is read from, never the secret
+#       loki-reader: {token_env: LOKI_TOKEN, tenants: [acme]}
+#     required: ["acme/prom"]          # must be healthy before production actions
+#     sources:
+#       - {id: prom, tenant_id: acme, kind: metrics, backend: prometheus, environment: prod,
+#          endpoint_ref: prom-prod, allowed_scope: ["service://prod"],
+#          queries: {error_rate: 'sum(rate(http_requests_total{service="${service}",code=~"5.."}[5m]))'}}
+#       - {id: loki, tenant_id: acme, kind: logs, backend: loki, environment: prod, endpoint_ref: loki-prod,
+#          credential_id: loki-reader, allowed_scope: ["service://prod"],
+#          queries: {errors: '{app="${service}"} |= "ERROR"'}}
+#       - {id: changes, tenant_id: acme, kind: changes, backend: ledger, environment: prod,
+#          endpoint_ref: internal, allowed_scope: ["service://prod"]}
+# plugins:
+#   artifact_store:                    # S3 / MinIO, with old fs:// refs still readable
+#     name: s3
+#     config: {endpoint: "https://s3.eu-west-1.amazonaws.com", region: eu-west-1, bucket: harness, prefix: prod,
+#              encryption: "aws:kms", kms_key_id: alias/harness, retention_class: incident, legacy_fs_root: /var/lib/harness/artifacts}
+#   work_extension:
+#     - name: sre
+#       config:
+#         monitoring: {rule_paths: ["monitoring/rules"], require_runbook: true, promtool_path: /usr/local/bin/promtool}
