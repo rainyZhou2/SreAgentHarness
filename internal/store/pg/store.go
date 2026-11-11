@@ -149,8 +149,6 @@ func jsonb(v any) []byte {
 	return b
 }
 
-func ptr[T any](v T) *T { return &v }
-
 func (s *Store) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return pgx.BeginFunc(ctx, s.pool, fn)
 }

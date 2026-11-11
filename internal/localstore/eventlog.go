@@ -207,16 +207,6 @@ func (s *Store) listEventsLocked(runID string, afterSeq int64, limit int) ([]dom
 	return out, nil
 }
 
-func (s *Store) reconcileRunSeqs() {
-	for id, seq := range s.eventSeq {
-		if r, ok := s.runs[id]; ok && r.LastEventSeq < seq {
-			r.LastEventSeq = seq
-			s.runs[id] = r
-			s.put("run", r.ID, "", 0, r)
-		}
-	}
-}
-
 func safePart(s string) string {
 	s = strings.ReplaceAll(s, "..", "_")
 	s = strings.ReplaceAll(s, string(os.PathSeparator), "_")

@@ -46,7 +46,7 @@ func TestHTTPEmbedder(t *testing.T) {
 			return
 		}
 		if fail.Load() == 1 {
-			http.Error(w, "down", 503)
+			http.Error(w, "down", http.StatusServiceUnavailable)
 			return
 		}
 		var in struct {

@@ -142,7 +142,7 @@ func New(cfg Config) (*Sim, error) {
 	for _, d := range cfg.Deployments {
 		ref, err := cpkit.NormalizeRef(d.Ref)
 		if err != nil || cpkit.RefScheme(ref) != "deployment" {
-			return nil, fmt.Errorf("sre-sim: deployment ref %q must be deployment://...", d.Ref)
+			return nil, fmt.Errorf("sre-sim: deployment ref %q must be a deployment:// ref", d.Ref)
 		}
 		d.Ref = ref
 		if d.Image == "" {

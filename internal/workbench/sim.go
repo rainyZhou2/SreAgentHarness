@@ -138,8 +138,6 @@ func (f *simRuns) toolCalls(runID string) int {
 	return 0
 }
 
-func (f *simRuns) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.order) }
-
 // unused lists scripted runs never started (a sign the case and the
 // template disagree).
 func (f *simRuns) unused() []string {
@@ -202,21 +200,6 @@ func (m *simMetrics) set(source, query string, at time.Time, v float64) {
 
 // source binds one metric source name.
 func (m *simMetrics) source(name string) outcome.MetricSource { return metricSource{m: m, name: name} }
-
-func (m *simMetrics) names() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	set := map[string]bool{}
-	for k := range m.series {
-		set[k.source] = true
-	}
-	var out []string
-	for n := range set {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
-}
 
 type metricSource struct {
 	m    *simMetrics

@@ -41,9 +41,8 @@ func (c *fakeClock) Add(d time.Duration) {
 }
 
 type fakeRun struct {
-	req    RunRequest
-	state  RunState
-	result []byte
+	req   RunRequest
+	state RunState
 }
 
 type fakeRuns struct {

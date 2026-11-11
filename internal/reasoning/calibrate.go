@@ -67,9 +67,8 @@ func FitCalibrator(fs []Forecast, minN int) *Calibrator {
 	}
 	sort.SliceStable(pts, func(i, j int) bool { return pts[i].P < pts[j].P })
 	type block struct {
-		upper    float64
-		sum, n   float64
-		smoothed float64
+		upper  float64
+		sum, n float64
 	}
 	var bs []block
 	for _, p := range pts {

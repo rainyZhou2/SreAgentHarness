@@ -25,16 +25,16 @@ const MaxFlags = 3
 // controlTokens are chat-template and boundary tokens that content must not
 // be able to inject verbatim.
 var controlTokens = strings.NewReplacer(
-	"<|im_start|>", "<|im_start​|>",
-	"<|im_end|>", "<|im_end​|>",
-	"<|system|>", "<|system​|>",
-	"<|user|>", "<|user​|>",
-	"<|assistant|>", "<|assistant​|>",
-	"<|endoftext|>", "<|endoftext​|>",
-	"[INST]", "[INST​]",
-	"[/INST]", "[/INST​]",
-	"<<<DATA", "<<​<DATA",
-	"<<<END DATA", "<<​<END DATA",
+	"<|im_start|>", "<|im_start\u200b|>",
+	"<|im_end|>", "<|im_end\u200b|>",
+	"<|system|>", "<|system\u200b|>",
+	"<|user|>", "<|user\u200b|>",
+	"<|assistant|>", "<|assistant\u200b|>",
+	"<|endoftext|>", "<|endoftext\u200b|>",
+	"[INST]", "[INST\u200b]",
+	"[/INST]", "[/INST\u200b]",
+	"<<<DATA", "<<\u200b<DATA",
+	"<<<END DATA", "<<\u200b<END DATA",
 )
 
 // Block is content prepared for the prompt.
