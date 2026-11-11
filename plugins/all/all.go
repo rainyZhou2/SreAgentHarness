@@ -11,6 +11,7 @@ import (
 	_ "go-sre-harness/plugins/memory"
 	_ "go-sre-harness/plugins/messaging"
 	_ "go-sre-harness/plugins/models"
+	_ "go-sre-harness/plugins/observability"
 	_ "go-sre-harness/plugins/profiles"
 	_ "go-sre-harness/plugins/relay"
 	_ "go-sre-harness/plugins/sandbox"
