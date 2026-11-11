@@ -1,0 +1,121 @@
+{
+  "name": "004-action-unknown-after-effect",
+  "description": "The rollback takes effect in the cluster but the call times out, and the executor cannot tell what happened. The effect is unknown: it is dispatched exactly once, never again, and the Work blocks until a human reconciles or resolves it.",
+  "templates": [
+    {
+      "id": "bench-mitigate",
+      "kind": "incident",
+      "stages": [
+        {
+          "id": "investigate",
+          "type": "run",
+          "phase": "investigate",
+          "run": {
+            "goal": "Investigate ${subjects}"
+          }
+        },
+        {
+          "id": "mitigate",
+          "type": "action",
+          "phase": "mitigate",
+          "action": {
+            "from_proposal": "investigate",
+            "allowed": [
+              "deployment.rollback"
+            ]
+          }
+        },
+        {
+          "id": "verify",
+          "type": "verify",
+          "phase": "verify",
+          "on_failure": "investigate",
+          "verify": {
+            "recheck_every": "1m",
+            "timeout": "20m"
+          }
+        }
+      ]
+    }
+  ],
+  "work": {
+    "kind": "incident",
+    "title": "checkout 5xx",
+    "template": "bench-mitigate",
+    "goal": {
+      "intent": "restore checkout",
+      "subject_refs": [
+        "deployment://prod/checkout"
+      ],
+      "success": {
+        "all_of": [
+          {
+            "id": "error_rate",
+            "kind": "metric",
+            "window": "2m",
+            "metric": {
+              "source": "prom",
+              "query": "checkout_error_rate",
+              "aggregate": "max",
+              "operator": "<",
+              "threshold": 0.01
+            }
+          }
+        ]
+      }
+    }
+  },
+  "metrics": [
+    {
+      "source": "prom",
+      "query": "checkout_error_rate",
+      "points": [
+        {
+          "at": "0s",
+          "v": 0.08
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "stage": "investigate",
+      "duration": "2m",
+      "result": {
+        "answer": "roll back",
+        "proposed_action": {
+          "action": "deployment.rollback",
+          "target": "deployment://prod/checkout",
+          "args": {
+            "to_revision": "41"
+          }
+        }
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "deployment.rollback",
+      "risk": "R1",
+      "resource_kinds": [
+        "deployment"
+      ],
+      "outcome": "unknown",
+      "inspect": "unknown",
+      "metrics": [
+        {
+          "source": "prom",
+          "query": "checkout_error_rate",
+          "v": 0.002
+        }
+      ]
+    }
+  ],
+  "horizon": "1h",
+  "expect": {
+    "status": "BLOCKED",
+    "max_actions": 1,
+    "max_runs": 1,
+    "root_cause": "unknown"
+  }
+}

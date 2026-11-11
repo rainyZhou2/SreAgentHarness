@@ -1,0 +1,260 @@
+{
+  "name": "001-latency-after-bad-deploy",
+  "description": "Search P99 rises after a release. The deploy event and the alert land in one Work; the investigation cites the change and the latency metric, a rollback (R2) is approved, P99 and the error rate hold for a stable window, and the Work succeeds on the metrics — not on the run's say-so.",
+  "environment": "production",
+  "rules": [
+    {
+      "name": "alerts",
+      "match": {
+        "event_types": [
+          "alert.firing"
+        ]
+      },
+      "key": "subject",
+      "group": "service-health",
+      "lookback": "1h",
+      "template": "bench-mitigate",
+      "work_kind": "incident",
+      "title": "${type} on ${subject}",
+      "intent": "restore search latency within SLO"
+    },
+    {
+      "name": "deploys",
+      "match": {
+        "event_types": [
+          "change.deployed"
+        ]
+      },
+      "key": "subject",
+      "group": "service-health",
+      "action": "attach"
+    }
+  ],
+  "templates": [
+    {
+      "id": "bench-mitigate",
+      "kind": "incident",
+      "stages": [
+        {
+          "id": "investigate",
+          "type": "run",
+          "phase": "investigate",
+          "run": {
+            "goal": "Investigate ${subjects}"
+          }
+        },
+        {
+          "id": "mitigate",
+          "type": "action",
+          "phase": "mitigate",
+          "action": {
+            "from_proposal": "investigate",
+            "allowed": [
+              "deployment.rollback"
+            ]
+          }
+        },
+        {
+          "id": "verify",
+          "type": "verify",
+          "phase": "verify",
+          "on_failure": "investigate",
+          "verify": {
+            "recheck_every": "1m",
+            "timeout": "30m",
+            "spec": {
+              "stable_for": "3m",
+              "all_of": [
+                {
+                  "id": "p99",
+                  "kind": "metric",
+                  "window": "2m",
+                  "metric": {
+                    "source": "prom",
+                    "query": "search_p99_seconds",
+                    "aggregate": "max",
+                    "operator": "<",
+                    "threshold": 0.8
+                  }
+                },
+                {
+                  "id": "error_rate",
+                  "kind": "metric",
+                  "window": "2m",
+                  "metric": {
+                    "source": "prom",
+                    "query": "search_error_rate",
+                    "aggregate": "max",
+                    "operator": "<",
+                    "threshold": 0.01
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "signals": [
+    {
+      "at": "0s",
+      "event": {
+        "source": "argocd",
+        "type": "change.deployed",
+        "subject_ref": "deployment://prod/search-api",
+        "dedup_key": "sync-214",
+        "labels": {
+          "revision": "v2.14.0",
+          "actor": "ci",
+          "validation": "ci:passed"
+        }
+      }
+    },
+    {
+      "at": "6m",
+      "event": {
+        "source": "alertmanager",
+        "type": "alert.firing",
+        "subject_ref": "deployment://prod/search-api",
+        "dedup_key": "search-p99",
+        "labels": {
+          "severity": "critical",
+          "alertname": "SearchLatencyP99High"
+        }
+      }
+    }
+  ],
+  "metrics": [
+    {
+      "source": "prom",
+      "query": "search_p99_seconds",
+      "points": [
+        {
+          "at": "0s",
+          "v": 0.31
+        },
+        {
+          "at": "2m",
+          "v": 2.9
+        }
+      ]
+    },
+    {
+      "source": "prom",
+      "query": "search_error_rate",
+      "points": [
+        {
+          "at": "0s",
+          "v": 0.001
+        },
+        {
+          "at": "2m",
+          "v": 0.04
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "at": "7m",
+      "source_type": "change",
+      "source_ref": "argocd://search-api/sync/214",
+      "trust_tier": "T2",
+      "summary": "search-api synced to v2.14.0 six minutes before the alert"
+    },
+    {
+      "at": "7m",
+      "source_type": "metric",
+      "source_ref": "prom://search_p99_seconds",
+      "trust_tier": "T3",
+      "summary": "P99 2.9s since two minutes after the sync; SLO 0.8s"
+    },
+    {
+      "at": "7m",
+      "source_type": "trace",
+      "source_ref": "jaeger://search-api/slow",
+      "trust_tier": "T3",
+      "summary": "slow spans are in the ranking stage added by v2.14.0"
+    }
+  ],
+  "runs": [
+    {
+      "stage": "investigate",
+      "duration": "5m",
+      "tool_calls": 11,
+      "result": {
+        "answer": "v2.14.0 added a ranking stage that dominates the slow traces; instances on v2.13 are unaffected. Roll back.",
+        "hypotheses": [
+          {
+            "id": "h1",
+            "statement": "release v2.14.0 introduced a slow ranking stage in search-api",
+            "status": "VERIFIED",
+            "supports": [
+              "argocd://search-api/sync/214",
+              "prom://search_p99_seconds",
+              "jaeger://search-api/slow"
+            ]
+          }
+        ],
+        "loop": {
+          "cost_usd": 0.42
+        },
+        "proposed_action": {
+          "action": "deployment.rollback",
+          "target": "deployment://prod/search-api",
+          "args": {
+            "to_revision": "v2.13.4"
+          }
+        }
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "deployment.rollback",
+      "risk": "R2",
+      "resource_kinds": [
+        "deployment"
+      ],
+      "facts": [
+        {
+          "predicate": "image",
+          "value": "search-api:v2.13.4"
+        }
+      ],
+      "metrics": [
+        {
+          "source": "prom",
+          "query": "search_p99_seconds",
+          "v": 0.33
+        },
+        {
+          "source": "prom",
+          "query": "search_error_rate",
+          "v": 0.001
+        }
+      ]
+    }
+  ],
+  "approvals": [
+    {
+      "action": "deployment.rollback",
+      "approver": "oncall-lead",
+      "comment": "matches the release timeline and the traces"
+    }
+  ],
+  "horizon": "2h",
+  "expect": {
+    "works": 1,
+    "status": "SUCCEEDED",
+    "pass": true,
+    "applied": [
+      "deployment.rollback"
+    ],
+    "max_runs": 1,
+    "max_actions": 1,
+    "root_cause": "v2.14.0",
+    "max_duration": "45m"
+  }
+}

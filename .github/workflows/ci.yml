@@ -1,0 +1,171 @@
+# CI gates (RFC §24.3 / §24.5). Every job is a hard gate on pull requests
+# and pushes to main.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    name: gofmt + vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out="$(gofmt -l $(git ls-files '*.go' | grep -v '^desktop/'))"
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./... && go vet -tags=integration ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - name: migrations are append-only
+        run: go test ./migrations -run AppendOnly -count=1
+      - name: configuration and deployment gate (local tier)
+        run: go run ./cmd/harness validate-config -config deploy/harness.example.yaml -tier local
+
+  test:
+    name: unit tests (SQLite + PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      HARNESS_PG_TEST_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go test
+        run: go test ./... -count=1
+      - name: go test -race
+        run: go test -race ./... -count=1
+
+  integration:
+    name: fault injection + migration upgrade
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      HARNESS_PG_TEST_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: old schemas upgrade and stay readable
+        run: go test ./migrations -run Upgrade -count=1 -v
+      - name: exactly-once under crashes, lost commits and timeouts
+        run: go test -tags=integration -race ./internal/orchestration -run Fault -count=5 -v
+      - name: global budget across replicas, work graph and run wake (PostgreSQL)
+        run: go test -race ./internal/orchestration -run 'GlobalModelRunBudget|ChildrenStage|ChildFailure|RunWaker' -count=3 -v
+      - name: tenant isolation (row-level security)
+        run: go test ./internal/store/cpsql -run 'RowLevelSecurity|Quota|Graph|Dependenc|Child' -count=1 -v
+
+  contracts:
+    name: provider + action contracts, security cases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: observability providers against scripted endpoints
+        run: go test -race ./plugins/observability ./internal/observability -count=1 -v
+      - name: action executors against the runtime contract
+        run: go test -race ./plugins/sre -run 'Certify|Monitoring|ServingScale' -count=1 -v
+      - name: action safety (aliases, recreated targets, dry run, allow-list, break-glass)
+        run: go test -race ./internal/action -count=1
+      - name: policy and security cases
+        run: go test -race ./internal/workapi ./internal/governance ./internal/provenance ./internal/eventing -count=1
+
+  bench:
+    name: work-bench cases + load budget
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o harness ./cmd/harness
+      - name: benchmark cases
+        run: ./harness work-bench run bench/cases -out bench-results.json
+      - name: release gate (attestation of this build against itself)
+        run: |
+          ./harness validate-config -config deploy/harness.example.yaml -tier local -format json > attestation.json
+          ./harness release-gate -baseline attestation.json -candidate attestation.json
+      - name: load (SQLite)
+        run: ./harness work-bench load -budget bench/load-budget.json -out load-sqlite.json
+      - name: load (PostgreSQL)
+        env:
+          HARNESS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: |
+          ./harness migrate
+          ./harness work-bench load -store postgres -budget bench/load-budget.json -out load-postgres.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: |
+            bench-results.json
+            load-*.json
+            attestation.json
+
+  desktop:
+    name: desktop app
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+      - run: go vet ./...
+      - run: go test ./... -count=1

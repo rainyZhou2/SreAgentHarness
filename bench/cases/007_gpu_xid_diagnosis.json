@@ -1,0 +1,38 @@
+{
+  "name": "007-gpu-xid-diagnosis",
+  "description": "DCGM reports Xid 79 (fallen off the bus) on a GPU that serves a model. The investigation ties the fault to the node, the node is cordoned after approval, and the Work succeeds when the node no longer schedules work and the service keeps its capacity.",
+  "environment": "production",
+  "rules": [{"name": "gpu-faults", "match": {"event_types": ["gpu.*"]}, "key": "subject", "template": "bench-gpu", "work_kind": "incident",
+    "title": "${type} on ${subject}", "intent": "restore GPU node health"}],
+  "templates": [{"id": "bench-gpu", "kind": "incident", "stages": [
+    {"id": "diagnose", "type": "agents", "phase": "investigate", "agents": [
+      {"role": "gpu", "required": true, "goal": "GPU telemetry of ${subjects}: Xid, ECC, NVLink, PCIe"},
+      {"role": "serving", "goal": "Which serving workers use the faulted GPU and what capacity is left"}]},
+    {"id": "decide", "type": "run", "phase": "mitigate", "run": {"goal": "Pick one allowed isolation for ${subjects}. ${stage.diagnose.summary}"}},
+    {"id": "isolate", "type": "action", "phase": "mitigate", "action": {"from_proposal": "decide", "allowed": ["node.cordon"]}},
+    {"id": "verify", "type": "verify", "phase": "verify", "on_timeout": "block", "verify": {"recheck_every": "1m", "timeout": "20m",
+      "spec": {"all_of": [
+        {"id": "cordoned", "kind": "state", "target_ref": "node://gpu-node-7", "state": {"predicate": "schedulable", "equals": "false"}},
+        {"id": "capacity", "kind": "metric", "window": "2m",
+          "metric": {"source": "prom", "query": "llama_ready_replicas", "aggregate": "min", "operator": ">=", "threshold": 3}}]}}}]}],
+  "signals": [{"at": "0s", "event": {"source": "dcgm", "type": "gpu.xid_error", "subject_ref": "node://gpu-node-7", "dedup_key": "xid-79-gpu3",
+    "labels": {"xid": "79", "gpu": "3", "uuid": "GPU-5c1f"}}}],
+  "facts": [{"subject": "node://gpu-node-7", "predicate": "schedulable", "value": "true", "source": "kubernetes"}],
+  "metrics": [{"source": "prom", "query": "llama_ready_replicas", "points": [{"at": "0s", "v": 4}]}],
+  "evidence": [{"at": "1m", "source_type": "metric", "source_ref": "prom://DCGM_FI_DEV_XID_ERRORS", "trust_tier": "T3",
+    "summary": "GPU 3 (GPU-5c1f) on gpu-node-7 reports Xid 79 since 00:00"}],
+  "runs": [
+    {"stage": "diagnose", "role": "gpu", "duration": "2m", "result": {"answer": "Xid 79 on GPU 3: the card fell off the bus. Hardware fault.",
+      "hypotheses": [{"id": "h1", "statement": "GPU 3 on gpu-node-7 has a hardware fault (Xid 79)", "status": "VERIFIED",
+        "supports": ["prom://DCGM_FI_DEV_XID_ERRORS"]}], "loop": {"cost_usd": 0.12}}},
+    {"stage": "diagnose", "role": "serving", "duration": "2m", "result": {"answer": "llama-2 runs on the faulted GPU; three other replicas are healthy."}},
+    {"stage": "decide", "duration": "1m", "result": {"answer": "Cordon the node; do not reset the GPU.",
+      "proposed_action": {"action": "node.cordon", "target": "node://gpu-node-7", "args": {}}}}],
+  "actions": [{"name": "node.cordon", "risk": "R2", "resource_kinds": ["node"],
+    "facts": [{"predicate": "schedulable", "value": "false"}],
+    "metrics": [{"source": "prom", "query": "llama_ready_replicas", "v": 3}]}],
+  "approvals": [{"action": "node.cordon", "approver": "gpu-oncall", "comment": "three replicas keep the SLO"}],
+  "horizon": "2h",
+  "expect": {"works": 1, "status": "SUCCEEDED", "applied": ["node.cordon"], "forbidden": ["gpu.reset", "node.drain"], "max_runs": 3,
+    "root_cause": "Xid 79"}
+}

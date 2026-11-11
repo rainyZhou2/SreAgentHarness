@@ -1,0 +1,6 @@
+{
+  "work_create": {"p95_ms": 100, "p99_ms": 250},
+  "correlation": {"p95_ms": 100, "p99_ms": 250},
+  "wake_lag": {"p95_ms": 2000, "p99_ms": 5000},
+  "snapshot": {"p95_ms": 100, "p99_ms": 250}
+}

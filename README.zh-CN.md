@@ -359,4 +359,4 @@ Work 引擎（`HARNESS_WORK_ENGINE_ENABLED`）在可恢复的 run 内核之上�
 - **AI 基础设施。** 基于 UUID 的 GPU 身份（换卡与 MIG 变化）、ECC/NVLink/PCIe 信号、TPOT/E2E/缓存/prefill/decode 信号、prefill/decode 诊断、带守卫的 `serving.scale_prefill|decode`、成本模型，以及 S3/MinIO 制品存储。
 - **规则即代码。** `monitoring.rule_validate`、`monitoring.rule_propose`（R0）和 `monitoring.apply_via_gitops`（R2，仅通过 pull request）。
 
-数据库变更是面向 PostgreSQL 与 SQLite 的追加式迁移。CI、确定性 bench 用例和负载预算位于 `.github/workflows` 与 `bench/`（由 `.gitignore` 保持在本地）。
+数据库变更是面向 PostgreSQL 与 SQLite 的追加式迁移。CI、确定性 bench 用例和负载预算位于 `.github/workflows` 与 `bench/`。
