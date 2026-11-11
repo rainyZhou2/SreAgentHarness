@@ -455,7 +455,6 @@ func mustJSON(v any) json.RawMessage {
 func statusPtr(s work.Status) *work.Status { return &s }
 func strPtr(s string) *string              { return &s }
 func intPtr(i int) *int                    { return &i }
-func timePtr(t time.Time) *time.Time       { return &t }
 
 func (d *driver) step(ctx context.Context) (step, error) {
 	w := &d.w

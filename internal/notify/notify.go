@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -43,8 +42,7 @@ func runIDOf(payload []byte) (string, error) {
 // Local is an in-memory broker. Messages that do not fit are dropped: the
 // reconciler re-wakes idle runs, so loss only adds latency.
 type Local struct {
-	ch   chan []byte
-	once sync.Once
+	ch chan []byte
 }
 
 func NewLocal(buffer int) *Local { return &Local{ch: make(chan []byte, buffer)} }

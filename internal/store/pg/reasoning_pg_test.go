@@ -38,6 +38,8 @@ func pgTestStores(t *testing.T) (admin *Store, app *Store, url string) {
 	for _, q := range []string{
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='harness_app') THEN
 			CREATE ROLE harness_app LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$`,
+		// A password, so the role can log in where pg_hba requires one (CI containers).
+		`ALTER ROLE harness_app PASSWORD 'harness_app'`,
 		`GRANT ALL ON ALL TABLES IN SCHEMA public TO harness_app`,
 		`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO harness_app`,
 	} {
@@ -50,6 +52,7 @@ func pgTestStores(t *testing.T) (admin *Store, app *Store, url string) {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.User = "harness_app"
+	cfg.ConnConfig.Password = "harness_app"
 	ConfigureRLS(cfg)
 	appPool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

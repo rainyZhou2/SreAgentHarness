@@ -26,8 +26,6 @@ import (
 	"go-sre-harness/internal/store/pg"
 )
 
-const tenantLocal = "local"
-
 type Store struct {
 	db *sql.DB
 
@@ -663,7 +661,6 @@ func strptr(v string) *string {
 	}
 	return &v
 }
-func int64ptr(v int64) *int64 { return &v }
 func profileKey(tenant, id string, version int64) string {
 	return tenant + "/" + id + "@" + fmt.Sprint(version)
 }
@@ -802,29 +799,6 @@ func sortedMessages(msgs map[string][]domain.Message, branchID string) []domain.
 	return out
 }
 
-func (s *Store) tenantOfRun(runID string) string {
-	if r, ok := s.runs[runID]; ok {
-		return r.TenantID
-	}
-	return tenantLocal
-}
-
-func (s *Store) stepByID(id string) (domain.Step, error) {
-	st, ok := s.steps[id]
-	if !ok {
-		return domain.Step{}, domain.ErrNotFound
-	}
-	return st, nil
-}
-
-func (s *Store) runByID(id string) (domain.Run, error) {
-	r, ok := s.runs[id]
-	if !ok {
-		return domain.Run{}, domain.ErrNotFound
-	}
-	return r, nil
-}
-
 func (s *Store) profileSpec(tenant, id string, version int64) (json.RawMessage, error) {
 	p, ok := s.profiles[profileKey(tenant, id, version)]
 	if !ok {
@@ -890,11 +864,4 @@ func (s *Store) claimOutbox(limit int) []domain.OutboxMessage {
 	return out
 }
 
-func (s *Store) saveOutbox(m domain.OutboxMessage) {
-	s.outbox[m.ID] = m
-	s.put("outbox", m.ID, m.TenantID, 0, m)
-}
-
 func (s *Store) deleteOutbox(id string) { delete(s.outbox, id); s.del("outbox", id) }
-
-func (s *Store) hasPrefix(s1, prefix string) bool { return strings.HasPrefix(s1, prefix) }

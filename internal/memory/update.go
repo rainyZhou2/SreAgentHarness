@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"strings"
-	"time"
 )
 
 // ---------- updating memory ----------
@@ -167,6 +166,3 @@ func PersonalSubject(key string) string { return "pref:" + subjectKey(key) }
 func NoteSubject(key string) string { return "note:" + subjectKey(key) }
 
 func subjectKey(key string) string { return strings.ToLower(strings.Join(strings.Fields(key), "_")) }
-
-// expired reports whether a memory's expiry has passed.
-func expired(m Memory, now time.Time) bool { return m.ExpiresAt != nil && !m.ExpiresAt.After(now) }

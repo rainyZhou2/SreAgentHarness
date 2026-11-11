@@ -9,7 +9,6 @@ package planner
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/flow"
@@ -603,17 +602,4 @@ func totalNodes(spec flow.Spec) int {
 		}
 	}
 	return n
-}
-
-// describeWarnings is used in log/metric labels without unbounded text.
-func describeWarnings(a Analysis) string {
-	if len(a.Findings) == 0 {
-		return ""
-	}
-	var codes []string
-	for _, f := range a.Findings {
-		codes = append(codes, f.Code)
-	}
-	sort.Strings(codes)
-	return strings.Join(codes, ",")
 }

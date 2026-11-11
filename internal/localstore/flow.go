@@ -80,19 +80,4 @@ func (s *Store) applyFlowLocked(parent *domain.Run, lease domain.Lease, fc *doma
 	return nil
 }
 
-// flowNodeOutput returns the recorded output for a node (used by replay and
-// diagnostics).
-func (s *Store) flowNodeOutput(runID, nodeID string) (domain.FlowNodeRun, bool) {
-	fl, ok := s.flows[runID]
-	if !ok {
-		return domain.FlowNodeRun{}, false
-	}
-	for _, n := range fl.Nodes {
-		if n.NodeID == nodeID {
-			return n, true
-		}
-	}
-	return domain.FlowNodeRun{}, false
-}
-
 var _ = time.Now
