@@ -54,11 +54,14 @@ import (
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/evidence"
+	"go-sre-harness/internal/governance"
 	"go-sre-harness/internal/memory"
+	"go-sre-harness/internal/observability"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/playbook"
 	"go-sre-harness/internal/postmortem"
+	"go-sre-harness/internal/protocol"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/work"
@@ -100,6 +103,10 @@ type API struct {
 	}
 	// Postmortems builds ledger reports (nil: routes return 503).
 	Postmortems *postmortem.Builder
+	// Broker is the observability Query Broker (nil: routes return 503).
+	Broker *observability.Broker
+	// Attestation returns the deployment's launch attestation.
+	Attestation func() governance.Attestation
 }
 
 // Auditor is the security audit sink (the kernel's audit log).
@@ -144,6 +151,14 @@ func (a *API) log() *slog.Logger {
 
 // RouteRoles declares the minimum role per route.
 func (a *API) RouteRoles() map[string]auth.Role {
+	roles := a.v2Roles()
+	for route, role := range a.v3Roles() {
+		roles[route] = role
+	}
+	return roles
+}
+
+func (a *API) v2Roles() map[string]auth.Role {
 	return map[string]auth.Role{
 		"POST /v1/works":                    auth.Operator,
 		"GET /v1/works":                     auth.Viewer,
@@ -245,6 +260,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/works/{id}/postmortem", a.createPostmortem)
 	mux.HandleFunc("GET /v1/events/shadow-report", a.shadowReport)
 	mux.HandleFunc("POST /v1/sources/{source}/events", a.sourceEvents)
+	a.registerV3(mux)
 }
 
 // ---- helpers ----
@@ -397,6 +413,13 @@ func (a *API) sub(fn func(ctx context.Context, tenant, workID string) (any, erro
 	}
 }
 
+// wantsContract reports whether the client asked for the stable event
+// contract (protocol=1 or the contract media type). Clients that ask for
+// nothing keep getting the timeline as before.
+func wantsContract(r *http.Request) bool {
+	return r.URL.Query().Get("protocol") == "1" || strings.Contains(r.Header.Get("Accept"), protocol.MediaType)
+}
+
 // ---- works ----
 
 func (a *API) createWork(w http.ResponseWriter, r *http.Request) {
@@ -425,7 +448,7 @@ func (a *API) createWork(w http.ResponseWriter, r *http.Request) {
 	req.TenantID, req.ActorID, req.ActorType, req.IdempotencyKey = p.Tenant, p.Subject, "user", key
 	wk, created, err := a.Service.Create(r.Context(), req)
 	if err != nil {
-		a.fail(w, r, err)
+		a.failV3(w, r, err)
 		return
 	}
 	code := http.StatusOK
@@ -516,6 +539,11 @@ func (a *API) workEvents(w http.ResponseWriter, r *http.Request) {
 	if len(evs) > 0 {
 		next = evs[len(evs)-1].Seq
 	}
+	if wantsContract(r) {
+		writeJSON(w, http.StatusOK, map[string]any{"schema_version": protocol.SchemaVersion, "items": protocol.FromWorkEvents(evs),
+			"next_after_seq": next})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": evs, "next_after_seq": next})
 }
 
@@ -549,9 +577,13 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if max <= 0 {
 		max = 30 * time.Minute
 	}
+	contract := wantsContract(r)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
+	if contract {
+		w.Header().Set("X-Harness-Event-Schema", strconv.Itoa(protocol.SchemaVersion))
+	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "retry: 3000\n\n")
 	flusher.Flush()
@@ -570,8 +602,16 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, e := range evs {
-			b, _ := json.Marshal(e)
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, e.Type, b)
+			if contract {
+				// The stable event contract: the sequence is the SSE id, so
+				// Last-Event-ID resumes exactly after the last event seen.
+				pe := protocol.FromWork(e)
+				b, _ := json.Marshal(pe)
+				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", pe.Sequence, pe.Type, b)
+			} else {
+				b, _ := json.Marshal(e)
+				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, e.Type, b)
+			}
 			after = e.Seq
 		}
 		if len(evs) > 0 {
@@ -703,6 +743,14 @@ func (a *API) sourceEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "too_large", "body exceeds 1 MiB")
 		return
 	}
+	// Source attestation: an operator-declared source must be enabled for
+	// the tenant and, when it signs its requests, prove the body is its own.
+	if pol, ok := a.Ingestor.Sources[source]; ok {
+		if err := pol.Verify(p.Tenant, r.Header, body); err != nil {
+			a.outOfScope(w, r, p, "event.ingest", "source", source, err.Error())
+			return
+		}
+	}
 	envs, err := norm(r.Context(), p.Tenant, r.Header, body, a.Clock.Now())
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid", cpkit.Truncate(err.Error(), 500))
@@ -753,9 +801,22 @@ func (a *API) ingest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "disabled", "event ingestion is disabled")
 		return
 	}
-	var env eventing.Envelope
-	if !decode(w, r, &env) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBody))
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
 		return
+	}
+	// Schema 1 and the v2 wire envelope are both accepted.
+	env, err := eventing.Upcast(body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if pol, ok := a.Ingestor.Sources[env.Source]; ok {
+		if err := pol.Verify(p.Tenant, r.Header, body); err != nil {
+			a.outOfScope(w, r, p, "event.ingest", "source", env.Source, err.Error())
+			return
+		}
 	}
 	if env.TenantID != "" && env.TenantID != p.Tenant {
 		writeErr(w, http.StatusForbidden, "forbidden", "tenant_id does not match the caller")
@@ -788,6 +849,16 @@ func (a *API) getEvent(w http.ResponseWriter, r *http.Request) {
 	rec, err := a.Store.GetEvent(r.Context(), p.Tenant, r.PathValue("id"))
 	if err != nil {
 		a.fail(w, r, err)
+		return
+	}
+	if r.URL.Query().Get("decision") != "" {
+		// Why the event went where it went: rule and version, candidates.
+		d, _, err := a.Store.GetDecision(r.Context(), p.Tenant, rec.InboxID)
+		if err != nil {
+			a.fail(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"event": rec, "decision": d})
 		return
 	}
 	writeJSON(w, http.StatusOK, rec)
@@ -1107,6 +1178,9 @@ func (a *API) breakGlass(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IntentHash    string `json:"intent_hash"`
 		Justification string `json:"justification"`
+		// IncidentRef names the incident the release belongs to (required
+		// for R2 actions).
+		IncidentRef string `json:"incident_ref,omitempty"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -1125,7 +1199,7 @@ func (a *API) breakGlass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	just, _ := memory.Redact(req.Justification)
-	rec, err := a.Actions.BreakGlass(r.Context(), p.Tenant, cur.ID, p.Subject, req.IntentHash, just)
+	rec, err := a.Actions.BreakGlass(r.Context(), p.Tenant, cur.ID, p.Subject, req.IntentHash, just, req.IncidentRef)
 	if err != nil {
 		a.audit(r.Context(), p, "action.break_glass", "action", cur.ID, "rejected", map[string]any{"reason": err.Error()})
 		a.fail(w, r, err)
@@ -1133,7 +1207,7 @@ func (a *API) breakGlass(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r.Context(), p, "action.break_glass", "action", rec.ID, "applied", map[string]any{
 		"work_id": rec.WorkID, "target": rec.TargetRef, "risk": rec.Risk, "intent_hash": rec.IntentHash,
-		"justification": cpkit.Truncate(just, 500)})
+		"justification": cpkit.Truncate(just, 500), "incident_ref": req.IncidentRef, "grant_expires_at": rec.BreakGlass.ExpiresAt})
 	if err := a.Store.WakeWork(r.Context(), rec.TenantID, rec.WorkID, "action_break_glass", "user", p.Subject,
 		map[string]any{"action_id": rec.ID, "justification": cpkit.Truncate(just, 500)}); err != nil &&
 		!errors.Is(err, work.ErrNotFound) {

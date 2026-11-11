@@ -22,14 +22,14 @@ func TestWorkBenchCLI(t *testing.T) {
 	if code := WorkBench(ctx, []string{"run", "../../bench/cases", "-out", out, "-write-baseline", base}, env, &so, &se); code != 0 {
 		t.Fatalf("run: %d\n%s", code, se.String())
 	}
-	if !strings.Contains(se.String(), "4 passed, 0 failed") {
+	if !strings.Contains(se.String(), "12 passed, 0 failed") {
 		t.Fatalf("stderr: %s", se.String())
 	}
 	var suite struct {
 		Passed int `json:"cases_passed"`
 	}
 	b, _ := os.ReadFile(out)
-	if json.Unmarshal(b, &suite) != nil || suite.Passed != 4 {
+	if json.Unmarshal(b, &suite) != nil || suite.Passed != 12 {
 		t.Fatalf("output: %s", b)
 	}
 	if code := WorkBench(ctx, []string{"run", "../../bench/cases", "-baseline", base, "-out", filepath.Join(dir, "o2.json")}, env, &so, &se); code != 0 {
