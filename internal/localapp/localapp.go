@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go-sre-harness/internal/runsearch"
 	"go-sre-harness/internal/sandbox"
 	"go-sre-harness/internal/tools/memsearch"
+	runsearchtool "go-sre-harness/internal/tools/runsearch"
 	"go-sre-harness/internal/tools/sandboxexec"
 	"log/slog"
 	"net/http"
@@ -186,6 +188,8 @@ func Run(ctx context.Context, cfg Config) error {
 	graphSvc := &graph.Service{Store: store, Tools: reg, Extensions: extRT, Log: cfg.Log.With("component", "graph")}
 	retriever := &memory.Retriever{Store: store, Embedder: embedder, Artifacts: arts, TopK: 5}
 	reg.Register(memsearch.Tool{Retriever: retriever})
+	runHistory := &runsearch.Searcher{Runs: store, Artifacts: arts}
+	reg.Register(runsearchtool.Tool{Search: runHistory, Runs: store})
 	if rt := os.Getenv("HARNESS_SANDBOX_RUNTIME"); rt != "" {
 		// Opt-in: commands run in a container per call, without network or
 		// credentials, in a per-run workspace under the data directory.

@@ -141,6 +141,10 @@ const BatchToolName = "harness.parallel"
 // during a run. Its hits are citable as memory:<id>@<version>.
 const MemorySearchToolName = "harness.memory_search"
 
+// RunSearchToolName is the builtin that searches past runs (goals,
+// conclusions, hypotheses).
+const RunSearchToolName = "harness.run_search"
+
 // SandboxExecToolName is the builtin tool that runs commands in the run's
 // sandbox. It changes the run's workspace, so it is never run
 // speculatively.

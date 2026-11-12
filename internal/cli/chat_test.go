@@ -203,3 +203,85 @@ func TestMemoryCommands(t *testing.T) {
 		t.Fatal("empty key/value must be rejected")
 	}
 }
+
+func reviewServer(t *testing.T, transitions *[]map[string]any) *httptest.Server {
+	t.Helper()
+	mems := map[string]string{
+		"CANDIDATE": `[{"id":"aaaa1111-0","scope":"service","scope_id":"checkout","memory_type":"semantic","status":"CANDIDATE","version":1,"subject":"note:pool","title":"pool limit","content":"checkout pool max is 150","trust":"T3"},
+			{"id":"aaaa2222-0","scope":"service","scope_id":"checkout","memory_type":"semantic","status":"CANDIDATE","version":1,"subject":"note:x","title":"x","content":"x","trust":"T3"},
+			{"id":"pers0000-0","scope":"user","scope_id":"me","status":"CANDIDATE","title":"personal"}]`,
+		"VALIDATING": `[]`,
+		"ACTIVE":     `[{"id":"old00000-0","scope":"service","scope_id":"checkout","status":"ACTIVE","subject":"note:pool","title":"pool limit","content":"checkout pool max is 100"}]`,
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/memories":
+			body, ok := mems[r.URL.Query().Get("status")]
+			if !ok {
+				body = "[]"
+			}
+			_, _ = w.Write([]byte(`{"memories":` + body + `}`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/transition"):
+			var b map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			b["path"] = r.URL.Path
+			*transitions = append(*transitions, b)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestMemoryReviewShowsWhatChanges(t *testing.T) {
+	var tr []map[string]any
+	srv := reviewServer(t, &tr)
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "t")
+	var out bytes.Buffer
+	if err := MemoryReview(context.Background(), c, &out); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "pool limit") || !strings.Contains(s, "replaces old00000") || !strings.Contains(s, "max is 100") {
+		t.Fatalf("a reviewer must see the ACTIVE memory a proposal replaces:\n%s", s)
+	}
+	if strings.Contains(s, "personal") {
+		t.Fatalf("personal memories are never in the shared review queue:\n%s", s)
+	}
+	if !strings.Contains(s, "2 to review") {
+		t.Fatalf("%s", s)
+	}
+}
+
+func TestMemoryDecide(t *testing.T) {
+	var tr []map[string]any
+	srv := reviewServer(t, &tr)
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "t")
+	var out bytes.Buffer
+	if err := MemoryDecide(context.Background(), c, &out, "aaaa1", "approve", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr) != 1 || tr[0]["to"] != "ACTIVE" || tr[0]["expected_status"] != "CANDIDATE" || tr[0]["path"] != "/v1/memories/aaaa1111-0/transition" {
+		t.Fatalf("approve must move CANDIDATE to ACTIVE: %+v", tr)
+	}
+	if err := MemoryDecide(context.Background(), c, &out, "aaaa", "approve", ""); err == nil || !strings.Contains(err.Error(), "matches 2") {
+		t.Fatalf("an ambiguous prefix must not pick one: %v", err)
+	}
+	if err := MemoryDecide(context.Background(), c, &out, "aa", "approve", ""); err == nil {
+		t.Fatal("a too-short prefix must be rejected")
+	}
+	if err := MemoryDecide(context.Background(), c, &out, "aaaa2222", "reject", "wrong"); err != nil || tr[1]["to"] != "REJECTED" || tr[1]["reason"] != "wrong" {
+		t.Fatalf("%v %+v", err, tr)
+	}
+	if err := MemoryDecide(context.Background(), c, &out, "old0", "archive", ""); err != nil || tr[2]["to"] != "ARCHIVED" || tr[2]["expected_status"] != "ACTIVE" {
+		t.Fatalf("%v %+v", err, tr)
+	}
+	if err := MemoryDecide(context.Background(), c, &out, "old0", "approve", ""); err == nil {
+		t.Fatal("an ACTIVE memory is not in the review queue")
+	}
+	if err := MemoryDecide(context.Background(), c, &out, "pers0000", "approve", ""); err == nil {
+		t.Fatal("personal memories cannot be approved through the shared queue")
+	}
+}
