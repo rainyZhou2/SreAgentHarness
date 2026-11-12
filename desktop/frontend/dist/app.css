@@ -1011,3 +1011,42 @@ html.no-glass .graph-result, html.no-glass .graph-canvas {
 .att-go { color: var(--faint); flex-shrink: 0; }
 .md a.file-link::after { content: attr(data-ext); margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 10.5px;
   font-weight: 600; text-transform: uppercase; vertical-align: 1px; background: var(--accent-soft); color: var(--accent); }
+
+/* personal memory */
+.memory { padding-top: 12px; max-width: 760px; }
+.memory h1 { margin: 0 0 6px; }
+.memory .lead { margin: 0 0 18px; max-width: 660px; }
+.mem-form { display: flex; flex-direction: column; gap: 8px; margin: 0 0 20px; padding: 16px 18px;
+  border-radius: var(--r-shell); background: var(--glass);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 14px 34px -30px rgb(0 0 0 / .35); }
+.mem-form-title { font-size: 13px; font-weight: 600; }
+.mem-form textarea { resize: vertical; min-height: 64px; }
+.mem-form-foot { display: flex; gap: 8px; }
+.mem-list { display: flex; flex-direction: column; gap: 8px; }
+.mem-card { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; min-width: 0;
+  padding: 14px 18px; border-radius: var(--r-shell); background: var(--glass);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 14px 34px -30px rgb(0 0 0 / .35); }
+.mem-main { min-width: 0; }
+.mem-key { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.mem-value { margin-top: 3px; color: var(--muted); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-side { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.link-btn.danger { color: var(--bad, #c0392b); }
+
+.mem-tabs { margin: 0 0 14px; }
+.mem-tab-count { margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 11px; line-height: 17px; background: var(--accent-soft); color: var(--accent); }
+.mem-h2 { display: flex; align-items: center; margin: 18px 0 8px; font-size: 13px; font-weight: 600; }
+.mem-h2 .mem-tab-count { margin-left: 8px; }
+.mem-key .badge { margin-left: 8px; vertical-align: 1px; }
+.mem-meta { margin-top: 6px; font-size: 11.5px; color: var(--faint); }
+.mem-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mem-replaces { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.mem-replaces summary { cursor: pointer; }
+.mem-value.old { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--hover); text-decoration: line-through; text-decoration-color: var(--faint); }
+.mem-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.mem-edit textarea { resize: vertical; min-height: 72px; }
+.mem-side.stack { flex-direction: column; align-items: stretch; min-width: 128px; }
+.mem-card.learned { align-items: stretch; }
+.btn.ghost.danger { color: var(--bad, #c0392b); }
+
+.mem-check { margin-left: auto; font-weight: 400; }
+.mem-card .mem-value strong { color: var(--text); font-weight: 600; }
