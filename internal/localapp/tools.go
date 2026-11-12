@@ -2,8 +2,10 @@ package localapp
 
 import (
 	"log/slog"
+	"os"
 	"strings"
 
+	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/netguard"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/sretools"
@@ -34,4 +36,19 @@ func registerLocalTools(reg *tools.Registry, getenv func(string) string, log *sl
 			reg.Register(t)
 		}
 	}
+}
+
+// localCompactor returns the model-backed compactor when a real model
+// provider is configured. With only the built-in rule-based model it keeps
+// the default deterministic compactor: that model cannot write summaries.
+// HARNESS_LOCAL_LLM_COMPACT=off forces the deterministic one.
+func localCompactor(g kernel.Generator, log *slog.Logger) kernel.Compactor {
+	if strings.EqualFold(os.Getenv("HARNESS_LOCAL_LLM_COMPACT"), "off") || !hasRealModel(os.Getenv) {
+		return nil // the worker default (deterministic)
+	}
+	return &kernel.LLMCompactor{Gateway: g, Alias: "sre-reasoning", Log: log.With("component", "compactor")}
+}
+
+func hasRealModel(getenv func(string) string) bool {
+	return getenv("ANTHROPIC_API_KEY") != "" || getenv("HARNESS_OPENAI_BASE_URL") != "" || getenv("GEMINI_API_KEY") != ""
 }

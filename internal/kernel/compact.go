@@ -64,6 +64,9 @@ type CompactInput struct {
 	// Observations are the ones being folded, oldest first.
 	Observations    []domain.Observation
 	IsSideEffecting func(tool string) bool
+	// Lease is the compact step's lease: a compactor that calls a model
+	// uses it to fence the model request ledger.
+	Lease domain.Lease
 }
 
 // DeterministicCompactor lists every folded observation on one line with a
@@ -71,6 +74,10 @@ type CompactInput struct {
 type DeterministicCompactor struct {
 	Keep     int // newest observations kept verbatim (default 2)
 	MaxBytes int // per-observation body bytes (default 400)
+	// Salient keeps the unusual and failure-related lines of a long body
+	// instead of its first MaxBytes (used for the digest a model summarizes;
+	// the default stays reproducible and cheap).
+	Salient bool
 }
 
 func (DeterministicCompactor) Name() string { return "deterministic-v2" }
@@ -116,10 +123,14 @@ func (c DeterministicCompactor) Compact(_ context.Context, in CompactInput) (str
 			fmt.Fprintf(&b, " [%s; excerpt withheld, see step %d output]", untrusted.FlagNote(flags), o.StepSeq)
 			body = ""
 		}
-		if d := jsonDigest(body, max); d != "" {
-			body = d
+		if c.Salient {
+			body = salientExcerpt(body, max)
+		} else {
+			if d := jsonDigest(body, max); d != "" {
+				body = d
+			}
+			body = clipBytes(body, max)
 		}
-		body = clipBytes(body, max)
 		if body != "" {
 			fmt.Fprintf(&b, ": %s", body)
 		}
@@ -161,7 +172,7 @@ func (w *Worker) executeCompact(ctx context.Context, lease domain.Lease) (domain
 	cut := in.Observations[len(in.Observations)-keep].StepSeq
 
 	text, err := c.Compact(ctx, CompactInput{TenantID: lease.TenantID, RunID: lease.RunID, Goal: in.Goal,
-		PriorSummary: priorNarrative(in.Summary), Observations: old, IsSideEffecting: w.isSideEffecting})
+		PriorSummary: priorNarrative(in.Summary), Observations: old, IsSideEffecting: w.isSideEffecting, Lease: lease})
 	if err != nil {
 		return domain.StepSuccess{}, domain.Retryable(fmt.Errorf("compactor %s: %w", c.Name(), err), 0)
 	}

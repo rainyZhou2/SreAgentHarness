@@ -84,6 +84,14 @@ type SectionedConfig struct {
 	MaxOutputTokens     int64  `json:"max_output_tokens,omitempty"`
 }
 
+// LLMCompactorConfig configures the model-backed compactor.
+type LLMCompactorConfig struct {
+	CompactorConfig
+	// Alias is the model alias used for summaries (default sre-reasoning).
+	Alias           string `json:"alias,omitempty"`
+	MaxSummaryBytes int    `json:"max_summary_bytes,omitempty"`
+}
+
 // CompactorConfig configures the deterministic compactor.
 type CompactorConfig struct {
 	Keep     int `json:"keep,omitempty"`      // newest observations kept verbatim (default 2)
@@ -123,6 +131,21 @@ func init() {
 				return nil, err
 			}
 			return kernel.DeterministicCompactor{Keep: cfg.Keep, MaxBytes: cfg.MaxBytes}, nil
+		})
+	plugin.Register(plugin.Compactor, "llm", "model-written summaries of folded observations; citations kept, deterministic fallback on any failure",
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (kernel.Compactor, error) {
+			var cfg LLMCompactorConfig
+			if err := c.Decode(&cfg); err != nil {
+				return nil, err
+			}
+			if h.Gateway == nil {
+				return nil, errors.New("llm compactor needs a model gateway (a model_provider plugin)")
+			}
+			if cfg.Alias == "" {
+				cfg.Alias = "sre-reasoning"
+			}
+			return &kernel.LLMCompactor{Gateway: h.Gateway, Alias: cfg.Alias, Keep: cfg.Keep, MaxBytes: cfg.MaxBytes,
+				MaxSummaryBytes: cfg.MaxSummaryBytes, Log: h.Log}, nil
 		})
 }
 
