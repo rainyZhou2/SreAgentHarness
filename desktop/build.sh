@@ -21,7 +21,10 @@ cd "$(dirname "$0")"
 out=build/bin
 mkdir -p "$out"
 tags="desktop,production"
-version="$(sed -n 's/^var Version = "\(.*\)"/\1/p' settings.go)"
+# DESKTOP_VERSION (set by the release workflow from the tag) overrides the
+# version in settings.go; it is shown in Settings > About and the app bundle.
+version="${DESKTOP_VERSION:-$(sed -n 's/^var Version = "\(.*\)"/\1/p' settings.go)}"
+version="${version#v}"
 case "$(uname -s)" in
 Darwin)
   app="$out/SRE Harness.app"
@@ -38,7 +41,7 @@ Darwin)
   rm -r "$(dirname "$iconset")"
   CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers -mmacosx-version-min=11.0" \
   CGO_CFLAGS="-mmacosx-version-min=11.0" \
-    go build -tags "$tags" -ldflags "-w -s" -o "$app/Contents/MacOS/sre-harness-desktop" .
+    go build -tags "$tags" -ldflags "-w -s -X main.Version=${version}" -o "$app/Contents/MacOS/sre-harness-desktop" .
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -62,13 +65,13 @@ PLIST
   if [[ "${1:-}" == run ]]; then open "$app"; fi
   ;;
 Linux)
-  go build -tags "$tags,webkit2_41" -ldflags "-w -s" -o "$out/sre-harness-desktop" .
+  go build -tags "$tags,webkit2_41" -ldflags "-w -s -X main.Version=${version}" -o "$out/sre-harness-desktop" .
   bundle_local "$out/resources/local"
   echo "built: $out/sre-harness-desktop"
   if [[ "${1:-}" == run ]]; then "$out/sre-harness-desktop"; fi
   ;;
 *)
-  go build -tags "$tags" -ldflags "-w -s -H windowsgui" -o "$out/sre-harness-desktop.exe" .
+  go build -tags "$tags" -ldflags "-w -s -H windowsgui -X main.Version=${version}" -o "$out/sre-harness-desktop.exe" .
   bundle_local "$out/resources/local"
   echo "built: $out/sre-harness-desktop.exe"
   ;;
