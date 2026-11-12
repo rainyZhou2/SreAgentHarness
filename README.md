@@ -70,7 +70,35 @@ The final answer is shown as a card, not plain text, in both modes:
 
 ## Quick start
 
-Requires Go 1.26+ and PostgreSQL 14+; NATS is optional.
+**One command, no database** (single user, SQLite, loopback only):
+
+```bash
+go run ./cmd/harness local
+```
+
+It creates its data directory and a private token on first run, prints how to call the API, and uses the built-in rule-based model unless `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `HARNESS_OPENAI_BASE_URL` is set. `web.fetch` is available by default (`HARNESS_LOCAL_WEB=off` removes it); `HARNESS_LOCAL_PROMETHEUS_URL` adds read-only `prom.query` / `prom.alerts`. Flags: `-data DIR`, `-addr HOST:PORT`. A non-loopback address is refused unless `HARNESS_LOCAL_ALLOW_REMOTE=true`.
+
+Day-to-day commands for local mode:
+
+| Command | What it does |
+|---|---|
+| `harness local init` | Choose a model provider, test the key with a read-only call (no tokens spent) and save it to `<data>/local.env` (mode 0600). The real environment always overrides the file. |
+| `harness chat` | Interactive chat in the terminal with inline approvals (`/approvals`, `/approve N`, `/resume`, `--yes`). Works against a team server too (`-server`, `-token`). |
+| `harness memory list \| set KEY VALUE \| rm KEY` | View and edit the personal memory the agent keeps about you (the desktop app has the same in its **Memory** view). |
+| `harness memory review \| show ID \| approve ID \| reject ID [REASON] \| archive ID` | Review what the agent proposes to remember (CANDIDATE memories). **Only approved (ACTIVE) memories reach later runs**, so without review the agent's learning never takes effect. `review` shows what each proposal would replace; IDs may be shortened to a unique prefix. The desktop **Memory → Learned by the agent** tab does the same, with edit-then-approve and a pending-count badge. |
+| `harness memory curate \| suggestions \| apply ID \| dismiss ID` | Look for memories worth setting aside and review the suggestions (see *Memory curation*). `apply` sets them aside as STALE (out of retrieval, restorable with `memory approve ID`); `dismiss` keeps them and the same finding is not raised again. |
+| `harness compact-eval [-runs N]` | Measures what a compactor keeps from fixed investigation histories: key-fact recall, what the model is shown, citations, injection leakage. With no model configured it measures only the deterministic baseline and says the model-backed one was not run. |
+| `harness local doctor` | Checks the data directory, token, database integrity and schema, port, disk use, model keys and Prometheus. Exits 1 on a failure. |
+| `harness local backup [-out F]` | Consistent backup while running (database snapshot, event logs, artifacts). Tokens and API keys are never included. |
+| `harness local restore FILE` | Restores a backup; the previous data directory is kept as `<dir>.before-restore-<time>`. Credentials stay with the installation. |
+| `harness local prune [-older-than 30d] [-yes]` | Deletes old replay-only artifacts (full prompts, raw model responses, manifests). Results, steps, tool output, memories and event logs are kept. Dry run unless `-yes`. |
+| `harness version` | Build version. |
+
+Only one harness may use a data directory at a time (a lock refuses the second). The database records its schema version: an upgrade first copies the file to `harness.db.v<N>.bak`, and a database written by a newer harness is refused instead of being modified. With a real model configured, long investigations are compacted by a model-written summary (`HARNESS_LOCAL_LLM_COMPACT=off` keeps the deterministic one): citations (`obs:stepN`) are preserved, tool output is passed as data, and any model failure falls back to the deterministic summary. The kernel still appends the denied/failed/executed-action facts itself. The model is shown a *salient* excerpt of each long output (unusual lines and failure vocabulary, plus head and tail) rather than its first bytes, so a decisive line buried in a log still reaches it.
+
+**Releases.** Pushing a `v*` tag publishes the command-line binary for linux/darwin/windows and the desktop app (macOS `.dmg`/`.zip`, Linux `.tar.gz`, Windows `.zip`) with `SHA256SUMS.txt`. The macOS app is ad-hoc signed, not notarized, and the Windows build is unsigned, so the OS asks for confirmation on first launch. Build locally with `desktop/build.sh && desktop/package.sh` (`DESKTOP_VERSION=v1.2.3` sets the version).
+
+**Team server** (PostgreSQL, multi-tenant). Requires Go 1.26+ and PostgreSQL 14+; NATS is optional.
 
 ```bash
 createdb harness
@@ -201,7 +229,19 @@ What the agent remembers, for how long, and how memories are kept current.
 - **Revisions**: `PATCH /v1/memories/{id}` (approver; `expected_version`, `title` and/or `content`, `reason`) writes a new version: redacted and poison-checked like a new memory, re-embedded and re-indexed, audited, the status unchanged. Earlier versions stay in `agent_memory_versions`, so citations pinned to them still resolve; a revision that would duplicate another memory's content is rejected.
 - **Supersession** (activating a memory retires ACTIVE ones with the same subject and scope), **lifecycle transitions**, feedback and retention work as before. Consolidation is idempotent: a re-run after feedback does not reinforce or revise twice.
 
+### Memory curation
+
+Long-term memory rots: duplicates pile up, facts change, lessons get refuted, entries go unused. The curator (`internal/curate`) is an offline pass in the spirit of "dreaming", built to be safe in operations:
+
+- **It only proposes.** A suggestion says which memories to set aside and why; an approver applies or dismisses it (`POST /v1/memory/curation/{id}/decide`, approver role). Nothing changes before that. Applying sets the memories STALE (out of retrieval) and is reversible; if a memory in a suggestion was edited after it was made, applying fails with `proposal_outdated` and changes nothing.
+- **It writes no text.** It never drafts, merges or rewrites a memory, so a poisoned run cannot get its words into memory through this path.
+- **Evidence is the run record.** Signals, strongest first: `refuted_by_history` (at least 2 later runs about the same service whose independent verification was SUPPORTED refuted the lesson, none confirmed it; runs without a SUPPORTED verdict do not count), `superseded_fact` (same scope and wording, different figures, a newer memory), `duplicate` (token similarity ≥ 85% in one scope; the better-validated, more recent one stays), `unused` (not created, changed, reinforced or retrieved for 90 days). A memory appears in its strongest finding only. Personal memory is never examined.
+- **Idempotent.** A finding is keyed by signal and exact memory versions: it is proposed once, and a dismissed one returns only when a memory in it changes. One pass is capped at 50 proposals.
+- **Triggering.** `POST /v1/memory/curation/run` (operator), `harness memory curate`, the desktop **Memory → Learned by the agent → Check memories now**, and, in local mode, a pass one minute after start and then every `HARNESS_CURATE_INTERVAL` (default 24h; `off` disables). The team server has no tenant scheduler, so it runs on demand. Proposals live in `memory_curation_proposals` (migration 0032, row-level security; JSON objects in the local store).
+
 ### Memory search
+
+- **Past-run search**: `harness.run_search` (R0, `query`, optional `service`, `status`, `limit` ≤ 10) searches finished runs — what was asked, the conclusion and the hypotheses — so an agent can find how an earlier investigation ended even if nobody promoted it to a memory. It sees the caller's own chats and non-user runs (triggers, schedules, Works), never another user's chats, skips child runs of a flow and the calling run itself, redacts secrets, and labels results as history rather than evidence. It scans the most recent finished runs (300 by default, 6 s budget) with cached text and says when it was cut short; a database full-text index would lift the bound.
 
 - **Search during the run**: the first reasoning step sees the memories retrieved for the goal. `harness.memory_search` (R0, `query`, optional `service` and `top_k` ≤ 10) runs the same pipeline (hard filters, full-text, vector and dependency branches, RRF, trust and profile exclusions, conflict resolution) with what the agent has learned since: a hypothesis, an error message, a component. Hits are returned as past experience to verify, with their `memory:<id>@<v>` refs; those refs are citable and reach the independent verifier as memory evidence. The stall notice suggests a search when the tool is visible.
 - **Model embeddings**: the `http` embedder calls any OpenAI-compatible `/embeddings` endpoint (`base_url`, `model`, `api_key_env`, `dimensions`, `timeout`) with a small query cache; when it fails, retrieval runs without its vector branch. Vectors are only compared within one embedding model, so after a switch the consolidator's indexer (`index`, default on; `index_batch`, default 50) re-embeds live memories, active ones first, a batch per tick.
