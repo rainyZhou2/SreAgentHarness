@@ -8,12 +8,15 @@ import (
 	"fmt"
 
 	"go-sre-harness/internal/api"
+	"go-sre-harness/internal/curate"
+	curatewire "go-sre-harness/internal/curate/wire"
 	"go-sre-harness/internal/extensions"
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning/improve"
+	"go-sre-harness/internal/runsearch"
 	"go-sre-harness/internal/store/pg"
 )
 
@@ -23,7 +26,11 @@ func init() {
 			if h.Server == nil || h.Embedder == nil {
 				return nil, errors.New("requires the API server and an embedder")
 			}
-			return &api.MemoryAPI{Store: h.Store, Writer: memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts}, Server: h.Server}, nil
+			// Memory curation: proposals to set aside stale memory, with the
+			// run record as ground truth. It only proposes; approvers decide.
+			cur := &curate.Curator{Memories: curatewire.Memories(h.Store), Store: h.Store,
+				History: &runsearch.Searcher{Runs: h.Store, Artifacts: h.Artifacts}}
+			return &api.MemoryAPI{Store: h.Store, Writer: memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts}, Server: h.Server, Curator: cur}, nil
 		})
 	plugin.Register(plugin.API, "eval", "/v1/eval, /v1/profiles, /v1/evolution (datasets, gates, canary rollouts)",
 		func(_ context.Context, h *plugin.Host, _ plugin.Config) (api.Extension, error) {

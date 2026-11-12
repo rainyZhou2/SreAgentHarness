@@ -292,3 +292,132 @@ func MemoryDecide(ctx context.Context, c *Client, out io.Writer, prefix, action,
 	fmt.Fprintf(out, "%s %s (%s)\n", verb, shortID(m.ID), m.Title)
 	return nil
 }
+
+// ---- curation: suggested clean-ups ----
+
+// Suggestion is a curation proposal as the CLI shows it.
+type Suggestion struct {
+	ID      string `json:"id"`
+	Signal  string `json:"signal"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Targets []struct {
+		MemoryID string `json:"memory_id"`
+		Title    string `json:"title"`
+		Content  string `json:"content"`
+	} `json:"targets"`
+	Keeper *struct {
+		MemoryID string `json:"memory_id"`
+		Title    string `json:"title"`
+		Content  string `json:"content"`
+	} `json:"keeper"`
+	Evidence []string `json:"evidence"`
+}
+
+// MemoryCurate asks the server to look for memories worth setting aside.
+func MemoryCurate(ctx context.Context, c *Client, out io.Writer) error {
+	var r struct {
+		Examined int            `json:"examined"`
+		Created  map[string]int `json:"created"`
+		New      int            `json:"new_proposals"`
+		Existing int            `json:"already_proposed"`
+		Skipped  []string       `json:"skipped"`
+	}
+	if err := c.Do(ctx, "POST", "/v1/memory/curation/run", map[string]string{}, &r); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "examined %d memories: %d new suggestion(s)", r.Examined, r.New)
+	if r.Existing > 0 {
+		fmt.Fprintf(out, ", %d already suggested", r.Existing)
+	}
+	fmt.Fprintln(out)
+	for sig, n := range r.Created {
+		fmt.Fprintf(out, "  %-20s %d\n", sig, n)
+	}
+	for _, s := range r.Skipped {
+		fmt.Fprintf(out, "  note: %s\n", s)
+	}
+	if r.New > 0 {
+		fmt.Fprintln(out, "review them with: harness memory suggestions")
+	}
+	return nil
+}
+
+// Suggestions lists pending clean-up proposals.
+func Suggestions(ctx context.Context, c *Client) ([]Suggestion, error) {
+	var r struct {
+		Proposals []Suggestion `json:"proposals"`
+	}
+	if err := c.Do(ctx, "GET", "/v1/memory/curation?status=PENDING&limit=200", nil, &r); err != nil {
+		return nil, err
+	}
+	return r.Proposals, nil
+}
+
+// MemorySuggestions prints the pending clean-ups with their evidence.
+func MemorySuggestions(ctx context.Context, c *Client, out io.Writer) error {
+	ps, err := Suggestions(ctx, c)
+	if err != nil {
+		return err
+	}
+	if len(ps) == 0 {
+		fmt.Fprintln(out, "no suggestions")
+		return nil
+	}
+	for _, p := range ps {
+		fmt.Fprintf(out, "%s  %s\n    %s\n", shortID(p.ID), p.Signal, p.Reason)
+		for _, t := range p.Targets {
+			fmt.Fprintf(out, "    set aside %s: %s\n", shortID(t.MemoryID), snippet(t.Title+" — "+t.Content, 140))
+		}
+		if p.Keeper != nil {
+			fmt.Fprintf(out, "    keeping   %s: %s\n", shortID(p.Keeper.MemoryID), snippet(p.Keeper.Title+" — "+p.Keeper.Content, 140))
+		}
+		for _, e := range p.Evidence {
+			if strings.HasPrefix(e, "run:") {
+				fmt.Fprintf(out, "    evidence  %s\n", e)
+			}
+		}
+	}
+	fmt.Fprintf(out, "\n%d suggestion(s): harness memory apply|dismiss ID   (applying sets memories aside as STALE; restore with `approve`)\n", len(ps))
+	return nil
+}
+
+// DecideSuggestion applies or dismisses a clean-up proposal (id or unique prefix).
+func DecideSuggestion(ctx context.Context, c *Client, out io.Writer, prefix, decision, reason string) error {
+	prefix = strings.TrimSpace(prefix)
+	if len(prefix) < 4 {
+		return errors.New("give at least 4 characters of the suggestion id")
+	}
+	ps, err := Suggestions(ctx, c)
+	if err != nil {
+		return err
+	}
+	var found []Suggestion
+	for _, p := range ps {
+		if strings.HasPrefix(p.ID, prefix) {
+			found = append(found, p)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return fmt.Errorf("no pending suggestion starts with %q", prefix)
+	case 1:
+	default:
+		return fmt.Errorf("%q matches %d suggestions: use more characters", prefix, len(found))
+	}
+	var p Suggestion
+	err = c.Do(ctx, "POST", "/v1/memory/curation/"+url.PathEscape(found[0].ID)+"/decide", map[string]string{"decision": decision, "reason": reason}, &p)
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == 409 && ae.Code == "proposal_outdated" {
+		return fmt.Errorf("a memory in this suggestion changed since it was made, so nothing was done; run `harness memory curate` again")
+	}
+	if err != nil {
+		return err
+	}
+	if decision == "apply" {
+		fmt.Fprintf(out, "applied %s: %d memory(ies) set aside (restorable)\n", shortID(found[0].ID), len(found[0].Targets))
+	} else {
+		fmt.Fprintf(out, "dismissed %s\n", shortID(found[0].ID))
+	}
+	return nil
+}

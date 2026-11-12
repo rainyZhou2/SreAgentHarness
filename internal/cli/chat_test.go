@@ -285,3 +285,48 @@ func TestMemoryDecide(t *testing.T) {
 		t.Fatal("personal memories cannot be approved through the shared queue")
 	}
 }
+
+func TestCurationCommands(t *testing.T) {
+	var decided map[string]any
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/memory/curation/run":
+			_, _ = w.Write([]byte(`{"examined":12,"created":{"duplicate":2},"new_proposals":2,"already_proposed":1,"skipped":["history: no run history available"]}`))
+		case r.Method == "GET" && r.URL.Path == "/v1/memory/curation":
+			_, _ = w.Write([]byte(`{"proposals":[{"id":"abcd1234-x","signal":"refuted_by_history","status":"PENDING","reason":"Later runs refuted this lesson 2 times",
+				"targets":[{"memory_id":"mem00001-x","title":"root cause","content":"traffic spike"}],"evidence":["run:r1","run:r2","memory:mem00001-x@1"]},
+				{"id":"abcd9999-x","signal":"duplicate","status":"PENDING","reason":"dup","targets":[{"memory_id":"m2"}]}]}`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/decide"):
+			path = r.URL.Path
+			_ = json.NewDecoder(r.Body).Decode(&decided)
+			if strings.Contains(r.URL.Path, "outdated") {
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"error":"proposal_outdated","message":"changed"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "t")
+	var out bytes.Buffer
+	if err := MemoryCurate(context.Background(), c, &out); err != nil || !strings.Contains(out.String(), "2 new suggestion") || !strings.Contains(out.String(), "no run history") {
+		t.Fatalf("%v %s", err, out.String())
+	}
+	out.Reset()
+	if err := MemorySuggestions(context.Background(), c, &out); err != nil || !strings.Contains(out.String(), "evidence  run:r1") || !strings.Contains(out.String(), "set aside mem00001") {
+		t.Fatalf("a reviewer must see the evidence runs: %v\n%s", err, out.String())
+	}
+	if err := DecideSuggestion(context.Background(), c, &out, "abcd1", "apply", "ok"); err != nil || decided["decision"] != "apply" || path != "/v1/memory/curation/abcd1234-x/decide" {
+		t.Fatalf("%v %v %s", err, decided, path)
+	}
+	if err := DecideSuggestion(context.Background(), c, &out, "abcd", "apply", ""); err == nil || !strings.Contains(err.Error(), "matches 2") {
+		t.Fatalf("an ambiguous prefix must not pick one: %v", err)
+	}
+	if err := DecideSuggestion(context.Background(), c, &out, "zzzz", "dismiss", ""); err == nil {
+		t.Fatal("an unknown id must fail")
+	}
+}

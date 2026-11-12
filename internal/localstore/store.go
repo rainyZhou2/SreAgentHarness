@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"go-sre-harness/internal/curate"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/extensions"
 	"go-sre-harness/internal/memory"
@@ -70,6 +71,7 @@ type Store struct {
 	memories        map[string]memoryRec
 	memOutcomes     map[string]bool // memory|work outcomes already counted
 	memHits         map[string][]memoryHitRec
+	curations       map[string]curate.Proposal
 	reasoningScores map[string]reasoningScoreRec
 	consolidation   map[string]consolidationRec
 	compactions     map[string]compactRec
@@ -227,7 +229,7 @@ func Open(path string) (*Store, error) {
 		caps: map[string][]domain.CapabilityRef{}, extensions: map[string]extensions.Record{},
 		toolOff: map[string]map[string]bool{}, outputRevs: map[string][]pg.OutputRevision{},
 		modelReqs: map[string]modelReqRec{}, checkpoints: map[string]checkpointRec{},
-		memories: map[string]memoryRec{}, memHits: map[string][]memoryHitRec{}, reasoningScores: map[string]reasoningScoreRec{}, consolidation: map[string]consolidationRec{},
+		memories: map[string]memoryRec{}, memHits: map[string][]memoryHitRec{}, curations: map[string]curate.Proposal{}, reasoningScores: map[string]reasoningScoreRec{}, consolidation: map[string]consolidationRec{},
 		compactions: map[string]compactRec{},
 		shards:      map[string][]domain.MemoryShard{}, feedback: map[string][]memory.Feedback{},
 		experiences: map[string][]pg.ExperienceView{}, incidents: map[string]incidentRec{},
@@ -474,6 +476,12 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 			return err
 		}
 		s.memories[v.Mem.ID] = v
+	case "curation":
+		var v curate.Proposal
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		s.curations[v.ID] = v
 	case "memhit":
 		var v struct {
 			StepID string       `json:"step_id"`
