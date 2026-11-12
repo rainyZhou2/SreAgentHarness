@@ -27,7 +27,8 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	upgrade *Upgrade
 
 	mu  sync.Mutex
 	buf *stateBuf // non-nil while one command is being applied atomically
@@ -203,13 +204,18 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	up, err := ensureSchema(db, path)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	eventDir := filepath.Join(filepath.Dir(path), "events")
 	if err := os.MkdirAll(eventDir, 0o700); err != nil {
 		db.Close()
 		return nil, err
 	}
 	s := &Store{
-		db: db, eventDir: eventDir, runs: map[string]domain.Run{}, runByKey: map[string]string{}, steps: map[string]domain.Step{},
+		db: db, upgrade: up, eventDir: eventDir, runs: map[string]domain.Run{}, runByKey: map[string]string{}, steps: map[string]domain.Step{},
 		attempts: map[string]attempt{}, events: map[string][]eventIndex{}, eventCache: map[string]domain.Event{},
 		eventSeq: map[string]int64{}, sessions: map[string]domain.Session{},
 		sessionKey: map[string]string{}, branches: map[string]domain.Branch{}, turns: map[string]domain.Turn{},
