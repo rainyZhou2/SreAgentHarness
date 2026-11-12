@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"go-sre-harness/internal/memory"
+	"go-sre-harness/internal/runsearch"
 	"go-sre-harness/internal/tools/memsearch"
+	runsearchtool "go-sre-harness/internal/tools/runsearch"
 	"go-sre-harness/internal/tools/sandboxexec"
 	"log/slog"
 	"net/http"
@@ -437,6 +439,13 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		}
 		h.Tools.Register(memsearch.Tool{Retriever: r})
 	}
+	// Past-run search: the transcript layer behind memory. It reads finished
+	// runs through the same store and artifacts, scoped to what the calling
+	// user may see.
+	if _, dup := h.Tools.Lookup(runsearchtool.Name); dup {
+		return nil, fmt.Errorf("tool %q is reserved for the harness", runsearchtool.Name)
+	}
+	h.Tools.Register(runsearchtool.Tool{Search: &runsearch.Searcher{Runs: store, Artifacts: h.Artifacts}, Runs: store})
 	// context assembly and compaction
 	assembler, err := optionalOne(ctx, plugin.ContextAssembler, h, specs["context_assembler"])
 	if err != nil {

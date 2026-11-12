@@ -55,7 +55,7 @@ func RunChat(ctx context.Context, args []string, getenv func(string) string, std
 // personal memory the agent keeps about you.
 func RunMemory(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: harness memory list | set KEY VALUE | rm KEY   [-server URL] [-token T | -token-file F] [-data DIR]")
+		fmt.Fprintln(stderr, "usage: harness memory list | set KEY VALUE | rm KEY | review | show ID | approve ID | reject ID [REASON] | archive ID   [-server URL] [-token T | -token-file F] [-data DIR]")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -93,8 +93,14 @@ func RunMemory(ctx context.Context, args []string, getenv func(string) string, s
 		err = cli.MemorySet(ctx, c, stdout, pos[0], strings.Join(pos[1:], " "))
 	case (sub == "rm" || sub == "delete") && len(pos) == 1:
 		err = cli.MemoryRemove(ctx, c, stdout, pos[0])
+	case sub == "review" && len(pos) == 0:
+		err = cli.MemoryReview(ctx, c, stdout)
+	case sub == "show" && len(pos) == 1:
+		err = cli.MemoryShow(ctx, c, stdout, pos[0])
+	case (sub == "approve" || sub == "reject" || sub == "archive") && len(pos) >= 1:
+		err = cli.MemoryDecide(ctx, c, stdout, pos[0], sub, strings.Join(pos[1:], " "))
 	default:
-		fmt.Fprintln(stderr, "usage: harness memory list | set KEY VALUE | rm KEY")
+		fmt.Fprintln(stderr, "usage: harness memory list | set KEY VALUE | rm KEY | review | show ID | approve ID | reject ID [REASON] | archive ID")
 		return 2
 	}
 	if err != nil {
