@@ -2252,6 +2252,341 @@ async function openInstalledSkill(name) {
 }
 
 // ---------- graph: capability, memory and trace neighborhood ----------
+// ---------- personal memory: what the agent remembers about you ----------
+const mem = { items: [], error: null, key: "", value: "", editing: false, busy: false, loaded: false,
+  tab: "prefs", learned: { pending: [], active: [], stale: [], suggestions: [] }, curating: false, learnedLoaded: false, learnedError: null,
+  reviewing: null, reviewDraft: { title: "", content: "" } };
+const MEM_MAX = 2000;
+
+// memKey is the name set/delete accept (the server normalizes it); the title
+// keeps what the user typed.
+const memKey = (m) => (m.subject || "").replace(/^pref:/, "") || m.title || "";
+
+async function showMemory() {
+  state.view = "memory";
+  markSide();
+  stopWatching();
+  renderSessions();
+  $("#chat-head").replaceChildren();
+  $("#chat-head").className = "chat-head";
+  $("#composer-wrap").hidden = true;
+  renderMemory();
+  await Promise.all([loadMemory(), loadLearned()]);
+  renderMemory();
+}
+
+async function loadLearned() {
+  try {
+    mem.learned = await api().LearnedMemories();
+    mem.learnedError = null;
+  } catch (e) {
+    mem.learnedError = errText(e);
+  }
+  mem.learnedLoaded = true;
+  updateMemoryBadge();
+}
+
+// The sidebar shows how many proposals wait for review.
+function updateMemoryBadge() {
+  const el = $("#memory-count");
+  if (!el) return;
+  const n = (mem.learned.pending || []).length + (mem.learned.suggestions || []).length;
+  el.textContent = String(n);
+  el.hidden = n === 0;
+}
+
+async function refreshMemoryBadge() {
+  try { mem.learned = await api().LearnedMemories(); updateMemoryBadge(); } catch { /* not connected or no access */ }
+  if (state.view === "memory" && mem.tab === "learned" && !mem.reviewing) renderMemory();
+}
+
+async function loadMemory() {
+  try {
+    const r = await api().MyMemories();
+    mem.items = (r.memories || []).filter((m) => !m.status || m.status === "ACTIVE");
+    mem.error = null;
+  } catch (e) {
+    mem.error = errText(e);
+  }
+  mem.loaded = true;
+}
+
+function renderMemory() {
+  if (state.view !== "memory") return;
+  const pendingN = (mem.learned.pending || []).length + (mem.learned.suggestions || []).length;
+  const tab = (key, label, n) => h("button", { class: "gallery-cat" + (mem.tab === key ? " on" : ""), "data-tab": key,
+    onclick: () => { mem.tab = key; renderMemory(); } }, label, n ? h("span", { class: "mem-tab-count" }, String(n)) : null);
+  $("#thread").replaceChildren(h("div", { class: "memory" },
+    h("h1", {}, t("Memory")),
+    h("div", { class: "gallery-cats mem-tabs" },
+      tab("prefs", t("My preferences"), 0), tab("learned", t("Learned by the agent"), pendingN)),
+    mem.tab === "prefs" ? renderPreferences() : renderLearned()));
+}
+
+function renderPreferences() {
+  const keyInput = h("input", { name: "key", placeholder: t("Name, e.g. answer language"), value: mem.key,
+    maxlength: "64", autocomplete: "off", spellcheck: "false", "aria-label": t("Name"),
+    oninput: (e) => { mem.key = e.target.value; } });
+  const valInput = h("textarea", { name: "value", rows: "3", maxlength: String(MEM_MAX), "aria-label": t("What to remember"),
+    placeholder: t("What to remember, e.g. Answer in Chinese, conclusion first"),
+    oninput: (e) => { mem.value = e.target.value; } });
+  valInput.value = mem.value;
+  const form = h("form", { class: "mem-form", id: "mem-form", onsubmit: saveMemory },
+    h("div", { class: "mem-form-title" }, mem.editing ? t("Edit memory") : t("Add a memory")),
+    keyInput, valInput,
+    h("div", { class: "mem-form-foot" },
+      h("button", { class: "btn primary", type: "submit", disabled: mem.busy }, mem.editing ? t("Save changes") : t("Remember")),
+      mem.editing ? h("button", { class: "btn ghost", type: "button", onclick: resetMemoryForm }, t("Cancel")) : null));
+  const list = !mem.loaded
+    ? h("div", { class: "muted" }, t("Loading…"))
+    : !mem.items.length
+      ? h("div", { class: "empty-card" },
+          h("div", { class: "empty-mark" }, icon("book")),
+          h("div", { class: "empty-title" }, t("Nothing remembered yet")),
+          h("p", { class: "muted small" }, t("Add a preference above, or tell the agent in a chat. It will show up here.")))
+      : h("div", { class: "mem-list" }, mem.items.map(memoryCard));
+  return h("div", { class: "mem-section" },
+    h("p", { class: "muted lead" }, t("Preferences the agent remembers about you, such as language, format and defaults. Only you can see and change them; they apply to your own runs.")),
+    mem.error ? h("p", { class: "error small", role: "alert" }, mem.error) : null,
+    form, list);
+}
+
+function renderLearned() {
+  if (!mem.learnedLoaded) return h("div", { class: "muted" }, t("Loading…"));
+  const { pending = [], active = [], stale = [], suggestions = [] } = mem.learned || {};
+  return h("div", { class: "mem-section" },
+    h("p", { class: "muted lead" }, t("What the agent proposes to remember from its work: root causes, remedies, patterns. Only approved memories are used in later runs. Approving one that replaces another retires the older one.")),
+    mem.learnedError ? h("p", { class: "error small", role: "alert" }, mem.learnedError) : null,
+    h("h2", { class: "mem-h2" }, t("To review"), pending.length ? h("span", { class: "mem-tab-count" }, String(pending.length)) : null),
+    pending.length
+      ? h("div", { class: "mem-list" }, pending.map(proposalCard))
+      : h("div", { class: "empty-card" },
+          h("div", { class: "empty-mark" }, icon("book")),
+          h("div", { class: "empty-title" }, t("Nothing to review")),
+          h("p", { class: "muted small" }, t("When the agent learns something worth keeping, it appears here for you to approve."))),
+    h("h2", { class: "mem-h2" }, t("Suggested clean-ups"), suggestions.length ? h("span", { class: "mem-tab-count" }, String(suggestions.length)) : null,
+      h("button", { class: "link-btn mem-check", disabled: mem.curating, onclick: runCuration }, mem.curating ? t("Checking…") : t("Check memories now"))),
+    h("p", { class: "muted small" }, t("The curator looks for duplicates, facts a newer memory supersedes, lessons that later verified runs refuted, and memories nobody uses. It only suggests: nothing changes until you apply it, and set-aside memories can be restored.")),
+    suggestions.length
+      ? h("div", { class: "mem-list" }, suggestions.map(suggestionCard))
+      : h("p", { class: "muted small" }, t("No clean-ups suggested.")),
+    h("h2", { class: "mem-h2" }, t("In use"), active.length ? h("span", { class: "mem-tab-count" }, String(active.length)) : null),
+    active.length
+      ? h("div", { class: "mem-list" }, active.map(activeCard))
+      : h("p", { class: "muted small" }, t("No approved memories yet.")),
+    stale.length ? h("h2", { class: "mem-h2" }, t("Set aside"), h("span", { class: "mem-tab-count" }, String(stale.length))) : null,
+    stale.length ? h("div", { class: "mem-list" }, stale.map(staleCard)) : null);
+}
+
+const memScope = (m) => (m.scope || "") + (m.scope_id ? ":" + m.scope_id : "");
+const memConf = (m) => (typeof m.confidence === "number" ? Math.round(m.confidence * 100) + "%" : "");
+
+function proposalCard(m) {
+  const editing = mem.reviewing === m.id;
+  const refs = [...(m.source_refs || []), ...(m.evidence_refs || [])].slice(0, 6);
+  return h("article", { class: "mem-card learned", "data-id": m.id },
+    h("div", { class: "mem-main" },
+      h("div", { class: "mem-key" }, m.title || m.subject || m.id,
+        h("span", { class: "badge s-idle" }, memScope(m)),
+        m.status === "VALIDATING" ? h("span", { class: "badge s-warn" }, t("Verified by feedback")) : null),
+      editing
+        ? h("div", { class: "mem-edit" },
+            h("input", { value: mem.reviewDraft.title, maxlength: "200", "aria-label": t("Name"),
+              oninput: (e) => { mem.reviewDraft.title = e.target.value; } }),
+            h("textarea", { rows: "4", "aria-label": t("What to remember"), oninput: (e) => { mem.reviewDraft.content = e.target.value; } },
+              mem.reviewDraft.content))
+        : h("div", { class: "mem-value" }, m.content || ""),
+      h("div", { class: "mem-meta" },
+        [m.memory_type, m.trust ? t("trust {t}", { t: m.trust }) : "", memConf(m) ? t("confidence {c}", { c: memConf(m) }) : "",
+          ago(m.updated_at || m.created_at)].filter(Boolean).join(" · ")),
+      refs.length ? h("div", { class: "mem-refs" }, refs.map((r) => h("span", { class: "gallery-tag" }, r))) : null,
+      m.replaces
+        ? h("details", { class: "mem-replaces", open: true },
+            h("summary", {}, t("Replaces an existing memory")),
+            h("div", { class: "mem-value old" }, m.replaces.content || ""))
+        : null),
+    h("div", { class: "mem-side stack" },
+      editing
+        ? [h("button", { class: "btn approve", onclick: () => reviewMemory(m, "approve", true) }, t("Save and approve")),
+           h("button", { class: "btn ghost", onclick: () => { mem.reviewing = null; renderMemory(); } }, t("Cancel"))]
+        : [h("button", { class: "btn approve", onclick: () => reviewMemory(m, "approve", false) }, t("Approve")),
+           h("button", { class: "btn", onclick: () => { mem.reviewing = m.id; mem.reviewDraft = { title: m.title || "", content: m.content || "" }; renderMemory(); } }, t("Edit")),
+           h("button", { class: "btn ghost danger", onclick: () => reviewMemory(m, "reject", false) }, t("Reject"))]));
+}
+
+function activeCard(m) {
+  return h("article", { class: "mem-card", "data-id": m.id },
+    h("div", { class: "mem-main" },
+      h("div", { class: "mem-key" }, m.title || m.subject || m.id, h("span", { class: "badge s-ok" }, memScope(m))),
+      h("div", { class: "mem-value" }, m.content || "")),
+    h("div", { class: "mem-side" },
+      h("span", { class: "muted small" }, ago(m.updated_at)),
+      h("button", { class: "link-btn danger", onclick: () => archiveMemory(m) }, t("Archive"))));
+}
+
+const SIGNAL_LABEL = { refuted_by_history: "Refuted by later runs", superseded_fact: "Superseded by a newer memory",
+  duplicate: "Duplicate", unused: "Not used for a long time" };
+
+function suggestionCard(p) {
+  const runs = (p.evidence || []).filter((e) => e.startsWith("run:"));
+  return h("article", { class: "mem-card learned", "data-id": p.id },
+    h("div", { class: "mem-main" },
+      h("div", { class: "mem-key" }, t(SIGNAL_LABEL[p.signal] || p.signal)),
+      h("div", { class: "mem-meta" }, p.reason || ""),
+      (p.targets || []).map((x) => h("div", { class: "mem-value old" },
+        h("strong", {}, (x.title || "") + " — "), x.content || "")),
+      p.keeper ? h("div", { class: "mem-replaces" }, h("summary", {}, t("Keeping")),
+        h("div", { class: "mem-value" }, h("strong", {}, (p.keeper.title || "") + " — "), p.keeper.content || "")) : null,
+      runs.length ? h("div", { class: "mem-refs" }, runs.slice(0, 5).map((r) => h("span", { class: "gallery-tag" }, r.slice(0, 12)))) : null),
+    h("div", { class: "mem-side stack" },
+      h("button", { class: "btn approve", onclick: () => decideCuration(p, "apply") }, t("Set aside")),
+      h("button", { class: "btn ghost", onclick: () => decideCuration(p, "dismiss") }, t("Keep it"))));
+}
+
+function staleCard(m) {
+  return h("article", { class: "mem-card", "data-id": m.id },
+    h("div", { class: "mem-main" },
+      h("div", { class: "mem-key" }, m.title || m.subject || m.id, h("span", { class: "badge s-warn" }, memScope(m))),
+      h("div", { class: "mem-value" }, m.content || "")),
+    h("div", { class: "mem-side" },
+      h("span", { class: "muted small" }, ago(m.updated_at)),
+      h("button", { class: "link-btn", onclick: () => restoreMemory(m) }, t("Restore"))));
+}
+
+async function runCuration() {
+  if (mem.curating) return;
+  mem.curating = true;
+  renderMemory();
+  try {
+    const r = await api().RunCuration();
+    toast(r.new_proposals > 0 ? t("{n} clean-up(s) suggested.", { n: r.new_proposals }) : t("Nothing new to suggest."));
+  } catch (e) { toast(errText(e), true); }
+  mem.curating = false;
+  await loadLearned();
+  renderMemory();
+}
+
+async function decideCuration(p, decision) {
+  try {
+    await api().DecideCuration(p.id, decision, "");
+    toast(decision === "apply" ? t("Set aside. You can restore it below.") : t("Kept"));
+  } catch (e) {
+    const msg = errText(e);
+    toast(/outdated|changed/i.test(msg) ? t("A memory changed since this was suggested. Check again.")
+      : /403|forbidden|role/i.test(msg) ? t("Reviewing memories needs the approver role.") : msg, true);
+  }
+  await loadLearned();
+  renderMemory();
+}
+
+async function restoreMemory(m) {
+  try {
+    await api().ReviewMemory(m.id, "STALE", "approve", "restored");
+    toast(t("Restored"));
+  } catch (e) { toast(errText(e), true); }
+  await loadLearned();
+  renderMemory();
+}
+
+async function reviewMemory(m, decision, withEdit) {
+  let reason = "";
+  if (decision === "reject") {
+    reason = await ask({ title: t("Reject this memory?"), label: t("Reason (optional)"), ok: t("Reject"), danger: true });
+    if (reason === null) return;
+  }
+  try {
+    let status = m.status;
+    if (withEdit) {
+      const title = mem.reviewDraft.title.trim(), content = mem.reviewDraft.content.trim();
+      if (!title || !content) { toast(t("A name and what to remember are both required."), true); return; }
+      if (title !== (m.title || "") || content !== (m.content || "")) {
+        await api().ReviseMemory(m.id, m.version, title, content, "edited before approval");
+      }
+    }
+    await api().ReviewMemory(m.id, status, decision, reason || "");
+    toast(decision === "approve" ? t("Approved. It will be used in later runs.") : t("Rejected"));
+    mem.reviewing = null;
+  } catch (e) {
+    const msg = errText(e);
+    toast(/poison|instruction/i.test(msg) ? t("Not saved: a memory should describe a preference, not give the agent instructions.")
+      : /403|forbidden|role/i.test(msg) ? t("Reviewing memories needs the approver role.") : msg, true);
+  }
+  await loadLearned();
+  renderMemory();
+}
+
+async function archiveMemory(m) {
+  const ok = await ask({ title: t("Archive this memory?"), text: t("“{name}” will no longer be used in runs.", { name: m.title || m.id }), ok: t("Archive"), danger: true });
+  if (!ok) return;
+  try {
+    await api().ReviewMemory(m.id, m.status || "ACTIVE", "archive", "");
+    toast(t("Archived"));
+  } catch (e) { toast(errText(e), true); }
+  await loadLearned();
+  renderMemory();
+}
+
+function memoryCard(m) {
+  const key = memKey(m);
+  return h("article", { class: "mem-card", "data-key": key },
+    h("div", { class: "mem-main" },
+      h("div", { class: "mem-key" }, m.title || key),
+      h("div", { class: "mem-value" }, m.content || "")),
+    h("div", { class: "mem-side" },
+      h("span", { class: "muted small" }, ago(m.updated_at)),
+      h("button", { class: "link-btn", onclick: () => editMemory(m) }, t("Edit")),
+      h("button", { class: "link-btn danger", onclick: () => removeMemory(m) }, t("Remove"))));
+}
+
+function resetMemoryForm() {
+  mem.key = ""; mem.value = ""; mem.editing = false;
+  renderMemory();
+}
+
+function editMemory(m) {
+  mem.key = m.title || memKey(m);
+  mem.value = m.content || "";
+  mem.editing = true;
+  renderMemory();
+  const f = $("#mem-form textarea");
+  if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
+}
+
+async function saveMemory(ev) {
+  ev.preventDefault();
+  if (mem.busy) return;
+  const key = mem.key.trim(), value = mem.value.trim();
+  if (!key || !value) { toast(t("A name and what to remember are both required."), true); return; }
+  mem.busy = true;
+  try {
+    const r = await api().SetMyMemory(key, value);
+    toast(r && r.redactions > 0
+      ? t("Saved. {n} sensitive value(s) were redacted.", { n: r.redactions })
+      : t("Saved"));
+    mem.key = ""; mem.value = ""; mem.editing = false; mem.error = null;
+  } catch (e) {
+    // The server refuses text that reads like instructions to the agent.
+    const m = errText(e);
+    toast(/poison|instruction/i.test(m) ? t("Not saved: a memory should describe a preference, not give the agent instructions.") : m, true);
+  }
+  mem.busy = false;
+  await loadMemory();
+  renderMemory();
+}
+
+async function removeMemory(m) {
+  const ok = await ask({ title: t("Remove this memory?"), text: t("“{name}” will no longer be used in your runs.", { name: m.title || memKey(m) }),
+    ok: t("Remove"), danger: true });
+  if (!ok) return;
+  try {
+    await api().DeleteMyMemory(memKey(m));
+    toast(t("Removed"));
+  } catch (e) { toast(errText(e), true); }
+  if (mem.editing && mem.key === (m.title || memKey(m))) { mem.key = ""; mem.value = ""; mem.editing = false; }
+  await loadMemory();
+  renderMemory();
+}
+
 const GRAPH_FILTERS = [
   ["All", []],
   ["Capabilities", ["tool", "skill", "mcp_server", "plugin"]],
@@ -3376,6 +3711,7 @@ async function setLanguage(lang, save) {
   else if (state.view === "works") renderWorks();
   else if (state.view === "customize") renderCustomize();
   else if (state.view === "settings") renderSettings();
+  else if (state.view === "memory") renderMemory();
   else if (state.view === "plugins") showPlugins();
 }
 
@@ -3385,6 +3721,7 @@ function markSide() {
   $("#btn-customize").classList.toggle("on", state.view === "customize");
   $("#btn-gallery").classList.toggle("on", state.view === "gallery");
   $("#btn-graph").classList.toggle("on", state.view === "graph");
+  $("#btn-memory").classList.toggle("on", state.view === "memory");
   $("#btn-plugins").classList.toggle("on", state.view === "plugins");
   $("#btn-settings").classList.toggle("on", state.view === "settings");
 }
@@ -3397,6 +3734,7 @@ function bind() {
   $("#btn-customize").onclick = () => showCustomize();
   $("#btn-gallery").onclick = showGallery;
   $("#btn-graph").onclick = () => showGraph();
+  $("#btn-memory").onclick = showMemory;
   $("#btn-inbox").onclick = showInbox;
   $("#btn-works").onclick = () => showWorks();
   $("#btn-settings").onclick = () => showSettings();
@@ -3489,6 +3827,7 @@ function bind() {
     }
   });
   setInterval(() => { if (!document.hidden) loadSessions(); }, 5000);
+  setInterval(() => { if (!document.hidden && state.who) refreshMemoryBadge(); }, 60000);
   // Safety net for missed stream events: refresh the active run periodically.
   setInterval(() => { const t = activeTurn(); if (t && !document.hidden) scheduleRun(t.run_id); }, 6000);
 }
@@ -3525,6 +3864,7 @@ async function boot() {
       st.settings = await api().GetSettings().catch(() => st.settings);
       await loadSessions();
       loadModelHint();
+      refreshMemoryBadge();
       return;
     } catch (e) {
       toast(t("Could not start the local workspace: {err}", { err: errText(e) }), true);
@@ -3535,6 +3875,7 @@ async function boot() {
       showWho(await api().Whoami());
       await loadSessions();
       loadModelHint();
+      refreshMemoryBadge();
       return;
     } catch (e) {
       toast(errText(e), true);
