@@ -27,6 +27,18 @@ const (
 	RunFailed            RunStatus = "FAILED"
 )
 
+// SharedInitiator reports whether runs started by this kind of initiator are
+// shared operational work (triggers, schedules, Works, system fan-out) that
+// everyone in the tenant may see. Every other kind, including "user" and
+// "unknown", is private to the initiator: an unrecognized kind fails closed.
+func SharedInitiator(initiatorType string) bool {
+	switch initiatorType {
+	case "system", "service_principal", "work", "trigger":
+		return true
+	}
+	return false
+}
+
 // Terminal reports whether no further transition is allowed.
 func (s RunStatus) Terminal() bool {
 	return s == RunCancelled || s == RunCompleted || s == RunFailed

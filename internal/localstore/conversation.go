@@ -52,7 +52,7 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, f pg.SessionF
 	}
 	var out []pg.SessionSummary
 	for _, sess := range s.sessions {
-		if sess.TenantID != tenantID || sess.Status != f.Status {
+		if sess.TenantID != tenantID || sess.Status != f.Status || (f.CreatedBy != "" && sess.CreatedBy != f.CreatedBy) {
 			continue
 		}
 		if f.Query != "" && (sess.Title == nil || !strings.Contains(strings.ToLower(*sess.Title), strings.ToLower(f.Query))) {

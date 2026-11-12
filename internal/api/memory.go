@@ -425,6 +425,13 @@ func (m *MemoryAPI) experiences(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if rid := r.URL.Query().Get("run_id"); rid != "" {
+		p, _ := auth.FromContext(r.Context())
+		if ok, err := m.Server.RunAccessible(r.Context(), p, rid); err != nil || !ok {
+			m.Server.domainErr(w, domain.ErrNotFound)
+			return
+		}
+	}
 	list, err := m.Store.ListExperiences(r.Context(), id.tenant, r.URL.Query().Get("run_id"))
 	if err != nil {
 		m.Server.domainErr(w, err)

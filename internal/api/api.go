@@ -307,7 +307,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 	run, created, err := s.StartRun(r.Context(), StartRunRequest{TenantID: id.tenant, ActorID: id.actor, InitiatorType: "user",
 		Goal: body.Goal, Context: gc, ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion,
-		IncidentID: body.IncidentID, IdempotencyKey: key})
+		IncidentID: body.IncidentID, IdempotencyKey: userScopedKey(id.actor, key)})
 	if err != nil {
 		if errors.Is(err, ErrArtifactUnavailable) {
 			writeErr(w, http.StatusServiceUnavailable, "artifact_store_unavailable", "retry later")
@@ -359,7 +359,25 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	status := domain.RunStatus(r.URL.Query().Get("status"))
-	runs, err := s.Store.ListRuns(r.Context(), id.tenant, status, limit)
+	p, _ := auth.FromContext(r.Context())
+	var runs []domain.Run
+	var err error
+	if lister, ok := s.Store.(interface {
+		ListRunsFor(ctx context.Context, tenantID string, status domain.RunStatus, limit int, userID string) ([]domain.Run, error)
+	}); ok && !isAdmin(p) {
+		runs, err = lister.ListRunsFor(r.Context(), id.tenant, status, limit, id.actor)
+	} else {
+		runs, err = s.Store.ListRuns(r.Context(), id.tenant, status, limit)
+		if err == nil && !isAdmin(p) { // a store without the filter: narrow afterwards
+			kept := runs[:0]
+			for _, run := range runs {
+				if ownsRun(p, run) {
+					kept = append(kept, run)
+				}
+			}
+			runs = kept
+		}
+	}
 	if err != nil {
 		s.storeErr(w, err)
 		return

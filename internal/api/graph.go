@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"go-sre-harness/internal/auth"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,7 +37,14 @@ func (s *Server) graphSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "cannot search the graph")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+	p, _ := auth.FromContext(r.Context())
+	shown := make([]domain.GraphNode, 0, len(nodes))
+	for _, n := range nodes {
+		if visibleGraphNode(p, n) {
+			shown = append(shown, n)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": shown})
 }
 
 func (s *Server) graphNeighborhood(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +67,24 @@ func (s *Server) graphNeighborhood(w http.ResponseWriter, r *http.Request) {
 		s.Log.Error("graph", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal", "cannot read the graph")
 		return
+	}
+	if p, _ := auth.FromContext(r.Context()); !isAdmin(p) {
+		hidden := map[string]bool{}
+		nodes := out.Nodes[:0]
+		for _, n := range out.Nodes {
+			if visibleGraphNode(p, n) {
+				nodes = append(nodes, n)
+			} else {
+				hidden[n.Ref] = true
+			}
+		}
+		edges := out.Edges[:0]
+		for _, e := range out.Edges {
+			if !hidden[e.Src] && !hidden[e.Dst] {
+				edges = append(edges, e)
+			}
+		}
+		out.Nodes, out.Edges = nodes, edges
 	}
 	writeJSON(w, http.StatusOK, out)
 }

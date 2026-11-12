@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go-sre-harness/internal/domain"
 	"net/http"
 
 	"go-sre-harness/internal/auth"
@@ -165,6 +166,12 @@ func (e *EvalAPI) addCase(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_body", "run_id is required")
 		return
 	}
+	if p, _ := auth.FromContext(r.Context()); true {
+		if ok, err := e.Server.RunAccessible(r.Context(), p, b.RunID); err != nil || !ok {
+			e.Server.domainErr(w, domain.ErrNotFound)
+			return
+		}
+	}
 	c, created, err := e.Service.RecordFromRun(r.Context(), id.tenant, r.PathValue("dataset_id"), b.RunID, b.RootCauseLabels, b.MustNotCall, b.Split)
 	if err != nil {
 		e.fail(w, err)
@@ -192,6 +199,12 @@ func (e *EvalAPI) addPlanCase(w http.ResponseWriter, r *http.Request) {
 	if b.RunID == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body", "run_id is required")
 		return
+	}
+	if p, _ := auth.FromContext(r.Context()); true {
+		if ok, err := e.Server.RunAccessible(r.Context(), p, b.RunID); err != nil || !ok {
+			e.Server.domainErr(w, domain.ErrNotFound)
+			return
+		}
 	}
 	c, created, err := e.Service.RecordPlanFromRun(r.Context(), id.tenant, r.PathValue("dataset_id"), b.RunID, b.Split)
 	if err != nil {
