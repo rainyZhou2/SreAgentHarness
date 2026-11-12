@@ -596,6 +596,8 @@ type SessionFilter struct {
 	Status string // ACTIVE (default) or ARCHIVED
 	Query  string // case-insensitive substring of the title
 	Limit  int
+	// CreatedBy limits the list to one user's sessions ("" lists the tenant's).
+	CreatedBy string
 }
 
 // ListSessions returns the tenant's sessions in one status (ACTIVE by
@@ -616,7 +618,8 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, f SessionFilt
 				count(*) FILTER (WHERE status IN ('ACCEPTED','QUEUED','RUNNING')) AS active
 			FROM conversation_turns WHERE tenant_id=s.tenant_id AND session_id=s.id) t ON true
 		WHERE s.tenant_id=$1 AND s.status=$3 AND ($4 = '%%' OR COALESCE(s.title, '') ILIKE $4)
-		ORDER BY 10 DESC, s.id DESC LIMIT $2`, tenantID, f.Limit, f.Status, like)
+		  AND ($5 = '' OR s.created_by = $5)
+		ORDER BY 10 DESC, s.id DESC LIMIT $2`, tenantID, f.Limit, f.Status, like, f.CreatedBy)
 	if err != nil {
 		return nil, err
 	}

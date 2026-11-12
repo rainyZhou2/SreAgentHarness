@@ -678,3 +678,22 @@ func (s *Store) ListStreamSegments(ctx context.Context, tenantID, runID string) 
 	return nil, nil
 }
 func (s *Store) EventSinkStatuses(ctx context.Context) ([]pg.EventSinkStatus, error) { return nil, nil }
+
+// ListRunsFor is ListRuns limited to what userID may see: runs no user
+// started and the runs that user started.
+func (s *Store) ListRunsFor(ctx context.Context, tenantID string, status domain.RunStatus, limit int, userID string) ([]domain.Run, error) {
+	all, err := s.ListRuns(ctx, tenantID, status, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, r := range all {
+		if domain.SharedInitiator(r.InitiatorType) || (r.InitiatorID != nil && *r.InitiatorID == userID) {
+			out = append(out, r)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}

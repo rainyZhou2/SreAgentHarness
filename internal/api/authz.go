@@ -70,6 +70,7 @@ var commandRoles = map[domain.CommandType]auth.Role{
 }
 
 func (s *Server) authMiddleware(mux *http.ServeMux) http.Handler {
+	scoped := s.scopeMiddleware(mux) // authenticated requests pass the run/session access rules
 	chain := s.Auth
 	if chain == nil {
 		chain = &auth.Chain{Authenticators: []auth.Authenticator{auth.DevHeaders{}}}
@@ -116,7 +117,7 @@ func (s *Server) authMiddleware(mux *http.ServeMux) http.Handler {
 		}
 		ctx := auth.WithPrincipal(r.Context(), p)
 		ctx = pg.WithTenant(ctx, p.Tenant)
-		mux.ServeHTTP(rec, r.WithContext(ctx))
+		scoped.ServeHTTP(rec, r.WithContext(ctx))
 	})
 }
 

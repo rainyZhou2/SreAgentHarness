@@ -415,3 +415,24 @@ func (s *Store) ListRuns(ctx context.Context, tenantID string, status domain.Run
 	}
 	return out, rows.Err()
 }
+
+// ListRunsFor is ListRuns limited to what userID may see: runs no user
+// started (triggers, schedules, Works) and the runs that user started.
+func (s *Store) ListRunsFor(ctx context.Context, tenantID string, status domain.RunStatus, limit int, userID string) ([]domain.Run, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+runCols+` FROM agent_runs
+		WHERE tenant_id=$1 AND ($2 = '' OR status=$2) AND (initiator_type IN ('system','service_principal') OR initiator_id = $4)
+		ORDER BY created_at DESC, id DESC LIMIT $3`, tenantID, string(status), limit, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}

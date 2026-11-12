@@ -251,10 +251,10 @@ func visibleTo(c Caller, r domain.Run) bool {
 	if r.ID == c.RunID || r.ParentRunID != nil {
 		return false
 	}
-	if r.InitiatorType == "user" {
-		return c.InitiatorType == "user" && c.InitiatorID != "" && r.InitiatorID != nil && *r.InitiatorID == c.InitiatorID
+	if domain.SharedInitiator(r.InitiatorType) {
+		return true
 	}
-	return true
+	return c.InitiatorID != "" && r.InitiatorID != nil && *r.InitiatorID == c.InitiatorID
 }
 
 type scanned struct {

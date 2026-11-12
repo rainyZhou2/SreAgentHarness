@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go-sre-harness/internal/auth"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,7 +52,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, created, err := s.Store.CreateSession(r.Context(), domain.CreateSessionRequest{TenantID: id.tenant, ActorID: id.actor,
 		ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion, Title: body.Title, IncidentID: body.IncidentID,
-		IdempotencyKey: key})
+		IdempotencyKey: userScopedKey(id.actor, key)})
 	if err != nil {
 		s.domainErr(w, err)
 		return
@@ -90,6 +91,9 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	if len(f.Query) > 200 {
 		writeErr(w, http.StatusBadRequest, "invalid_query", "q is at most 200 characters")
 		return
+	}
+	if p, _ := auth.FromContext(r.Context()); !isAdmin(p) {
+		f.CreatedBy = id.actor // a user lists their own chats
 	}
 	list, err := s.Store.ListSessions(r.Context(), id.tenant, f)
 	if err != nil {
@@ -172,6 +176,15 @@ func (s *Server) listPendingApprovals(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.domainErr(w, err)
 		return
+	}
+	if p, _ := auth.FromContext(r.Context()); !p.Has(auth.Approver) {
+		own := make([]pg.PendingApproval, 0, len(list))
+		for _, a := range list {
+			if a.InitiatorID != nil && *a.InitiatorID == id.actor {
+				own = append(own, a)
+			}
+		}
+		list = own
 	}
 	if list == nil {
 		list = []pg.PendingApproval{}
