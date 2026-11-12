@@ -25,6 +25,8 @@ import (
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
+	"go-sre-harness/internal/curate"
+	curatewire "go-sre-harness/internal/curate/wire"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/envctx"
 	"go-sre-harness/internal/eval"
@@ -278,7 +280,8 @@ func Run(ctx context.Context, cfg Config) error {
 			ep, err := modelGW.Resolve(gateway.Request{ModelAlias: "sre-reasoning"}, gateway.Scope{TenantID: tenantID})
 			return ep.ID, ep.ModelID, err
 		}})
-	server.Extend(&api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server})
+	curator := &curate.Curator{Memories: curatewire.Memories(store), History: runHistory, Store: store}
+	server.Extend(&api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server, Curator: curator})
 	server.Extend(&api.EvalAPI{Service: evalSvc, Store: store, Server: server})
 	// Reasoning quality, pattern library and on-demand improvement. The
 	// desktop runtime never improves on a schedule.
@@ -338,6 +341,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 	go runLoop(ctx, store, pool, cfg.Log)
 	go reconcileLoop(ctx, store, graphSvc, cfg.Log)
+	go curateLoop(ctx, curator, curateInterval(os.Getenv), cfg.Log.With("component", "curator"))
 	go func() {
 		if err := consolidator.Run(ctx); err != nil && ctx.Err() == nil {
 			cfg.Log.Warn("consolidator", "err", err)
@@ -461,4 +465,46 @@ func FirstNonEmpty(v ...string) string {
 		}
 	}
 	return ""
+}
+
+// curateInterval is how often the curator proposes clean-ups
+// (HARNESS_CURATE_INTERVAL; default 24h; "off" or 0 disables the schedule,
+// the API and CLI still run it on demand).
+func curateInterval(getenv func(string) string) time.Duration {
+	v := strings.TrimSpace(getenv("HARNESS_CURATE_INTERVAL"))
+	switch strings.ToLower(v) {
+	case "":
+		return 24 * time.Hour
+	case "off", "0", "false":
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Minute {
+		return 24 * time.Hour
+	}
+	return d
+}
+
+// curateLoop proposes memory clean-ups one minute after start and then every
+// interval. It only creates proposals; a person decides.
+func curateLoop(ctx context.Context, c *curate.Curator, every time.Duration, log *slog.Logger) {
+	if every <= 0 {
+		return
+	}
+	wait := time.Minute
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		rep, err := c.Run(ctx, tenant)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			log.Warn("memory curation failed", "err", err)
+		case rep.Total() > 0:
+			log.Info("memory curation proposed clean-ups", "new", rep.Total(), "examined", rep.Examined)
+		}
+		wait = every
+	}
 }

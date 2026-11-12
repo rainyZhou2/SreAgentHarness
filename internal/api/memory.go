@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"go-sre-harness/internal/auth"
+	"go-sre-harness/internal/curate"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/store/pg"
@@ -38,10 +39,12 @@ type MemoryAPI struct {
 	Store  MemoryStore
 	Writer memory.Writer
 	Server *Server
+	// Curator enables the memory curation routes (nil: not served).
+	Curator *curate.Curator
 }
 
 func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
-	return map[string]auth.Role{
+	roles := map[string]auth.Role{
 		"POST /v1/memories":                              auth.Operator,
 		"POST /v1/memories/{memory_id}/transition":       auth.Approver,
 		"PATCH /v1/memories/{memory_id}":                 auth.Approver,
@@ -52,6 +55,10 @@ func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
 		"POST /v1/incidents":                             auth.Operator,
 		"POST /v1/incidents/{incident_id}/memory-events": auth.Operator,
 	}
+	for k, v := range m.curationRoutes() {
+		roles[k] = v
+	}
+	return roles
 }
 
 func (m *MemoryAPI) Register(mux *http.ServeMux) {
@@ -70,6 +77,7 @@ func (m *MemoryAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/incidents", m.createIncident)
 	mux.HandleFunc("POST /v1/incidents/{incident_id}/memory-events", m.appendIncident)
 	mux.HandleFunc("GET /v1/incidents/{incident_id}/memory-events", m.listIncident)
+	m.registerCuration(mux)
 }
 
 func (m *MemoryAPI) create(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +147,7 @@ func (m *MemoryAPI) list(w http.ResponseWriter, r *http.Request) {
 		m.Server.domainErr(w, err)
 		return
 	}
-	visible := list[:0]
+	visible := make([]memory.Memory, 0, len(list)) // [] rather than null when empty
 	for _, mem := range list {
 		if canSeeMemory(r, id, mem) {
 			visible = append(visible, mem)
