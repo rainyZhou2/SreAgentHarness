@@ -59,6 +59,12 @@ type Config struct {
 	TokenFile string
 	Log       *slog.Logger
 	MaxRuns   int
+	// LockHeld means the caller already holds the data directory lock
+	// (AcquireLock) for the life of Run.
+	LockHeld bool
+	// OnReady is called once the store is open and the server is about to
+	// accept requests (used to print the banner only when it is true).
+	OnReady func()
 	// ConfigFile is the optional JSON configuration (default
 	// <DataDir>/harness.local.json, or HARNESS_LOCAL_CONFIG).
 	ConfigFile string
@@ -73,7 +79,12 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.DBPath = cfg.DataDir + "/harness.db"
 	}
 	if cfg.TokenFile == "" {
-		return errors.New("local token file is required")
+		// Standalone use (harness local): keep a token in the data directory.
+		tf, _, err := EnsureToken(cfg.DataDir)
+		if err != nil {
+			return fmt.Errorf("local token: %w", err)
+		}
+		cfg.TokenFile = tf
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
@@ -95,11 +106,21 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	if cfg.DataDir != "" && !cfg.LockHeld {
+		release, err := AcquireLock(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	store, err := localstore.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open local store: %w", err)
 	}
 	defer store.Close()
+	if up := store.Upgraded(); up != nil {
+		cfg.Log.Warn("local database upgraded", "from", up.From, "to", up.To, "backup", up.Backup)
+	}
 	if err := seedProfiles(ctx, store); err != nil {
 		return err
 	}
@@ -110,6 +131,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	reg := tools.NewRegistry(tools.DemoTools()...)
+	registerLocalTools(reg, os.Getenv, cfg.Log)
 	reg.Register(artifactq.New(arts))
 	reg.Register(verify.ReviewTool{})
 	reg.Register(kernel.BatchTool{})
@@ -299,6 +321,9 @@ func Run(ctx context.Context, cfg Config) error {
 				cfg.Log.Error("work engine stopped", "err", err)
 			}
 		}()
+	}
+	if cfg.OnReady != nil {
+		cfg.OnReady()
 	}
 	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {

@@ -65,6 +65,18 @@ jobs:
       - name: go test -race
         run: go test -race ./... -count=1
 
+  local-mode:
+    name: single-user local mode (no database)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o harness ./cmd/harness
+      - name: harness local + chat + backup/restore smoke test
+        run: scripts/local-smoke.sh ./harness
+
   integration:
     name: fault injection + migration upgrade
     runs-on: ubuntu-latest

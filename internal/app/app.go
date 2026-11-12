@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -55,9 +56,16 @@ var _ api.Store = (*pg.Store)(nil)
 var _ scheduler.OutboxStore = (*pg.Store)(nil)
 var _ scheduler.ReconcileStore = (*pg.Store)(nil)
 
+// Version is the build version, set at release time with
+// -ldflags "-X go-sre-harness/internal/app.Version=v1.2.3".
+var Version = "dev"
+
 // Main is the command-line entry point:
 //
 //	harness migrate              apply database migrations
+//	harness local                single-user local mode: SQLite, no PostgreSQL or config needed
+//	harness memory               view and edit your personal memory
+//	harness chat                 interactive chat with inline approvals (CLI client)
 //	harness all                  API + scheduler + worker in one process
 //	harness api|worker|scheduler run a single role
 //	harness plugins              list compiled-in plugins and extension points
@@ -79,6 +87,9 @@ func Main() {
 		}
 		fmt.Println(auth.HashToken(os.Args[2]))
 		return
+	case "version", "--version", "-version":
+		fmt.Printf("harness %s (%s)\n", Version, buildRevision())
+		return
 	case "plugins":
 		for _, k := range plugin.Kinds() {
 			fmt.Printf("%s (multi=%v): %s\n", k.Name, k.Multi, k.Doc)
@@ -89,6 +100,21 @@ func Main() {
 			}
 		}
 		return
+	case "local":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := RunLocal(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, log)
+		stop()
+		os.Exit(code)
+	case "chat":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := RunChat(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
+	case "memory":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := RunMemory(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
 	case "work-bench":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		code := WorkBench(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
@@ -101,7 +127,7 @@ func Main() {
 		os.Exit(code)
 	case "migrate", "all", "api", "worker", "scheduler":
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (migrate|all|api|worker|scheduler|plugins|hash-token|work-bench|validate-config|doctor|release-gate)\n", mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (local|chat|memory|version|migrate|all|api|worker|scheduler|plugins|hash-token|work-bench|validate-config|doctor|release-gate)\n", mode)
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -831,4 +857,19 @@ func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server
 	eng.AttachContext(a.envGatherer)
 	a.work = eng
 	return nil
+}
+
+// buildRevision is the VCS revision and Go version embedded by the toolchain.
+func buildRevision() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown build"
+	}
+	rev := ""
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" && len(s.Value) >= 7 {
+			rev = s.Value[:7] + ", "
+		}
+	}
+	return rev + bi.GoVersion
 }
