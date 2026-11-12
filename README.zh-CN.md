@@ -70,7 +70,35 @@ desktop/build.sh run
 
 ## 快速开始
 
-需要 Go 1.26+ 和 PostgreSQL 14+，NATS 可选。
+**一条命令，无需数据库**（单用户、SQLite、仅监听本机回环地址）：
+
+```bash
+go run ./cmd/harness local
+```
+
+首次运行会创建数据目录和私有 token，并打印调用方式；未设置 `ANTHROPIC_API_KEY`、`GEMINI_API_KEY` 或 `HARNESS_OPENAI_BASE_URL` 时使用内置规则模型。默认提供 `web.fetch`（`HARNESS_LOCAL_WEB=off` 可移除）；设置 `HARNESS_LOCAL_PROMETHEUS_URL` 会加入只读的 `prom.query` / `prom.alerts`。参数：`-data DIR`、`-addr HOST:PORT`。非回环地址默认被拒绝，需设置 `HARNESS_LOCAL_ALLOW_REMOTE=true`。
+
+本地模式的日常命令：
+
+| 命令 | 作用 |
+|---|---|
+| `harness local init` | 选择模型提供方，用只读请求（不消耗 token）测试密钥，并保存到 `<data>/local.env`（权限 0600）。真实环境变量始终优先于该文件。 |
+| `harness chat` | 终端内交互聊天，审批内联完成（`/approvals`、`/approve N`、`/resume`、`--yes`）；也可连接团队服务端（`-server`、`-token`）。 |
+| `harness memory list \| set KEY VALUE \| rm KEY` | 查看和编辑智能体记住的个人偏好（桌面端在**记忆**页提供同样功能）。 |
+| `harness memory review \| show ID \| approve ID \| reject ID [原因] \| archive ID` | 审核智能体提议记住的内容（CANDIDATE 记忆）。**只有通过审批（ACTIVE）的记忆才会用于之后的运行**，不审核，智能体学到的东西就不会生效。`review` 会显示每条提议将取代哪条旧记忆；ID 可缩写为唯一前缀。桌面端**记忆 → 智能体学到的**标签页提供同样功能，并支持“改写后通过”和待审核数量徽标。 |
+| `harness memory curate \| suggestions \| apply ID \| dismiss ID` | 查找值得搁置的记忆并审核建议（见“记忆整理”）。`apply` 把它们置为 STALE（不再参与检索，可用 `memory approve ID` 恢复）；`dismiss` 保留它们，同一发现不会再次提出。 |
+| `harness compact-eval [-runs N]` | 用固定的排障历史衡量压缩器保留了什么：关键事实召回、模型看到的内容、引用保留、注入泄漏。未配置模型时只测确定性基线，并明确说明模型压缩器没有运行。 |
+| `harness local doctor` | 检查数据目录、token、数据库完整性与版本、端口、磁盘占用、模型密钥和 Prometheus；有失败项时退出码为 1。 |
+| `harness local backup [-out F]` | 运行中也能做一致性备份（数据库快照、事件日志、产物）；备份不含 token 和 API key。 |
+| `harness local restore FILE` | 恢复备份；原数据目录保留为 `<dir>.before-restore-<时间>`，凭据保留在本机安装上。 |
+| `harness local prune [-older-than 30d] [-yes]` | 删除过期的仅用于回放的产物（完整提示词、原始模型响应、清单）；运行结果、步骤、工具输出、记忆和事件日志保留。不加 `-yes` 只预览。 |
+| `harness version` | 构建版本。 |
+
+同一数据目录同一时间只能有一个 harness（加锁，第二个会被拒绝）。数据库记录结构版本：升级前会先复制为 `harness.db.v<N>.bak`，由更新版本写入的数据库会被拒绝而不是被改写。配置了真实模型时，长时间诊断会用模型生成的摘要压缩历史（`HARNESS_LOCAL_LLM_COMPACT=off` 可保持确定性摘要）：`obs:stepN` 引用会保留，工具输出作为数据传入，模型失败会回退到确定性摘要；被拒绝、失败和已执行动作的事实仍由内核自己追加。模型看到的是每段长输出的“显著摘录”（罕见行和故障词行，加上头尾），而不是前几百字节，所以埋在日志深处的关键行也能到达模型。
+
+**发布。** 推送 `v*` 标签会发布三平台的命令行二进制和桌面应用（macOS `.dmg`/`.zip`、Linux `.tar.gz`、Windows `.zip`），并附 `SHA256SUMS.txt`。macOS 应用仅做了 ad-hoc 签名、未公证，Windows 版未签名，首次启动系统会要求确认。本地构建：`desktop/build.sh && desktop/package.sh`（`DESKTOP_VERSION=v1.2.3` 指定版本）。
+
+**团队服务端**（PostgreSQL、多租户）：需要 Go 1.26+ 和 PostgreSQL 14+，NATS 可选。
 
 ```bash
 createdb harness
@@ -201,7 +229,19 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 - **修订**：`PATCH /v1/memories/{id}`（approver；`expected_version`、`title` 和/或 `content`、`reason`）写入新版本：与新记忆一样脱敏和投毒检查，重新生成向量和检索词，记审计，状态不变。旧版本保留在 `agent_memory_versions` 中，引用旧版本的 ref 仍可解析；修订后与其他记忆内容重复时会被拒绝。
 - **取代**（激活一条记忆会让同 subject、同 scope 的 ACTIVE 记忆变为 SUPERSEDED）、**生命周期迁移**、反馈和保留策略保持不变。整理过程是幂等的：反馈触发的重新整理不会重复强化或修订。
 
+### 记忆整理
+
+长期记忆会“腐烂”：重复堆积、事实变化、经验被推翻、条目无人使用。整理器（`internal/curate`）是一次离线的“做梦”式整理，按运维场景的要求设计：
+
+- **只提建议。** 建议说明要搁置哪些记忆、为什么；由审批者应用或驳回（`POST /v1/memory/curation/{id}/decide`，审批者角色）。在此之前不会有任何改动。应用后记忆变为 STALE（不再参与检索），可恢复；如果建议提出后其中某条记忆被修改，应用会返回 `proposal_outdated` 且不做任何改动。
+- **不写任何文字。** 它从不起草、合并或改写记忆，所以被污染的运行无法通过这条路径把内容写进记忆。
+- **证据来自运行记录。** 信号按强度排序：`refuted_by_history`（至少 2 次之后的、同一服务的、独立验证为 SUPPORTED 的运行推翻了这条经验，且没有运行支持它；没有 SUPPORTED 结论的运行不算数）、`superseded_fact`（同一范围、措辞相同、数字不同，且有更新的记忆）、`duplicate`（同一范围内词元相似度 ≥ 85%，保留验证更充分、更新的那条）、`unused`（90 天内未创建、修改、强化或被检索）。一条记忆只出现在它最强的发现里；个人记忆从不检查。
+- **幂等。** 一个发现由信号和确切的记忆版本标识：只提出一次，被驳回的发现只有在其中某条记忆变化后才会再出现。单次最多 50 条。
+- **触发方式。** `POST /v1/memory/curation/run`（operator）、`harness memory curate`、桌面端**记忆 → 智能体学到的 → 立即检查记忆**；本地模式下，启动 1 分钟后检查一次，之后每隔 `HARNESS_CURATE_INTERVAL`（默认 24h，`off` 关闭）。团队服务端没有按租户的调度器，按需运行。建议存放在 `memory_curation_proposals`（迁移 0032，行级安全；本地存储里是 JSON 对象）。
+
 ### 记忆检索
+
+- **历史运行搜索**：`harness.run_search`（R0，`query`，可选 `service`、`status`、`limit` ≤ 10）搜索已结束的运行——当时的问题、结论和假设——这样即使没人把某次排查提升为记忆，智能体也能找到它是怎么结束的。可见范围是调用者自己的对话和非用户发起的运行（触发器、定时、Work），看不到其他用户的对话，跳过 flow 的子运行和调用方自己，会脱敏，并标注为“历史”而非证据。它扫描最近的已结束运行（默认 300 条、6 秒预算），文本带缓存，被截断时会明确说明；数据库全文索引可以去掉这个上限。
 
 - **运行中检索**：第一个推理步看到的是按目标检索出的记忆。`harness.memory_search`（R0，参数 `query`，可选 `service`、`top_k` ≤ 10）用 agent 之后掌握的信息（假设、报错信息、组件）走同一条检索流水线（硬过滤、全文/向量/依赖图三路召回、RRF、信任与 profile 排除、冲突消解）。结果作为"需验证的过往经验"返回，带 `memory:<id>@<v>` ref；这些 ref 可被引用，并作为记忆证据交给独立验证器。工具可见时，停滞提示会建议检索记忆。
 - **模型 embedding**：`http` embedder 调用任意 OpenAI 兼容的 `/embeddings` 接口（`base_url`、`model`、`api_key_env`、`dimensions`、`timeout`），带小型查询缓存；调用失败时检索跳过向量分支。向量只在同一 embedding 模型内比较，因此切换模型后由 consolidator 的 indexer（`index`，默认开启；`index_batch`，默认 50）按批为存活记忆重新生成向量，ACTIVE 优先。
