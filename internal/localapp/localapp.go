@@ -245,7 +245,7 @@ func Run(ctx context.Context, cfg Config) error {
 			FallbackProfileID: "sre-diagnosis", FallbackVersion: 8, FallbackReact: true, Router: router,
 			Cache: planner.NewMemoryCache(10*time.Minute, 256)}}
 
-	worker := kernel.NewWorker(kernel.Config{ID: "local-worker", LeaseTTL: 30 * time.Second,
+	worker := kernel.NewWorker(kernel.Config{ID: "local-worker", Compactor: localCompactor(modelGW, cfg.Log), LeaseTTL: 30 * time.Second,
 		StepTimeout: 2 * time.Minute, Checkpoints: true, Rules: rules, Planner: plannerSvc,
 		Memory: retriever, PlanMemory: retriever, CapabilityMap: graphSvc,
 		Skills: extRT, ToolToggles: store, PlanApprovers: 1, PlanApprovalMode: "auto", Observer: metrics,

@@ -110,6 +110,11 @@ func Main() {
 		code := RunChat(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr)
 		stop()
 		os.Exit(code)
+	case "compact-eval":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := RunCompactEval(ctx, os.Args[2:], os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
 	case "memory":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		code := RunMemory(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
@@ -127,7 +132,7 @@ func Main() {
 		os.Exit(code)
 	case "migrate", "all", "api", "worker", "scheduler":
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (local|chat|memory|version|migrate|all|api|worker|scheduler|plugins|hash-token|work-bench|validate-config|doctor|release-gate)\n", mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (local|chat|memory|compact-eval|version|migrate|all|api|worker|scheduler|plugins|hash-token|work-bench|validate-config|doctor|release-gate)\n", mode)
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
