@@ -41,7 +41,7 @@ func (s *Store) createRunLocked(ctx context.Context, req domain.CreateRunRequest
 	}
 	r := domain.Run{ID: newID(), TenantID: req.TenantID, IncidentID: req.IncidentID, ProfileID: req.ProfileID,
 		ProfileVersion: req.ProfileVersion, Status: status, DesiredState: domain.DesiredRunning, Version: 1,
-		NextStepSeq: req.StepSeqStart, GoalRef: req.GoalRef, InitiatorType: req.InitiatorType,
+		NextStepSeq: req.StepSeqStart, GoalRef: req.GoalRef, InitiatorType: domain.StoredInitiatorType(req.InitiatorType),
 		InitiatorID: strptr(req.InitiatorID), SessionID: req.SessionID, BranchID: req.BranchID, TurnID: req.TurnID,
 		ParentRunID: req.ParentRunID, ParentStepID: req.ParentStepID, FlowNodeID: req.FlowNodeID,
 		FlowDepth: req.FlowDepth, ForkedFrom: req.ForkedFrom, RolloutID: req.RolloutID,

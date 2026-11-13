@@ -33,10 +33,26 @@ const (
 // "unknown", is private to the initiator: an unrecognized kind fails closed.
 func SharedInitiator(initiatorType string) bool {
 	switch initiatorType {
-	case "system", "service_principal", "work", "trigger":
+	case "system", "service_principal":
+		return true
+	case "work", "trigger", "schedule": // as older local databases stored them
 		return true
 	}
 	return false
+}
+
+// StoredInitiatorType maps the kind a caller names (a trigger, a schedule, a
+// Work stage, ...) to one the runs table accepts: user, service_principal,
+// system or unknown. Anything no user started is "system". The caller's own
+// kind is kept in the run.created event.
+func StoredInitiatorType(kind string) string {
+	switch kind {
+	case "", "user":
+		return "user"
+	case "service_principal", "system", "unknown":
+		return kind
+	}
+	return "system"
 }
 
 // Terminal reports whether no further transition is allowed.
