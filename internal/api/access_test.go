@@ -39,6 +39,7 @@ type fixture struct {
 	h                      http.Handler
 	aliceRun, bobRun, cron string
 	unknown                string
+	arts                   artifact.Store
 	aliceSess, bobSess     string
 	st                     *localstore.Store
 }
@@ -66,7 +67,7 @@ func newFixture(t *testing.T, withApproval bool) *fixture {
 		}
 		return run.ID
 	}
-	f := &fixture{st: st}
+	f := &fixture{st: st, arts: arts}
 	f.aliceRun, f.bobRun, f.cron = mkRun("a", "user", "alice"), mkRun("b", "user", "bob"), mkRun("c", "trigger", "")
 	f.unknown = mkRun("u", "unknown", "")
 	mkSess := func(key, user string) string {
@@ -83,6 +84,20 @@ func newFixture(t *testing.T, withApproval bool) *fixture {
 	}
 	f.h = (&api.Server{Store: store, Artifacts: arts}).Handler()
 	return f
+}
+
+func (f *fixture) startRun(t *testing.T, key, typ, user string) string {
+	t.Helper()
+	ctx := context.Background()
+	g, _ := json.Marshal(map[string]string{"goal": "goal " + key})
+	ref, hash, _ := f.arts.Put(ctx, "t1", "goal", g)
+	run, _, err := f.st.CreateRun(ctx, domain.CreateRunRequest{TenantID: "t1", ProfileID: "p", ProfileVersion: 1, GoalRef: ref, GoalHash: hash,
+		IdempotencyKey: key, InitiatorType: typ, InitiatorID: user,
+		InitialSteps: []domain.PlannedStep{{Kind: domain.StepReason, Executor: "reasoner", InputRef: ref, InputHash: hash, Status: domain.StepPending}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run.ID
 }
 
 func (f *fixture) do(user, roles, method, path, body string) (int, map[string]any) {
@@ -155,6 +170,15 @@ func TestUsersCannotSeeEachOthersChatsAndRuns(t *testing.T) {
 	}
 	if strings.Contains(mustJSON(out), "secret goal of a") {
 		t.Errorf("alice's goal text leaked into bob's run list")
+	}
+
+	// Runs a Work stage or a schedule starts are shared operational work, and
+	// are stored as "system" (the runs table accepts only a fixed set of kinds).
+	for _, kind := range []string{"work", "schedule", "service_principal"} {
+		id := f.startRun(t, "kind-"+kind, kind, "")
+		if code, _ := f.do("bob", bob, "GET", "/v1/runs/"+id, ""); code != 200 {
+			t.Errorf("a %q run is shared operational work, bob got %d", kind, code)
+		}
 	}
 
 	// a run of unrecognized origin fails closed: admins only
@@ -232,6 +256,33 @@ func TestApproverSeesOnlyWhatNeedsApproval(t *testing.T) {
 	}
 	if code, _ := f.do("carol", "approver", "POST", "/v1/sessions/"+f.aliceSess+"/turns", `{"text":"hi","client_request_id":"x"}`); code != 404 && code != 403 {
 		t.Errorf("the session exception is read-only: %d", code)
+	}
+	// The approver is let in to decide, not to run someone else's run.
+	for _, c := range [][3]string{
+		{"cancel", `{"type":"cancel","payload":{}}`, "approver_scope"},
+		{"pause", `{"type":"pause","payload":{}}`, "approver_scope"},
+		{"retry", `{"type":"retry","payload":{}}`, "approver_scope"},
+		{"inject_evidence", `{"type":"inject_evidence","payload":{"note":"x"}}`, "approver_scope"},
+	} {
+		code, out := f.do("carol", "approver,operator", "POST", "/v1/runs/"+f.aliceRun+"/commands", c[1])
+		if code != 403 || out["error"] != c[2] {
+			t.Errorf("approver command %s on another user's run: %d %v, want 403 %s", c[0], code, out, c[2])
+		}
+	}
+	if code, out := f.do("carol", "approver,operator", "POST", "/v1/runs/"+f.aliceRun+"/fork", `{}`); code != 403 || out["error"] != "approver_scope" {
+		t.Errorf("fork: %d %v", code, out)
+	}
+	// ... while the decision itself gets past the scope check (it may fail
+	// later for its own reasons, but never as approver_scope).
+	for _, typ := range []string{"approve_tool", "reject_tool"} {
+		_, out := f.do("carol", "approver,operator", "POST", "/v1/runs/"+f.aliceRun+"/commands", `{"type":"`+typ+`","payload":{"approval_request_id":"ap1","action_hash":"h"}}`)
+		if out["error"] == "approver_scope" {
+			t.Errorf("%s must be allowed through for an approver: %v", typ, out)
+		}
+	}
+	// the owner is not limited
+	if _, out := f.do("alice", "operator", "POST", "/v1/runs/"+f.aliceRun+"/commands", `{"type":"cancel","payload":{}}`); out["error"] == "approver_scope" {
+		t.Errorf("the owner is not an approver-only caller: %v", out)
 	}
 	for _, p := range []string{"/v1/runs/" + f.bobRun, "/v1/sessions/" + f.bobSess} {
 		if code, _ := f.do("carol", "approver", "GET", p, ""); code != 404 {

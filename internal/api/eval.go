@@ -167,7 +167,7 @@ func (e *EvalAPI) addCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p, _ := auth.FromContext(r.Context()); true {
-		if ok, err := e.Server.RunAccessible(r.Context(), p, b.RunID); err != nil || !ok {
+		if ok, err := e.Server.RunWritable(r.Context(), p, b.RunID); err != nil || !ok {
 			e.Server.domainErr(w, domain.ErrNotFound)
 			return
 		}
@@ -201,7 +201,7 @@ func (e *EvalAPI) addPlanCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p, _ := auth.FromContext(r.Context()); true {
-		if ok, err := e.Server.RunAccessible(r.Context(), p, b.RunID); err != nil || !ok {
+		if ok, err := e.Server.RunWritable(r.Context(), p, b.RunID); err != nil || !ok {
 			e.Server.domainErr(w, domain.ErrNotFound)
 			return
 		}
