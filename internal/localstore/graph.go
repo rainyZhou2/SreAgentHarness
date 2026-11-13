@@ -149,7 +149,7 @@ func (s *Store) graphViewLocked(tenantID string) (map[string]domain.GraphNode, [
 		ref := "run:" + r.ID
 		addNode(domain.GraphNode{Ref: ref, Kind: "run", Label: r.ID, UpdatedAt: r.UpdatedAt,
 			Attrs: map[string]any{"status": string(r.Status), "profile_id": r.ProfileID,
-				"profile_version": r.ProfileVersion}})
+				"profile_version": r.ProfileVersion, "initiator_type": r.InitiatorType, "initiator_id": derefStr(r.InitiatorID)}})
 		if r.IncidentID != nil {
 			inc := "incident:" + *r.IncidentID
 			addNode(domain.GraphNode{Ref: inc, Kind: "incident", Label: *r.IncidentID})
@@ -163,7 +163,8 @@ func (s *Store) graphViewLocked(tenantID string) (map[string]domain.GraphNode, [
 		runRef := "run:" + st.RunID
 		ref := "step:" + st.ID
 		addNode(domain.GraphNode{Ref: ref, Kind: "step", Label: st.InputRef, UpdatedAt: st.UpdatedAt,
-			Attrs: map[string]any{"kind": string(st.Kind), "status": string(st.Status), "seq": st.Seq}})
+			Attrs: map[string]any{"kind": string(st.Kind), "status": string(st.Status), "seq": st.Seq, "run_id": st.RunID,
+				"initiator_type": s.runs[st.RunID].InitiatorType, "initiator_id": derefStr(s.runs[st.RunID].InitiatorID)}})
 		addEdge(runRef, "contains", ref)
 		for _, cap := range s.caps[st.ID] {
 			addNode(domain.GraphNode{Ref: cap.Ref, Kind: "capability", Label: cap.Ref})
@@ -459,3 +460,10 @@ func (s *Store) ServiceCapabilityNotes(ctx context.Context, tenantID string, ser
 }
 
 // noteTime removed: the lesson lookup keeps the newest matching memory.
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}

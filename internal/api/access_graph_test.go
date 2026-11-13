@@ -20,10 +20,31 @@ func TestGraphHidesOtherUsersWork(t *testing.T) {
 	if p1(alice, mem("user", "bob")) {
 		t.Error("another user's personal memory title must not be visible")
 	}
-	if p1(alice, domain.GraphNode{Kind: "thought"}) || p1(alice, domain.GraphNode{Kind: "step"}) {
-		t.Error("thought and step labels are reasoning text with no owner")
+	owned := func(kind, typ, who string) domain.GraphNode {
+		return domain.GraphNode{Kind: kind, Attrs: map[string]any{"initiator_type": typ, "initiator_id": who}}
 	}
-	if !p1(alice, domain.GraphNode{Kind: "tool"}) || !p1(admin, mem("user", "bob")) || !p1(admin, domain.GraphNode{Kind: "thought"}) {
+	for _, kind := range []string{"run", "step", "thought"} {
+		if !p1(alice, owned(kind, "user", "alice")) {
+			t.Errorf("a user sees their own %s nodes", kind)
+		}
+		if p1(alice, owned(kind, "user", "bob")) {
+			t.Errorf("another user's %s node must be hidden", kind)
+		}
+		if !p1(alice, owned(kind, "system", "")) || !p1(alice, owned(kind, "service_principal", "")) {
+			t.Errorf("%s nodes of shared operational runs are visible", kind)
+		}
+		if p1(alice, domain.GraphNode{Kind: kind}) || p1(alice, owned(kind, "unknown", "")) {
+			t.Errorf("a %s node with no recognizable owner fails closed", kind)
+		}
+		if !p1(admin, owned(kind, "user", "bob")) {
+			t.Errorf("admins see %s nodes of every user", kind)
+		}
+	}
+	if p1(alice, domain.GraphNode{Kind: "shard", Ref: "user:bob"}) || !p1(alice, domain.GraphNode{Kind: "shard", Ref: "user:alice"}) ||
+		!p1(alice, domain.GraphNode{Kind: "shard", Ref: "service:checkout"}) {
+		t.Error("a user's memory shard is visible to that user only")
+	}
+	if !p1(alice, domain.GraphNode{Kind: "tool"}) || !p1(admin, mem("user", "bob")) {
 		t.Error("tools are shared; admins see everything")
 	}
 }

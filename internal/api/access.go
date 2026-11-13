@@ -50,30 +50,71 @@ func ownsRun(p auth.Principal, r domain.Run) bool {
 	return r.InitiatorID != nil && *r.InitiatorID == p.Subject
 }
 
-// RunAccessible reports whether the caller may see a run. A run that does not
-// exist is reported as accessible so that the handler answers 404 itself.
-func (s *Server) RunAccessible(ctx context.Context, p auth.Principal, runID string) (bool, error) {
+// grant says how a caller may use a run.
+type grant int
+
+const (
+	grantNone     grant = iota
+	grantFull           // owner, admin, or a shared run: read and act within their role
+	grantApprover       // an approver on a run with an approval request: read, and decide approvals
+)
+
+func (s *Server) runGrant(ctx context.Context, p auth.Principal, runID string) (grant, error) {
 	if isAdmin(p) {
-		return true, nil
+		return grantFull, nil
 	}
 	run, err := s.Store.GetRun(ctx, p.Tenant, runID)
 	if errors.Is(err, domain.ErrNotFound) {
-		return true, nil
+		return grantFull, nil // the handler answers 404 itself
 	}
 	if err != nil {
-		return false, err
+		return grantNone, err
 	}
 	if ownsRun(p, run) {
-		return true, nil
+		return grantFull, nil
 	}
 	if p.Has(auth.Approver) {
 		apps, err := s.Store.ListApprovals(ctx, p.Tenant, runID)
 		if err != nil {
-			return false, err
+			return grantNone, err
 		}
-		return len(apps) > 0, nil
+		if len(apps) > 0 {
+			return grantApprover, nil
+		}
 	}
-	return false, nil
+	return grantNone, nil
+}
+
+// RunAccessible reports whether the caller may read a run (the owner, an
+// admin, shared runs, and an approver for a run with an approval request).
+func (s *Server) RunAccessible(ctx context.Context, p auth.Principal, runID string) (bool, error) {
+	g, err := s.runGrant(ctx, p, runID)
+	return g != grantNone, err
+}
+
+// RunWritable reports whether the caller may use a run as their own: copy it
+// into a dataset, act on it. The approver exception does not extend to it.
+func (s *Server) RunWritable(ctx context.Context, p auth.Principal, runID string) (bool, error) {
+	g, err := s.runGrant(ctx, p, runID)
+	return g == grantFull, err
+}
+
+type approverOnlyKey struct{}
+
+// approverOnly marks a request that was let in as an approver, not as the
+// run's owner: it may decide approvals and nothing else.
+func approverOnly(ctx context.Context) bool {
+	v, _ := ctx.Value(approverOnlyKey{}).(bool)
+	return v
+}
+
+// approvalCommand: the commands an approver may issue on someone else's run.
+func approvalCommand(t domain.CommandType) bool {
+	switch t {
+	case domain.CmdApproveTool, domain.CmdRejectTool, domain.CmdResolveUnknown, domain.CmdOverrideResult:
+		return true
+	}
+	return false
 }
 
 func (s *Server) sessionAccessible(ctx context.Context, p auth.Principal, sessionID, method string) (bool, error) {
@@ -119,18 +160,35 @@ func (s *Server) scopeMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		var allowed bool
-		var err error
 		if kind == "session" {
-			allowed, err = s.sessionAccessible(r.Context(), p, id, r.Method)
-		} else {
-			allowed, err = s.RunAccessible(r.Context(), p, id)
+			allowed, err := s.sessionAccessible(r.Context(), p, id, r.Method)
+			switch {
+			case err != nil:
+				s.storeErr(w, err)
+			case !allowed:
+				writeErr(w, http.StatusNotFound, "not_found", "run or resource not found")
+			default:
+				next.ServeHTTP(w, r)
+			}
+			return
 		}
+		g, err := s.runGrant(r.Context(), p, id)
 		switch {
 		case err != nil:
 			s.storeErr(w, err)
-		case !allowed:
+		case g == grantNone:
 			writeErr(w, http.StatusNotFound, "not_found", "run or resource not found")
+		case g == grantApprover:
+			// Let in to judge an approval: read, and post the decision
+			// (the command type is checked where it is parsed). Nothing else.
+			read := r.Method == http.MethodGet || r.Method == http.MethodHead
+			decide := r.Method == http.MethodPost && strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), "/commands")
+			if !read && !decide {
+				writeErr(w, http.StatusForbidden, "approver_scope",
+					"approvers may read this run and decide its approvals; other changes belong to its owner")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), approverOnlyKey{}, true)))
 		default:
 			next.ServeHTTP(w, r)
 		}
@@ -148,19 +206,31 @@ func scopedID(path string) (kind, id string) {
 	return "", ""
 }
 
-// visibleGraphNode hides what would expose another user's work: a user's
-// personal memory titles, and the steps and thoughts of runs (their labels
-// are the agent's reasoning text and carry no owner). Admins see everything.
+// visibleGraphNode hides what would expose another user's work. Run, step and
+// thought nodes carry who started their run: they are shown when that run is
+// shared operational work or the caller's own, and hidden when the owner is
+// someone else or unknown (a step or thought label is the agent's reasoning
+// text). A user's personal-memory titles, and the shard node that groups
+// them, are shown only to that user. Admins see everything.
 func visibleGraphNode(p auth.Principal, n domain.GraphNode) bool {
 	if isAdmin(p) {
 		return true
 	}
 	switch n.Kind {
-	case "thought", "step":
-		return false
+	case "run", "step", "thought":
+		typ, _ := n.Attrs["initiator_type"].(string)
+		who, _ := n.Attrs["initiator_id"].(string)
+		if typ == "" {
+			return false // unknown owner: fail closed
+		}
+		return domain.SharedInitiator(typ) || (who != "" && who == p.Subject)
 	case "memory":
 		if sc, _ := n.Attrs["scope"].(string); sc == "user" {
 			owner, _ := n.Attrs["scope_id"].(string)
+			return owner == p.Subject
+		}
+	case "shard":
+		if owner, ok := strings.CutPrefix(n.Ref, "user:"); ok {
 			return owner == p.Subject
 		}
 	}

@@ -147,6 +147,12 @@ func (s *Server) requireCommandRole(w http.ResponseWriter, r *http.Request, id i
 		need = auth.Operator
 	}
 	p, _ := auth.FromContext(r.Context())
+	if approverOnly(r.Context()) && !approvalCommand(t) {
+		s.audit(r.Context(), pg.AuditEntry{TenantID: id.tenant, ActorType: "user", ActorID: id.actor, Action: "command." + string(t),
+			ResourceType: "run", ResourceID: r.PathValue("run_id"), Outcome: "denied", Details: map[string]any{"reason": "approver_scope"}})
+		writeErr(w, http.StatusForbidden, "approver_scope", "approvers may decide this run's approvals; command "+string(t)+" belongs to its owner")
+		return false
+	}
 	if p.Has(need) {
 		return true
 	}
