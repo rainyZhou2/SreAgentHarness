@@ -110,9 +110,11 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (domain.Run
 // locked (caller must save). Existing runs (same idempotency key) are
 // returned with isNew=false and must not be modified.
 func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest) (*runTx, bool, error) {
-	if req.InitiatorType == "" {
-		req.InitiatorType = "user"
+	initiatorKind := req.InitiatorType // what the caller called itself, for the event
+	if initiatorKind == "" {
+		initiatorKind = "user"
 	}
+	req.InitiatorType = domain.StoredInitiatorType(req.InitiatorType)
 	id := newID()
 	status := domain.RunQueued
 	if req.PendingActivation {
@@ -153,7 +155,7 @@ func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest
 	if req.StepSeqStart > r.run.NextStepSeq {
 		r.run.NextStepSeq = req.StepSeqStart
 	}
-	if err := r.event(ctx, "run.created", req.InitiatorType, req.InitiatorID, nil, nil, map[string]any{
+	if err := r.event(ctx, "run.created", initiatorKind, req.InitiatorID, nil, nil, map[string]any{
 		"profile_id": req.ProfileID, "profile_version": req.ProfileVersion, "incident_id": req.IncidentID,
 		"session_id": req.SessionID, "turn_id": req.TurnID, "forked_from_checkpoint_id": req.ForkedFrom,
 		"rollout_id": req.RolloutID, "pending_activation": req.PendingActivation,
