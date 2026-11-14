@@ -152,7 +152,11 @@ func (e *Evaluator) Score(ctx context.Context, tenantID, workID string) (Scoreca
 	}
 
 	e.outcomes(&sc, w, evals)
-	e.grounding(&sc, w, hyps)
+	ledger, err := e.Ledger.ListEvidence(ctx, tenantID, workID, evidence.MaxDecisionEvidence)
+	if err != nil {
+		return sc, err
+	}
+	e.grounding(&sc, w, hyps, ledger)
 	if err := e.actions(ctx, &sc, w, acts); err != nil {
 		return sc, err
 	}
@@ -235,11 +239,11 @@ func (e *Evaluator) outcomes(sc *Scorecard, w work.Work, evals []outcome.Evaluat
 	}
 }
 
-func (e *Evaluator) grounding(sc *Scorecard, w work.Work, hyps []evidence.Hypothesis) {
+func (e *Evaluator) grounding(sc *Scorecard, w work.Work, hyps []evidence.Hypothesis, ledger []evidence.Record) {
 	scope := evidence.DecisionScope{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation}
 	for _, h := range hyps {
 		d := h.Decision
-		current := h.CurrentDecisionFor(scope)
+		current := h.ValidDecisionFor(scope, ledger, time.Now().UTC())
 		supported := current && (d.Verdict == evidence.DecisionConfirmed || d.Verdict == evidence.DecisionProbable)
 		if supported {
 			sc.SupportedConclusions++

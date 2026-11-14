@@ -17,7 +17,7 @@ const (
 	DecisionInconclusive = "INCONCLUSIVE"
 	DecisionContested    = "CONTESTED"
 	DecisionProfile      = "sre.rca"
-	AdjudicatorVersion   = "2"
+	AdjudicatorVersion   = "3"
 )
 
 // ErrDecisionLimit requires a smaller investigation before durable adjudication.
@@ -104,8 +104,19 @@ func (d *DecisionVerdict) HypothesisStatus() string {
 
 // Adjudicate resolves references before synthesis and derives the single downstream verdict.
 func Adjudicate(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at time.Time) (Synthesis, []Hypothesis, error) {
+	return adjudicate(scope, envs, ledger, at, AdjudicatorVersion)
+}
+
+func adjudicate(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at time.Time, version string) (Synthesis, []Hypothesis, error) {
 	if scope.TenantID == "" || scope.WorkID == "" || scope.Generation < 1 || at.IsZero() {
 		return Synthesis{}, nil, fmt.Errorf("%w: decision scope and time required", ErrInvalid)
+	}
+	if version == AdjudicatorVersion {
+		var err error
+		envs, err = canonicalResults(envs)
+		if err != nil {
+			return Synthesis{}, nil, err
+		}
 	}
 	syn := synthesize(scope, envs, ledger, at)
 	resolver := newReferenceResolverAt(scope, ledger, at)
@@ -118,6 +129,15 @@ func Adjudicate(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at 
 			key := HypothesisKey(h.Statement)
 			if byKey[key] == nil {
 				byKey[key] = &Hypothesis{TenantID: scope.TenantID, WorkID: scope.WorkID, Key: key, Statement: cpkit.Truncate(h.Statement, MaxStatement), Category: h.Category, UpdatedAt: at}
+			} else if version == AdjudicatorVersion {
+				if byKey[key].Category != h.Category {
+					byKey[key].Category = ""
+				}
+				// The representative claim must survive removal of unrelated envelope
+				// fields and hypotheses from the persisted decision projection.
+				if statement := cpkit.Truncate(h.Statement, MaxStatement); statement < byKey[key].Statement {
+					byKey[key].Statement = statement
+				}
 			}
 		}
 	}
@@ -129,7 +149,7 @@ func Adjudicate(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at 
 	var out []Hypothesis
 	for _, key := range keys {
 		h := byKey[key]
-		d := &DecisionVerdict{DecisionScope: scope, DecisionKey: key, Profile: DecisionProfile, ProfileVersion: 1, Verdict: DecisionInconclusive, AdjudicatorVersion: AdjudicatorVersion, AdjudicatedAt: at}
+		d := &DecisionVerdict{DecisionScope: scope, DecisionKey: key, Profile: DecisionProfile, ProfileVersion: 1, Verdict: DecisionInconclusive, AdjudicatorVersion: version, AdjudicatedAt: at}
 		supports, refutes := map[string]bool{}, map[string]bool{}
 		causal := false
 
@@ -191,8 +211,17 @@ func Adjudicate(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at 
 		}
 
 		input := decisionInput(scope, key, envs, ledger, at)
-		d.Input = &input
 		var err error
+		if version == AdjudicatorVersion {
+			// Hash the exact retained projection in canonical order. Ordering the
+			// original envelopes is insufficient: projection removes fields that
+			// may have determined their order. v2 retains its historical ordering.
+			input.Results, err = canonicalResults(input.Results)
+			if err != nil {
+				return syn, nil, err
+			}
+		}
+		d.Input = &input
 		d.InputDigest, err = cpkit.Hash(input)
 		if err != nil {
 			return syn, nil, fmt.Errorf("%w: decision digest: %v", ErrInvalid, err)
@@ -346,7 +375,7 @@ func ReplayDecision(d DecisionVerdict) (DecisionVerdict, error) {
 }
 
 func replayDecision(d DecisionVerdict) (Synthesis, Hypothesis, error) {
-	if d.Input == nil || d.Profile != DecisionProfile || d.ProfileVersion != 1 || d.AdjudicatorVersion != AdjudicatorVersion {
+	if d.Input == nil || d.Profile != DecisionProfile || d.ProfileVersion != 1 || (d.AdjudicatorVersion != AdjudicatorVersion && d.AdjudicatorVersion != "2") {
 		return Synthesis{}, Hypothesis{}, fmt.Errorf("%w: unsupported decision replay", ErrInvalid)
 	}
 	digest, err := cpkit.Hash(*d.Input)
@@ -356,7 +385,7 @@ func replayDecision(d DecisionVerdict) (Synthesis, Hypothesis, error) {
 	if d.Input.Scope != d.DecisionScope || !d.Input.At.Equal(d.AdjudicatedAt) || digest != d.InputDigest {
 		return Synthesis{}, Hypothesis{}, fmt.Errorf("%w: decision input digest mismatch", ErrInvalid)
 	}
-	syn, hs, err := Adjudicate(d.Input.Scope, d.Input.Results, d.Input.Evidence, d.Input.At)
+	syn, hs, err := adjudicate(d.Input.Scope, d.Input.Results, d.Input.Evidence, d.Input.At, d.AdjudicatorVersion)
 	if err != nil {
 		return Synthesis{}, Hypothesis{}, err
 	}

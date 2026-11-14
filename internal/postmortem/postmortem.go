@@ -143,7 +143,11 @@ func (b *Builder) Build(ctx context.Context, tenantID, workID string) (Report, e
 	}
 	r.Trigger = trigger(w, events)
 	r.timeline(events, acts, evals)
-	r.causes(w, hyps)
+	ledger, err := l.ListEvidence(ctx, tenantID, workID, evidence.MaxDecisionEvidence)
+	if err != nil {
+		return r, err
+	}
+	r.causes(w, hyps, ledger)
 	for _, a := range acts {
 		r.Actions = append(r.Actions, ActionLine{ID: a.ID, Name: a.ActionName, Target: a.TargetRef, Risk: string(a.Risk),
 			State: string(a.State), Reason: clip(a.Reason)})
@@ -282,12 +286,12 @@ func collapse(tl []Entry) []Entry {
 	return out
 }
 
-func (r *Report) causes(w work.Work, hyps []evidence.Hypothesis) {
+func (r *Report) causes(w work.Work, hyps []evidence.Hypothesis, ledger []evidence.Record) {
 	scope := evidence.DecisionScope{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation}
 	var roots []Cause
 	for _, h := range hyps {
 		d := h.Decision
-		if !h.CurrentDecisionFor(scope) {
+		if !h.ValidDecisionFor(scope, ledger, time.Now().UTC()) {
 			r.OpenHypotheses = append(r.OpenHypotheses, clip(h.Statement)+" (unadjudicated or obsolete decision)")
 			continue
 		}
