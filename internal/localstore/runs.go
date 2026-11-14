@@ -14,7 +14,17 @@ import (
 func (s *Store) CreateRun(ctx context.Context, req domain.CreateRunRequest) (domain.Run, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createRunLocked(ctx, req)
+	var run domain.Run
+	var created bool
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		run, created, err = s.createRunLocked(ctx, req)
+		return err
+	})
+	if err != nil {
+		return domain.Run{}, false, err
+	}
+	return s.runs[run.ID], created, nil
 }
 
 func (s *Store) createRunLocked(ctx context.Context, req domain.CreateRunRequest) (domain.Run, bool, error) {
@@ -123,7 +133,7 @@ func (s *Store) GetRun(ctx context.Context, tenantID, runID string) (domain.Run,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.runs[runID]
-	if !ok || (tenantID != "" && r.TenantID != tenantID) {
+	if !ok || r.TenantID != tenantID {
 		return domain.Run{}, domain.ErrNotFound
 	}
 	return r, nil
@@ -152,7 +162,7 @@ func (s *Store) ListRuns(ctx context.Context, tenantID string, status domain.Run
 func (s *Store) ListSteps(ctx context.Context, tenantID, runID string) ([]domain.Step, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r, ok := s.runs[runID]; !ok || (tenantID != "" && r.TenantID != tenantID) {
+	if r, ok := s.runs[runID]; !ok || r.TenantID != tenantID {
 		return nil, domain.ErrNotFound
 	}
 	return sortedSteps(s.steps, runID), nil
@@ -161,12 +171,21 @@ func (s *Store) ListSteps(ctx context.Context, tenantID, runID string) ([]domain
 func (s *Store) ListEvents(ctx context.Context, tenantID, runID string, afterSeq int64, limit int) ([]domain.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r, ok := s.runs[runID]; !ok || r.TenantID != tenantID {
+		return nil, domain.ErrNotFound
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
 	return s.listEventsLocked(runID, afterSeq, limit)
 }
 
 func (s *Store) ListApprovals(ctx context.Context, tenantID, runID string) ([]domain.ApprovalRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r, ok := s.runs[runID]; !ok || r.TenantID != tenantID {
+		return nil, domain.ErrNotFound
+	}
 	var out []domain.ApprovalRequest
 	for _, a := range s.approvals {
 		if a.RunID == runID {
@@ -180,6 +199,9 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID, runID string) ([]do
 func (s *Store) RunTrace(ctx context.Context, tenantID, runID string) (map[string][]domain.Thought, map[string][]domain.CapabilityRef, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r, ok := s.runs[runID]; !ok || r.TenantID != tenantID {
+		return nil, nil, domain.ErrNotFound
+	}
 	trace := map[string][]domain.Thought{}
 	caps := map[string][]domain.CapabilityRef{}
 	for _, st := range sortedSteps(s.steps, runID) {
@@ -204,6 +226,9 @@ func (s *Store) GetCommand(ctx context.Context, tenantID, runID, commandID strin
 func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req domain.CommandRequest) (domain.Command, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r, ok := s.runs[runID]; !ok || r.TenantID != tenantID {
+		return domain.Command{}, domain.ErrNotFound
+	}
 	if req.IdempotencyKey != "" {
 		if id, ok := s.cmdKey[s.commandKey(tenantID, runID, req.IdempotencyKey)]; ok {
 			if c, ok := s.commands[id]; ok {
@@ -309,11 +334,21 @@ func (s *Store) applyCommandLocked(c *domain.Command, req domain.CommandRequest)
 		if r.Status == domain.RunPaused {
 			return "", nil
 		}
+		if r.Status == domain.RunPendingActivation {
+			// A queued conversation turn must retain its activation barrier.
+			if r.DesiredState != domain.DesiredPaused {
+				r.DesiredState = domain.DesiredPaused
+				r.Version++
+				s.saveRun(r)
+			}
+			s.appendEvent(r.TenantID, r.ID, "", "", "run.pause_requested", "user", req.ActorID, map[string]string{"command_id": c.ID})
+			return "", nil
+		}
 		if r.Status == domain.RunNeedsHuman {
 			return "invalid_state", nil
 		}
 		r.DesiredState = domain.DesiredPaused
-		if r.Status == domain.RunQueued || r.Status == domain.RunPendingActivation || r.Status == domain.RunWaitingApproval ||
+		if r.Status == domain.RunQueued || r.Status == domain.RunWaitingApproval ||
 			r.Status == domain.RunWaitingInput || r.Status == domain.RunWaitingChildren {
 			r.Status = domain.RunPaused
 		}
@@ -322,6 +357,13 @@ func (s *Store) applyCommandLocked(c *domain.Command, req domain.CommandRequest)
 		s.appendEvent(r.TenantID, r.ID, "", "", "run.pause_requested", "user", req.ActorID, map[string]string{"command_id": c.ID})
 		return "", nil
 	case domain.CmdResume:
+		if r.Status == domain.RunPendingActivation && r.DesiredState == domain.DesiredPaused {
+			r.DesiredState = domain.DesiredRunning
+			r.Version++
+			s.saveRun(r)
+			s.appendEvent(r.TenantID, r.ID, "", "", "run.pause_withdrawn", "user", req.ActorID, nil)
+			return "", nil
+		}
 		if r.Status != domain.RunPaused {
 			return "invalid_state", nil
 		}

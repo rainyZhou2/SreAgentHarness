@@ -213,10 +213,16 @@ func (s *Store) activateTurnLocked(sess domain.Session, branchID, turnID, runID 
 	s.saveTurn(turn)
 	r := s.runs[runID]
 	r.Status = domain.RunQueued
+	if r.DesiredState == domain.DesiredPaused {
+		r.Status = domain.RunPaused
+	}
 	r.Version++
 	s.saveRun(r)
 	s.appendEvent(r.TenantID, r.ID, "", "", "run.activated", "system", "", map[string]any{"turn_id": turnID,
 		"message_cursor": br.LastMessageSeq})
+	if r.Status == domain.RunPaused {
+		s.appendEvent(r.TenantID, r.ID, "", "", "run.paused", "system", "", nil)
+	}
 	return nil
 }
 
