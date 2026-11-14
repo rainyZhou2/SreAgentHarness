@@ -190,9 +190,13 @@ func (d *Dispatcher) Once(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	delivered, skipped := 0, 0
+	committed := cur
 	for _, it := range batch {
 		if d.Options.Matches(it.Event) {
-			if err := d.deliver(ctx, it.Event); err != nil {
+			if err := d.deliver(ctx, it.Event, committed); err != nil {
+				if errors.Is(err, domain.ErrLeaseLost) {
+					return 0, err
+				}
 				if ctx.Err() != nil {
 					return 0, ctx.Err() // cursor stays: the event is redelivered
 				}
@@ -209,6 +213,7 @@ func (d *Dispatcher) Once(ctx context.Context) (int, error) {
 			if err := d.Store.AdvanceEventSink(ctx, d.ID, d.Owner, it.Cursor, delivered, skipped, d.LeaseTTL); err != nil {
 				return 0, err
 			}
+			committed = it.Cursor
 			delivered, skipped = 0, 0
 		}
 		cur = it.Cursor
@@ -216,10 +221,22 @@ func (d *Dispatcher) Once(ctx context.Context) (int, error) {
 	return len(batch), d.Store.AdvanceEventSink(ctx, d.ID, d.Owner, cur, delivered, skipped, d.LeaseTTL)
 }
 
-func (d *Dispatcher) deliver(ctx context.Context, e domain.Event) error {
+func (d *Dispatcher) deliver(ctx context.Context, e domain.Event, cursor Cursor) error {
 	var err error
 	for n := 1; n <= d.Options.MaxAttempts; n++ {
-		if err = d.Sink.Deliver(ctx, e); err == nil {
+		claimCtx, cancelClaim := context.WithTimeout(ctx, d.LeaseTTL/4)
+		current, ok, claimErr := d.Store.ClaimEventSink(claimCtx, d.ID, d.Owner, d.LeaseTTL, d.Options.StartFrom == "earliest")
+		cancelClaim()
+		if claimErr != nil {
+			return fmt.Errorf("renew event sink lease: %w: %w", domain.ErrLeaseLost, claimErr)
+		}
+		if !ok || current != cursor {
+			return domain.ErrLeaseLost
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, d.LeaseTTL/2)
+		err = d.Sink.Deliver(attemptCtx, e)
+		cancelAttempt()
+		if err == nil {
 			return nil
 		}
 		if IsPermanent(err) || ctx.Err() != nil {
@@ -230,7 +247,7 @@ func (d *Dispatcher) deliver(ctx context.Context, e domain.Event) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(d.Backoff(n)):
+			case <-time.After(min(d.Backoff(n), d.LeaseTTL/4)):
 			}
 		}
 	}
