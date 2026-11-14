@@ -135,7 +135,7 @@ func (s *Store) SubmitTurn(ctx context.Context, req domain.SubmitTurnRequest, po
 		branchID = sess.DefaultBranchID
 	}
 	br, ok := s.branches[branchID]
-	if !ok {
+	if !ok || br.SessionID != sess.ID {
 		return domain.SubmittedTurn{}, domain.ErrNotFound
 	}
 	for _, t := range s.turns {
