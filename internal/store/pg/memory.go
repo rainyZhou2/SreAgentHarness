@@ -84,29 +84,43 @@ func (s *Store) RunCapabilities(ctx context.Context, tenantID, runID string) ([]
 	return out, rows.Err()
 }
 
-// pinnedMemories returns the hits of the latest retrieve_memory step committed
-// before beforeSeq. Hits are immutable once committed, so every retry of a
-// reason step sees the same memories (§10.2 ①).
+// pinnedMemories revalidates pinned versions before injecting their content.
 func (s *Store) pinnedMemories(ctx context.Context, tenantID, runID, _ string, beforeSeq int64) ([]cognitive.MemoryRef, error) {
 	rows, err := s.pool.Query(ctx, `WITH last AS (
 			SELECT id FROM agent_steps WHERE run_id=$1 AND tenant_id=$2 AND kind='retrieve_memory' AND status='SUCCEEDED'
-			AND seq < $3 ORDER BY seq DESC LIMIT 1)
+		AND ($3=0 OR seq < $3) ORDER BY seq DESC LIMIT 1)
 		SELECT m.id, h.memory_version, m.memory_type, m.scope, m.title,
-			CASE WHEN m.current_version = h.memory_version THEN m.content_text
-			     ELSE '[memory changed after retrieval; pinned version ' || h.memory_version || ' content not inlined]' END,
-			m.trust, h.score
+			m.content_text, m.trust, h.score, m.environment, m.applicability
 		FROM step_memory_hits h JOIN last ON h.step_id = last.id
-		JOIN agent_memories m ON m.id = h.memory_id
+		JOIN agent_memories m ON m.id = h.memory_id AND m.tenant_id=h.tenant_id
+		WHERE h.tenant_id=$2 AND m.status='ACTIVE' AND m.current_version=h.memory_version
+		AND ((m.scope <> 'user' AND m.sensitivity IN ('public','internal')) OR
+			(m.scope='user' AND EXISTS (SELECT 1 FROM agent_runs r WHERE r.id=$1
+			AND r.tenant_id=$2 AND r.initiator_type='user' AND r.initiator_id=m.scope_id)))
+		AND m.superseded_by IS NULL AND (m.expires_at IS NULL OR m.expires_at > now())
 		ORDER BY h.rank`, runID, tenantID, beforeSeq)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []cognitive.MemoryRef
+	env, _ := memory.EnvFrom(ctx)
+	at := time.Now().UTC()
 	for rows.Next() {
 		var m cognitive.MemoryRef
-		if err := rows.Scan(&m.ID, &m.Version, &m.Kind, &m.Scope, &m.Title, &m.Content, &m.Trust, &m.Score); err != nil {
+		candidate := memory.Memory{TenantID: tenantID, Status: "ACTIVE"}
+		var applicability []byte
+		if err := rows.Scan(&m.ID, &m.Version, &m.Kind, &m.Scope, &m.Title, &m.Content, &m.Trust, &m.Score, &candidate.Environment, &applicability); err != nil {
 			return nil, err
+		}
+		candidate.Trust = m.Trust
+		if len(applicability) > 0 {
+			if err := json.Unmarshal(applicability, &candidate.Applicability); err != nil {
+				return nil, fmt.Errorf("decode pinned memory applicability: %w", err)
+			}
+		}
+		if valid, _ := candidate.Recallable(tenantID, env, at); !valid {
+			continue
 		}
 		out = append(out, m)
 	}

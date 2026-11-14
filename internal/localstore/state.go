@@ -9,6 +9,7 @@ import (
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/kernel"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/store/pg"
 )
 
@@ -189,14 +190,12 @@ func (s *Store) StepOutputRevisions(ctx context.Context, tenantID, stepID string
 	return out, nil
 }
 
-// SnapshotContext returns the compaction summary and memory hits pinned for
-// the snapshot. Both are immutable once committed, so a retried step renders
-// the same context.
+// SnapshotContext returns compaction and pinned memory that is still valid.
 func (s *Store) SnapshotContext(ctx context.Context, tenantID, runID, snapshotID string, beforeSeq int64) (kernel.SnapshotContext, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.runs[runID]
-	if !ok || (tenantID != "" && r.TenantID != tenantID) {
+	if !ok || tenantID == "" || r.TenantID != tenantID {
 		return kernel.SnapshotContext{}, domain.ErrNotFound
 	}
 	out := kernel.SnapshotContext{CompactionEpoch: r.CompactionEpoch}
@@ -226,9 +225,21 @@ func (s *Store) SnapshotContext(ctx context.Context, tenantID, runID, snapshotID
 			hits = s.memHits[c.ID]
 		}
 	}
+	env, _ := memory.EnvFrom(ctx)
+	at := time.Now().UTC()
 	for _, h := range hits {
 		m, ok := s.memories[h.MemoryID]
-		if !ok {
+		if !ok || m.Mem.Version != h.Version {
+			continue
+		}
+		if m.Mem.Scope == "user" {
+			if r.InitiatorType != "user" || r.InitiatorID == nil || m.Mem.ScopeID != *r.InitiatorID {
+				continue
+			}
+		} else if m.Mem.Sensitivity != "public" && m.Mem.Sensitivity != "internal" {
+			continue
+		}
+		if valid, _ := m.Mem.Recallable(tenantID, env, at); !valid {
 			continue
 		}
 		out.Memories = append(out.Memories, cognitive.MemoryRef{ID: h.MemoryID, Version: h.Version,

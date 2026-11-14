@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"go-sre-harness/internal/domain"
@@ -39,16 +40,21 @@ func (Tool) Descriptor() tools.Descriptor {
 
 // Hit is one result as the agent sees it.
 type Hit struct {
-	Ref      string   `json:"ref"`
-	MemoryID string   `json:"memory_id"`
-	Version  int64    `json:"version"`
-	Kind     string   `json:"kind"`
-	Scope    string   `json:"scope"`
-	Trust    string   `json:"trust"`
-	Score    float64  `json:"score"`
-	Branches []string `json:"branches,omitempty"`
-	Title    string   `json:"title"`
-	Content  string   `json:"content"`
+	Ref           string                `json:"ref"`
+	MemoryID      string                `json:"memory_id"`
+	Version       int64                 `json:"version"`
+	Kind          string                `json:"kind"`
+	Scope         string                `json:"scope"`
+	Trust         string                `json:"trust"`
+	Score         float64               `json:"score"`
+	Branches      []string              `json:"branches,omitempty"`
+	Title         string                `json:"title"`
+	Content       string                `json:"content"`
+	SourceRefs    []string              `json:"source_refs,omitempty"`
+	EvidenceRefs  []string              `json:"evidence_refs,omitempty"`
+	Applicability *memory.Applicability `json:"applicability,omitempty"`
+	Verification  memory.Verification   `json:"verification"`
+	ExpiresAt     *time.Time            `json:"expires_at,omitempty"`
 }
 
 // Result is the tool output.
@@ -100,7 +106,9 @@ func (t Tool) Invoke(ctx context.Context, _ string, args json.RawMessage) (json.
 		}
 		out.Hits = append(out.Hits, Hit{Ref: fmt.Sprintf("memory:%s@%d", m.ID, m.Version), MemoryID: m.ID, Version: m.Version,
 			Kind: m.Type, Scope: m.Scope + ":" + m.ScopeID, Trust: m.Trust, Score: res.Scores[m.ID],
-			Branches: res.Branches[m.ID], Title: m.Title, Content: content})
+			Branches: res.Branches[m.ID], Title: m.Title, Content: content,
+			SourceRefs: m.SourceRefs, EvidenceRefs: m.EvidenceRefs, Applicability: m.Applicability,
+			Verification: m.Verification, ExpiresAt: m.ExpiresAt})
 	}
 	return json.Marshal(out)
 }

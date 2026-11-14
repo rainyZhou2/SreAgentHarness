@@ -52,8 +52,12 @@ func (r *Retriever) PlanMemories(ctx context.Context, tenantID, goal string, ser
 		q = r.Embedder.Embed(goal)
 	}
 	var plans, patterns []PlanMemory
+	env, at := r.environment(ctx, tenantID, "", services), r.now()
 	for _, c := range cands {
 		m := c.Memory
+		if ok, _ := m.Recallable(tenantID, env, at); !ok || m.Scope == "user" || (m.Sensitivity != "public" && m.Sensitivity != "internal") {
+			continue
+		}
 		if m.Type != "procedural" || m.Trust == "T4" || domain.MemoryExcluded(ctx, m.ID) {
 			continue
 		}

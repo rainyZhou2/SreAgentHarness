@@ -28,6 +28,9 @@ func TestMemorySearchCJKAndBackfill(t *testing.T) {
 	} {
 		nm.TenantID, nm.Scope, nm.Type, nm.Status, nm.Trust, nm.Sensitivity = "t", "organization", "episodic", "ACTIVE", "T2", "internal"
 		nm.CreatedBy = "test"
+		nm.SourceRefs = []string{"run:past-run"}
+		nm.EvidenceRefs = []string{"evidence:past-evidence"}
+		nm.Applicability = &memory.Applicability{SourceWorkIDs: []string{"past-work"}, RiskOfReuse: "medium"}
 		p, err := w.Prepare(ctx, nm)
 		if err != nil {
 			t.Fatal(err)
@@ -58,6 +61,9 @@ func TestMemorySearchCJKAndBackfill(t *testing.T) {
 	}
 	if hits[0].Ref == "" || len(hits[0].Branches) < 2 {
 		t.Fatalf("expected fts+vector branches: %+v", hits[0])
+	}
+	if len(hits[0].SourceRefs) != 1 || len(hits[0].EvidenceRefs) != 1 || hits[0].Applicability == nil || len(hits[0].Applicability.SourceWorkIDs) != 1 {
+		t.Fatalf("retrieved experience lost its provenance: %+v", hits[0])
 	}
 	ex := domain.WithMemoryExclude(cctx, []string{hits[0].MemoryID})
 	out, _ = tool.Invoke(ex, "", json.RawMessage(`{"query":"连接池耗尽"}`))
