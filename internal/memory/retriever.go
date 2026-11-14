@@ -164,12 +164,21 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 		s  float64
 	}
 	var ftsS, vecS []scored
+	env, at := r.environment(ctx, tenantID, runID, services), r.now()
+	inapplicable := map[string]string{}
 	q := r.Embedder.Embed(query)
 	depSet := map[string]bool{}
 	for _, d := range deps {
 		depSet[d] = true
 	}
 	for _, c := range cands {
+		if ok, why := c.Memory.Recallable(tenantID, env, at); !ok {
+			inapplicable[c.ID] = why
+			continue
+		}
+		if c.Scope == "user" || (c.Sensitivity != "public" && c.Sensitivity != "internal") {
+			continue
+		}
 		byID[c.ID] = c.Memory
 		shardW[c.ID] = c.ShardWeight
 		if c.FTSRank > 0 {
@@ -192,27 +201,8 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 	for _, s := range vecS {
 		vec = append(vec, s.id)
 	}
-	env, hasEnv := EnvFrom(ctx)
-	if !hasEnv && r.Env != nil {
-		env, hasEnv = r.Env(ctx, tenantID, runID)
-	}
-	if !hasEnv {
-		env = Env{Services: services}
-	} else if len(env.Services) == 0 {
-		env.Services = services
-	}
-	now := time.Now()
-	if r.Now != nil {
-		now = r.Now()
-	}
-	inapplicable := map[string]string{}
 	fused := RRF(fts, vec, graph)
 	for id, score := range fused {
-		if ok, why := byID[id].Applies(env, now); !ok {
-			inapplicable[id] = why
-			delete(fused, id)
-			continue
-		}
 		affinity := shardW[id]
 		if affinity > 1 {
 			affinity = 1
@@ -277,7 +267,11 @@ func (r *Retriever) personal(ctx context.Context, tenantID, runID string) []Memo
 		return nil
 	}
 	out := mems[:0]
+	env, at := r.environment(ctx, tenantID, runID, nil), r.now()
 	for _, m := range mems {
+		if ok, _ := m.Recallable(tenantID, env, at); !ok {
+			continue
+		}
 		if m.Scope == "user" && m.ScopeID == user && m.Trust != "T4" && !domain.MemoryExcluded(ctx, m.ID) {
 			out = append(out, m)
 		}

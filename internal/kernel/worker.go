@@ -248,6 +248,18 @@ type MemoryRetriever interface {
 	Retrieve(ctx context.Context, lease domain.Lease, goal string) (domain.StepSuccess, error)
 }
 
+// MemoryContextProvider carries the retriever's current applicability context
+// to snapshot readers without coupling the kernel to a domain environment.
+type MemoryContextProvider interface {
+	MemoryContext(ctx context.Context, tenantID, runID string) context.Context
+}
+
+// MemoryRecallValidator checks whether a historical hit may still enter the
+// model context. Providers without this contract cannot replay old search hits.
+type MemoryRecallValidator interface {
+	RecallableMemory(ctx context.Context, tenantID, runID, id string, version int64) (bool, error)
+}
+
 // ToolToggles reports the tools a tenant switched off. It is applied on top
 // of the profile allowlist and can only hide tools.
 type ToolToggles interface {
@@ -1099,12 +1111,16 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease, st *exec
 }
 
 // renderContext is phase ② of the snapshot lifecycle: it reads only what the
-// snapshot pinned (history before this step, KV versions), so a retry sees the
-// same context even if evidence was injected meanwhile.
+// snapshot pinned (history before this step, KV versions). Memory visibility is
+// revalidated against current lifecycle and environment even on a retry.
 func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cognitive.ReasoningInput, error) {
 	rules, err := w.rules(ctx, lease)
 	if err != nil {
 		return cognitive.ReasoningInput{}, err
+	}
+	ctx = domain.WithMemoryExclude(ctx, rules.MemoryExcludeFor(lease.RunID))
+	if provider, ok := w.cfg.Memory.(MemoryContextProvider); ok {
+		ctx = provider.MemoryContext(ctx, lease.TenantID, lease.RunID)
 	}
 	visible := rules.Visible(w.tools.DescriptorsFor(lease.TenantID))
 	visible = withoutKernelTools(visible)
@@ -1217,9 +1233,6 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 			if call.Name == LoadToolsName && o.Outcome != "error" {
 				in.LoadedTools = append(in.LoadedTools, loadedTools(o.Content)...)
 			}
-			if call.Name == domain.MemorySearchToolName && o.Outcome != "error" {
-				in.RecalledMemories = append(in.RecalledMemories, recalledMemories(o.Content)...)
-			}
 			obs.Outcome, obs.Content = "ok", o.Content
 			if o.Outcome != "" {
 				obs.Outcome = o.Outcome
@@ -1242,6 +1255,9 @@ func (w *Worker) renderContext(ctx context.Context, lease domain.Lease) (cogniti
 		}
 	}
 
+	if err := w.revalidateMemorySearches(ctx, lease, &in); err != nil {
+		return in, err
+	}
 	in.Ledger = ledger.entries()
 
 	notes := &domain.NoteSet{}
