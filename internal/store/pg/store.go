@@ -222,7 +222,7 @@ const runCols = `id, tenant_id, incident_id, profile_id, profile_version, status
 	last_event_seq, next_step_seq, not_before, context_snapshot_id, lease_owner, lease_until, fence_token,
 	goal_ref, result_ref, failure_reason, initiator_type, initiator_id, session_id, branch_id, turn_id,
 	parent_run_id, parent_step_id, flow_node_id, flow_depth,
-	forked_from_checkpoint_id, compaction_epoch, rollout_id, created_at, updated_at`
+	forked_from_checkpoint_id, compaction_epoch, rollout_id, created_at, updated_at, work_owner`
 
 func scanRun(row pgx.Row, extra ...any) (domain.Run, error) {
 	var r domain.Run
@@ -230,7 +230,7 @@ func scanRun(row pgx.Row, extra ...any) (domain.Run, error) {
 		&r.Version, &r.LastEventSeq, &r.NextStepSeq, &r.NotBefore, &r.ContextSnapshotID, &r.LeaseOwner,
 		&r.LeaseUntil, &r.FenceToken, &r.GoalRef, &r.ResultRef, &r.FailureReason, &r.InitiatorType, &r.InitiatorID,
 		&r.SessionID, &r.BranchID, &r.TurnID, &r.ParentRunID, &r.ParentStepID, &r.FlowNodeID, &r.FlowDepth,
-		&r.ForkedFrom, &r.CompactionEpoch, &r.RolloutID, &r.CreatedAt, &r.UpdatedAt}
+		&r.ForkedFrom, &r.CompactionEpoch, &r.RolloutID, &r.CreatedAt, &r.UpdatedAt, &r.WorkOwner}
 	err := row.Scan(append(dest, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, domain.ErrNotFound

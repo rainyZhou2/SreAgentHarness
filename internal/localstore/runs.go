@@ -24,16 +24,22 @@ func (s *Store) CreateRun(ctx context.Context, req domain.CreateRunRequest) (dom
 	if err != nil {
 		return domain.Run{}, false, err
 	}
-	return s.runs[run.ID], created, nil
+	return copyWorkRun(s.runs[run.ID]), created, nil
 }
 
 func (s *Store) createRunLocked(ctx context.Context, req domain.CreateRunRequest) (domain.Run, bool, error) {
+	if err := domain.ValidateWorkRunReservation(req); err != nil {
+		return domain.Run{}, false, err
+	}
 	if req.InitiatorType == "" {
 		req.InitiatorType = "user"
 	}
 	if req.IdempotencyKey != "" {
 		if id, ok := s.runByKey[req.TenantID+"/"+req.IdempotencyKey]; ok {
-			return s.runs[id], false, nil
+			if !domain.SameWorkRunOwner(s.runs[id].WorkOwner, req.WorkOwner) {
+				return domain.Run{}, false, &domain.RejectedError{Reason: "work_run_owner_mismatch"}
+			}
+			return copyWorkRun(s.runs[id]), false, nil
 		}
 	}
 	if req.ProfileVersion > 0 {
@@ -49,7 +55,7 @@ func (s *Store) createRunLocked(ctx context.Context, req domain.CreateRunRequest
 	if req.PendingActivation {
 		status = domain.RunPendingActivation
 	}
-	r := domain.Run{ID: newID(), TenantID: req.TenantID, IncidentID: req.IncidentID, ProfileID: req.ProfileID,
+	r := domain.Run{WorkOwner: copyWorkOwner(req.WorkOwner), ID: newID(), TenantID: req.TenantID, IncidentID: req.IncidentID, ProfileID: req.ProfileID,
 		ProfileVersion: req.ProfileVersion, Status: status, DesiredState: domain.DesiredRunning, Version: 1,
 		NextStepSeq: req.StepSeqStart, GoalRef: req.GoalRef, InitiatorType: domain.StoredInitiatorType(req.InitiatorType),
 		InitiatorID: strptr(req.InitiatorID), SessionID: req.SessionID, BranchID: req.BranchID, TurnID: req.TurnID,
@@ -136,7 +142,7 @@ func (s *Store) GetRun(ctx context.Context, tenantID, runID string) (domain.Run,
 	if !ok || r.TenantID != tenantID {
 		return domain.Run{}, domain.ErrNotFound
 	}
-	return r, nil
+	return copyWorkRun(r), nil
 }
 
 func (s *Store) ListRuns(ctx context.Context, tenantID string, status domain.RunStatus, limit int) ([]domain.Run, error) {
@@ -150,7 +156,7 @@ func (s *Store) ListRuns(ctx context.Context, tenantID string, status domain.Run
 		if status != "" && r.Status != status {
 			continue
 		}
-		out = append(out, r)
+		out = append(out, copyWorkRun(r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	if limit > 0 && len(out) > limit {
