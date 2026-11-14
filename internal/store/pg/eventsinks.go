@@ -59,17 +59,29 @@ func (s *Store) ReadEventLog(ctx context.Context, after eventsink.Cursor, limit 
 }
 
 func (s *Store) AdvanceEventSink(ctx context.Context, sinkID, owner string, c eventsink.Cursor, delivered, skipped int, ttl time.Duration) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE event_sink_cursors
+	return s.inKernelTx(ctx, func(tx pgx.Tx) error {
+		var locked string
+		if err := tx.QueryRow(ctx, `SELECT sink_id FROM event_sink_cursors WHERE sink_id=$1 FOR UPDATE`, sinkID).Scan(&locked); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrLeaseLost
+			}
+			return err
+		}
+		// Evaluate expiry after acquiring the lock; an UPDATE predicate alone
+		// can be evaluated before a lock wait that outlives the lease.
+		tag, err := tx.Exec(ctx, `UPDATE event_sink_cursors
 		SET tx_id=$3::text::xid8, global_seq=$4, delivered=delivered+$5, skipped=skipped+$6,
-		    lease_until=now() + make_interval(secs => $7), updated_at=now()
-		WHERE sink_id=$1 AND owner=$2`, sinkID, owner, strconv.FormatInt(c.TxID, 10), c.GlobalSeq, delivered, skipped, ttl.Seconds())
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.ErrLeaseLost
-	}
-	return nil
+		    lease_until=clock_timestamp() + make_interval(secs => $7), updated_at=clock_timestamp()
+		WHERE sink_id=$1 AND owner=$2 AND lease_until > clock_timestamp()
+		  AND (tx_id, global_seq) <= ($3::text::xid8, $4)`, sinkID, owner, strconv.FormatInt(c.TxID, 10), c.GlobalSeq, delivered, skipped, ttl.Seconds())
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrLeaseLost
+		}
+		return nil
+	})
 }
 
 // EventSinkStatus is a sink's cursor state (admin API).

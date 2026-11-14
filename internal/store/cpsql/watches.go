@@ -148,8 +148,28 @@ func (s *Store) FireWatch(ctx context.Context, f continuous.Firing) (bool, error
 		if err != nil {
 			return err
 		}
-		if w.Status != continuous.Active {
+		if w.Status != continuous.Active || wk.Status.Terminal() || w.Generation != wk.Generation ||
+			(f.WorkID != "" && f.WorkID != wk.ID) {
 			return nil
+		}
+		if f.Kind == "event" {
+			// An inbox retry may arrive after the Work has completed a cycle
+			// and registered a new watch. The Work row lock serializes this
+			// check with cycle completion and all other firings for the Work.
+			// Keep same-generation fan-out: one event may satisfy multiple
+			// watches, but it cannot start another generation of this Work.
+			var consumed bool
+			if err := tx.QueryRowContext(ctx, s.q(`SELECT EXISTS (
+				SELECT 1 FROM work_watches previous
+				JOIN watch_firings firing ON firing.tenant_id=previous.tenant_id AND firing.watch_id=previous.id
+				WHERE previous.tenant_id=? AND previous.work_id=? AND previous.generation<>?
+				AND firing.kind='event' AND firing.firing_id=?)`),
+				w.TenantID, w.WorkID, w.Generation, f.FiringID).Scan(&consumed); err != nil {
+				return err
+			}
+			if consumed {
+				return nil
+			}
 		}
 		res, err := tx.ExecContext(ctx, s.q(`INSERT INTO watch_firings (tenant_id, watch_id, firing_id, work_id, kind, payload, fired_at)
 			VALUES (?,?,?,?,?,?,?) ON CONFLICT (tenant_id, watch_id, firing_id) DO NOTHING`),
@@ -183,9 +203,6 @@ func (s *Store) FireWatch(ctx context.Context, f continuous.Firing) (bool, error
 			return work.ErrVersionConflict
 		}
 		fired = true
-		if wk.Status.Terminal() {
-			return nil
-		}
 		if err := s.appendEvents(ctx, tx, &wk, "system", "watch", now, []work.NewEvent{{Type: "work.watch_fired",
 			CausationID: f.FiringID, Payload: map[string]any{"watch_id": w.ID, "kind": f.Kind, "mode": w.Mode,
 				"purpose": w.Purpose, "status": status}}}); err != nil {

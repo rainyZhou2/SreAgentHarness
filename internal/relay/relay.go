@@ -105,23 +105,27 @@ func (r *Relay) Once(ctx context.Context) (int, error) {
 	if err != nil || len(batch) == 0 {
 		return 0, err
 	}
+	advanced := 0
 	for _, it := range batch {
-		pctx, cancel := context.WithTimeout(ctx, r.PublishTimeout)
+		pctx, cancel := context.WithTimeout(ctx, min(r.PublishTimeout, r.LeaseTTL/2))
 		err := r.Publisher.Publish(pctx, it.Event)
 		cancel()
 		if err != nil {
-			return 0, fmt.Errorf("publish event %s: %w", it.Event.ID, err)
+			return advanced, fmt.Errorf("publish event %s: %w", it.Event.ID, err)
 		}
+		// Checkpoint only published facts, renewing the lease between calls.
+		// A lost commit can redeliver one event; consumers still deduplicate.
+		if err := r.Store.AdvanceEventSink(ctx, r.ID, r.Owner, it.Cursor, 1, 0, r.LeaseTTL); err != nil {
+			return advanced, err
+		}
+		advanced++
 		if r.Observer != nil {
 			r.Observer.ObserveRelay("published")
 		}
 	}
 	last := batch[len(batch)-1]
-	if err := r.Store.AdvanceEventSink(ctx, r.ID, r.Owner, last.Cursor, len(batch), 0, r.LeaseTTL); err != nil {
-		return 0, err
-	}
 	if r.Observer != nil && !last.Event.CommittedAt.IsZero() {
 		r.Observer.ObserveRelayLag(time.Since(last.Event.CommittedAt))
 	}
-	return len(batch), nil
+	return advanced, nil
 }
