@@ -270,7 +270,10 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 	s.persistCommandKey(tenantID, runID, req.IdempotencyKey, c.ID)
 	s.appendEvent(tenantID, runID, "", "", "command.applied", "user", req.ActorID,
 		map[string]string{"command_id": c.ID})
-	s.commitBufferLocked(buf)
+	if err := s.commitBufferLocked(ctx, buf); err != nil {
+		s.restoreStateLocked(snap)
+		return domain.Command{}, err
+	}
 	return c, nil
 }
 

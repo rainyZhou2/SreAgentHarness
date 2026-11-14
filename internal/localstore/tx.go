@@ -1,6 +1,7 @@
 package localstore
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -13,9 +14,9 @@ import (
 // The local store keeps its working set in memory and mirrors every object to
 // SQLite. Commands must be atomic: a rejected command may not leave partial
 // state behind, and a command that fails midway must not persist half of its
-// writes. stateBuf buffers object writes and events for the duration of one
-// command; the caller commits or rolls the buffer back together with the
-// in-memory snapshot.
+// writes. stateBuf buffers object writes and events for a command or Kernel
+// mutation; the caller commits or rolls the buffer back together with the
+// in-memory snapshot. JSONL event emission is a separate durability boundary.
 
 type putOp struct {
 	kind   string
@@ -56,9 +57,9 @@ func newStateBuf() *stateBuf {
 	return &stateBuf{puts: map[string]putOp{}, dels: map[string]struct{}{}}
 }
 
-// stateSnapshot is a shallow copy of every map a command can mutate. Values
-// are structs; handlers replace values instead of mutating shared pointees, so
-// copying the map is enough to restore the previous state.
+// stateSnapshot copies the maps and mutable slices touched by buffered
+// commands and Kernel operations. Other nested data is replaced by handlers
+// rather than modified through shared pointers.
 type stateSnapshot struct {
 	runs        map[string]domain.Run
 	runByKey    map[string]string
@@ -95,6 +96,7 @@ type stateSnapshot struct {
 	memories    map[string]memoryRec
 	memHits     map[string][]memoryHitRec
 	compactions map[string]compactRec
+	snapshots   map[string]string
 }
 
 func cloneMap[K comparable, V any](m map[K]V) map[K]V {
@@ -127,14 +129,14 @@ func (s *Store) snapshotStateLocked() *stateSnapshot {
 		events: cloneSliceMap(s.events), eventCache: cloneMap(s.eventCache), eventSeq: cloneMap(s.eventSeq),
 		sessions: cloneMap(s.sessions), sessionKey: cloneMap(s.sessionKey), branches: cloneMap(s.branches),
 		turns: cloneMap(s.turns), messages: cloneSliceMap(s.messages), profiles: cloneMap(s.profiles),
-		flows: cloneMap(s.flows), flowInputs: cloneMap(s.flowInputs), intents: cloneMap(s.intents),
+		flows: cloneFlows(s.flows), flowInputs: cloneMap(s.flowInputs), intents: cloneMap(s.intents),
 		intentStep: cloneMap(s.intentStep), approvals: cloneMap(s.approvals), decisions: cloneSliceMap(s.decisions),
 		grants: cloneMap(s.grants), kv: cloneMap(s.kv), effects: cloneMap(s.effects), outbox: cloneMap(s.outbox),
 		commands: cloneMap(s.commands), cmdKey: cloneMap(s.cmdKey), thoughts: cloneSliceMap(s.thoughts),
 		caps: cloneSliceMap(s.caps), extensions: cloneMap(s.extensions), toolOff: cloneNestedMap(s.toolOff),
 		outputRevs: cloneSliceMap(s.outputRevs), modelReqs: cloneMap(s.modelReqs),
 		checkpoints: cloneMap(s.checkpoints), memories: cloneMap(s.memories), memHits: cloneSliceMap(s.memHits),
-		compactions: cloneMap(s.compactions),
+		compactions: cloneMap(s.compactions), snapshots: cloneMap(s.snapshots),
 	}
 }
 
@@ -151,6 +153,7 @@ func (s *Store) restoreStateLocked(sn *stateSnapshot) {
 	s.outputRevs, s.modelReqs = sn.outputRevs, sn.modelReqs
 	s.checkpoints, s.memories, s.memHits = sn.checkpoints, sn.memories, sn.memHits
 	s.compactions = sn.compactions
+	s.snapshots = sn.snapshots
 }
 
 func (s *Store) execPut(op putOp) {
@@ -159,19 +162,70 @@ func (s *Store) execPut(op putOp) {
 		op.kind, op.id, op.parent, op.seq, op.data)
 }
 
-// commitBufferLocked writes buffered objects first and then the events. Event
-// appends re-save their run with the advanced event cursor, so the order
-// matters for LastEventSeq.
-func (s *Store) commitBufferLocked(buf *stateBuf) {
+// commitBufferLocked commits buffered objects in one SQLite transaction and
+// propagates failures before emitting events. JSONL events remain a separate
+// durability boundary; this transaction does not make the event log atomic
+// with the object state.
+func (s *Store) commitBufferLocked(ctx context.Context, buf *stateBuf) error {
 	s.buf = nil
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	for _, op := range buf.puts {
-		s.execPut(op)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO objects(kind,id,parent,seq,data) VALUES(?,?,?,?,?)
+			ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent, seq=excluded.seq, data=excluded.data`,
+			op.kind, op.id, op.parent, op.seq, op.data); err != nil {
+			return err
+		}
 	}
 	for key := range buf.dels {
 		kind, id := splitObjectKey(key)
-		_, _ = s.db.Exec(`DELETE FROM objects WHERE kind=? AND id=?`, kind, id)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM objects WHERE kind=? AND id=?`, kind, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	for _, e := range buf.events {
 		s.appendEventNow(e.tenant, e.runID, e.stepID, e.attemptID, e.typ, e.actorType, e.actorID, e.payload, e.at)
 	}
+	return nil
+}
+
+// cloneFlows copies mutable node slices: finishing a child mutates its parent
+// node in place, so a shallow map clone cannot roll that mutation back.
+func cloneFlows(in map[string]domain.FlowSnapshot) map[string]domain.FlowSnapshot {
+	out := cloneMap(in)
+	for key, flow := range out {
+		flow.Nodes = append([]domain.FlowNodeRun(nil), flow.Nodes...)
+		out[key] = flow
+	}
+	return out
+}
+
+// withStateTxLocked shares the existing command buffer with Kernel writes.
+// The caller holds mu. Failed operations restore both execution objects and
+// ephemeral context snapshots; events are emitted only after object commit.
+func (s *Store) withStateTxLocked(ctx context.Context, mutate func() error) (err error) {
+	snap := s.snapshotStateLocked()
+	buf := newStateBuf()
+	s.buf = buf
+	committed := false
+	defer func() {
+		s.buf = nil
+		if !committed {
+			s.restoreStateLocked(snap)
+		}
+	}()
+	if err := mutate(); err != nil {
+		return err
+	}
+	if err := s.commitBufferLocked(ctx, buf); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
