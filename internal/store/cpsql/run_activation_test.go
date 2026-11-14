@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/work"
 )
@@ -35,6 +37,39 @@ func TestRunActivationAuthority(t *testing.T) {
 		if err := s.CheckRunActivation(ctx, req); err != nil {
 			t.Fatal(err)
 		}
+		calls := 0
+		serialization := &pgconn.PgError{Code: "40001", Message: "callback result may already be committed"}
+		s.TxRetries = 3
+		if err := s.WithRunActivation(ctx, req, func(context.Context) error {
+			calls++
+			return serialization
+		}); !errors.Is(err, serialization) || calls != 1 {
+			t.Fatalf("activation callback replayed: calls=%d err=%v", calls, err)
+		}
+		if err := s.WithRunActivation(ctx, req, nil); !errors.Is(err, work.ErrInvalid) {
+			t.Fatalf("nil activation accepted: %v", err)
+		}
+		// Cancelling the caller must not release the Work lock until an
+		// already-entered Kernel database callback has returned.
+		activationCtx, stopActivation := context.WithCancel(ctx)
+		err = s.WithRunActivation(activationCtx, req, func(context.Context) error {
+			stopActivation()
+			cancelCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer stop()
+			_, err := s.ApplyWork(cancelCtx, work.Mutation{TenantID: tn, WorkID: w.ID, ExpectedVersion: w.Version,
+				ActorType: "system", ActorID: "cancel", Status: st(work.StatusCancelled)})
+			if err == nil || !errors.Is(cancelCtx.Err(), context.DeadlineExceeded) {
+				t.Errorf("caller cancellation released authority before callback returned: err=%v context=%v", err, cancelCtx.Err())
+			}
+			return activationCtx.Err()
+		})
+		stopActivation()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("activation cancellation: %v", err)
+		}
+		if err := s.CheckRunActivation(ctx, req); err != nil {
+			t.Fatalf("failed callback changed Work or leaked the lock: %v", err)
+		}
 		for _, tc := range []struct {
 			name   string
 			change func(*work.RunActivation)
@@ -52,6 +87,10 @@ func TestRunActivationAuthority(t *testing.T) {
 				tc.change(&r)
 				if err := s.CheckRunActivation(ctx, r); !errors.Is(err, tc.want) {
 					t.Fatalf("got %v want %v", err, tc.want)
+				}
+				called := false
+				if err := s.WithRunActivation(ctx, r, func(context.Context) error { called = true; return nil }); !errors.Is(err, tc.want) || called {
+					t.Fatalf("invalid authority entered callback=%v err=%v want=%v", called, err, tc.want)
 				}
 			})
 		}

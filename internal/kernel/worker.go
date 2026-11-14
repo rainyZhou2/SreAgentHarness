@@ -1361,6 +1361,9 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		}
 	}
 	desc := rules.Effective(tool.Descriptor())
+	if lease.WorkOwned && desc.Risk.HasSideEffects() {
+		return domain.StepSuccess{}, fmt.Errorf("work-owned run must use the Action runtime for tool %q: %w", call.Name, domain.ErrNotDispatched)
+	}
 	target := tools.Target(desc, call.Args)
 	// The approved intent must still describe exactly what we are about to run.
 	if desc.Version != lease.Intent.ToolVersion || desc.Risk != lease.Intent.RiskClass || target != lease.Intent.Target ||
