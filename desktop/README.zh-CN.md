@@ -61,12 +61,12 @@ Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（se
 - 数据保存在 `<用户配置目录>/sre-harness-desktop/local/`：
   ```text
   local/
-    harness.db          SQLite 状态与查询索引
-    events/local/*.jsonl 追加式执行日志（source of truth）
+    harness.db          SQLite 状态、事件及查询索引
+    events/local/*.jsonl 保留的历史审计归档（如存在）
     artifacts/
     logs/
   ```
-- 执行事件先写 JSONL；SQLite 只保存文件偏移索引，可通过 `RebuildEventIndex` 从 JSONL 重建。
+- 执行事件、状态和事件游标在同一个 SQLite 事务中提交。Schema v2 先生成数据库快照，再校验并导入旧 JSONL；损坏或缺失的历史会阻止升级。原归档保留不变，新事件仅写 SQLite。`RebuildEventIndex` 从 SQLite 事件重建查询索引，不再重放归档。旧二进制拒绝打开 v2；降级必须停止运行时，恢复升级前数据库及其原始归档，且会失去备份后的变更。
 - **模型**、**MCP**、**HTTP 工具**、**技能** 和 **工具开关** 与团队模式共用同一套 `/v1/extensions` API 和设置界面；配置字段仍是 provider / model / base URL / API key，保存在本地 SQLite。
 - 本地模式支持完整命令：pause/resume/cancel、approve/reject、provide input、retry、resolve unknown、replace pending input、override result、inject evidence、migrate profile。需要版本校验的命令必须携带 `expected_version`；幂等键跨重启保留；被拒绝的命令不会留下部分状态；取消会级联到子 Run 和未决审批。
 - 同样的状态能力离线可用：压缩摘要与 pinned 记忆命中会进入后续步骤，每个已提交步骤都会记录 checkpoint 并可 fork，步骤输出修订可查询，memory / graph / 评测 API 由本地存储直接提供。
