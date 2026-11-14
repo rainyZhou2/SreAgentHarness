@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/tools"
 )
 
@@ -76,10 +77,15 @@ func (t *ToolExecutor) Execute(ctx context.Context, p Plan, key string) (json.Ra
 	return t.Tool.Invoke(ctx, key, args)
 }
 
-// Inspect calls the inspect tool when configured.
+// Inspect only invokes a tool explicitly declared read-only. Custom Executor
+// implementations still require certification of their read-only Inspect
+// contract; descriptor checks cannot sandbox arbitrary implementation code.
 func (t *ToolExecutor) Inspect(ctx context.Context, p Plan) (InspectResult, error) {
 	if t.InspectTool == nil {
 		return InspectResult{}, ErrUnsupported
+	}
+	if t.InspectTool.Descriptor().Risk != domain.RiskR0 {
+		return InspectResult{}, fmt.Errorf("%w: inspection tool must declare R0 read-only risk", ErrUnsupported)
 	}
 	args, err := t.args(p)
 	if err != nil {
