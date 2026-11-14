@@ -61,12 +61,12 @@ The app starts in **Local runtime** mode by default:
 - data lives under `<user config dir>/sre-harness-desktop/local/`:
   ```text
   local/
-    harness.db          SQLite state and query indexes
-    events/local/*.jsonl append-only execution log (source of truth)
+    harness.db          SQLite state, events and query indexes
+    events/local/*.jsonl retained legacy audit archives, if present
     artifacts/
     logs/
   ```
-- execution events are written to JSONL first; SQLite only stores byte-range indexes. `RebuildEventIndex` can rebuild the index from the JSONL files.
+- execution events, state changes and event cursors commit in one SQLite transaction. Schema v2 verifies and imports legacy JSONL events after taking a database snapshot; corrupt or incomplete histories stop the upgrade. Archives remain untouched, and new events are stored only in SQLite. `RebuildEventIndex` rebuilds SQLite lookup indexes without replaying archives. Older binaries refuse schema v2; downgrade requires stopping the runtime and restoring the pre-upgrade database plus its original archives, discarding post-backup changes.
 - **Models**, **MCP servers**, **HTTP tools**, **skills** and **tool toggles** use the same `/v1/extensions` API and settings UI as team mode. Specs keep the same provider/model/base URL/API key fields; they are stored in the local SQLite database.
 - Local mode supports the full command set: pause/resume/cancel, approve/reject, provide input, retry, resolve unknown, replace pending input, override result, inject evidence and migrate profile. Version-guarded commands require `expected_version`; idempotency keys survive restarts; a rejected command leaves no partial state; cancel cascades to child runs and pending approvals.
 - The same state surface is available offline: compaction summaries and pinned memory hits feed later steps, checkpoints are recorded per committed step and can be forked, step output revisions are queryable, and the memory, graph and evaluation APIs are served by the local store.
