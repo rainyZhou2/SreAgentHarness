@@ -87,9 +87,21 @@ func TestUnknownEffectIsNeverReplayed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Actions) != 1 || res.Actions[0] != "deployment.rollback:EFFECT_UNKNOWN" || res.Scorecard.UnresolvedEffects != 1 ||
+	if len(res.Actions) != 1 || res.Actions[0] != "deployment.rollback:MANUAL_RECOVERY" || res.Scorecard.UnresolvedEffects != 1 ||
 		res.Scorecard.RepeatedUnknownEffects != 0 || !res.HorizonReached || !res.Passed {
 		t.Fatalf("%+v", res)
+	}
+	if res.Dispatches["deployment.rollback"] != 1 {
+		t.Fatalf("unknown effect dispatched more than once: %+v", res.Dispatches)
+	}
+	inspections := 0
+	for _, event := range res.Events {
+		if event == "work.action_reconciled" {
+			inspections++
+		}
+	}
+	if inspections != 1 {
+		t.Fatalf("unknown effect must be inspected once before manual recovery: %d", inspections)
 	}
 }
 
