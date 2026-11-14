@@ -161,6 +161,7 @@ type OutboxMessage struct {
 
 // CreateRunRequest creates a run whose goal artifact is already stored.
 type CreateRunRequest struct {
+	WorkOwner      *WorkRunOwner
 	TenantID       string
 	IncidentID     *string
 	ProfileID      string

@@ -124,6 +124,13 @@ const (
 // HasSideEffects reports whether a retry could duplicate an external effect.
 func (r RiskClass) HasSideEffects() bool { return r != RiskR0 }
 
+// WorkRunOwner is immutable reservation provenance. Work links remain execution authority.
+type WorkRunOwner struct {
+	WorkID     string `json:"work_id"`
+	Generation int    `json:"generation"`
+	StageID    string `json:"stage_id"`
+}
+
 type Run struct {
 	ID                string       `json:"id"`
 	TenantID          string       `json:"tenant_id"`
@@ -157,6 +164,8 @@ type Run struct {
 	RolloutID         *string      `json:"rollout_id,omitempty"`
 	CreatedAt         time.Time    `json:"created_at"`
 	UpdatedAt         time.Time    `json:"updated_at"`
+
+	WorkOwner *WorkRunOwner `json:"work_owner,omitempty"`
 }
 
 // DisplayStatus derives the transitional "pausing"/"cancelling" view (§4.2).

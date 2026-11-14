@@ -110,6 +110,24 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (domain.Run
 // locked (caller must save). Existing runs (same idempotency key) are
 // returned with isNew=false and must not be modified.
 func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest) (*runTx, bool, error) {
+	if err := domain.ValidateWorkRunReservation(req); err != nil {
+		return nil, false, err
+	}
+	// Serialize retries before quota checks. A waiter must observe the committed
+	// reservation even when that reservation consumed the final queue slot.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, hashStrings(req.TenantID, req.IdempotencyKey)); err != nil {
+		return nil, false, err
+	}
+	existing, err := scanRun(tx.QueryRow(ctx, `SELECT `+runCols+` FROM agent_runs WHERE tenant_id=$1 AND create_idempotency_key=$2`, req.TenantID, req.IdempotencyKey))
+	if err == nil {
+		if !domain.SameWorkRunOwner(existing.WorkOwner, req.WorkOwner) {
+			return nil, false, &domain.RejectedError{Reason: "work_run_owner_mismatch"}
+		}
+		return &runTx{s: s, tx: tx, run: existing}, false, nil
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
+		return nil, false, err
+	}
 	initiatorKind := req.InitiatorType // what the caller called itself, for the event
 	if initiatorKind == "" {
 		initiatorKind = "user"
@@ -129,17 +147,20 @@ func (s *Store) createRunTx(ctx context.Context, tx pgx.Tx, req CreateRunRequest
 		}
 	}
 	var inserted string
-	err := tx.QueryRow(ctx, `INSERT INTO agent_runs (id, tenant_id, incident_id, profile_id, profile_version,
+	err = tx.QueryRow(ctx, `INSERT INTO agent_runs (id, tenant_id, incident_id, profile_id, profile_version,
 		status, create_idempotency_key, goal_ref, initiator_type, initiator_id, session_id, branch_id, turn_id,
-		parent_run_id, parent_step_id, flow_node_id, flow_depth, forked_from_checkpoint_id, rollout_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		parent_run_id, parent_step_id, flow_node_id, flow_depth, forked_from_checkpoint_id, rollout_id, work_owner)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		ON CONFLICT (tenant_id, create_idempotency_key) DO NOTHING RETURNING id`,
 		id, req.TenantID, req.IncidentID, req.ProfileID, req.ProfileVersion, status, req.IdempotencyKey,
 		req.GoalRef, req.InitiatorType, nullable(req.InitiatorID), req.SessionID, req.BranchID, req.TurnID,
-		req.ParentRunID, req.ParentStepID, req.FlowNodeID, req.FlowDepth, req.ForkedFrom, req.RolloutID).Scan(&inserted)
+		req.ParentRunID, req.ParentStepID, req.FlowNodeID, req.FlowDepth, req.ForkedFrom, req.RolloutID, req.WorkOwner).Scan(&inserted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runCols+` FROM agent_runs
 			WHERE tenant_id=$1 AND create_idempotency_key=$2`, req.TenantID, req.IdempotencyKey))
+		if err == nil && !domain.SameWorkRunOwner(run.WorkOwner, req.WorkOwner) {
+			return nil, false, &domain.RejectedError{Reason: "work_run_owner_mismatch"}
+		}
 		return &runTx{s: s, tx: tx, run: run}, false, err
 	}
 	if err != nil {
