@@ -10,13 +10,16 @@ import (
 // is held only while a step executes; runs waiting for approval or retry hold
 // none, because they are not executing at all.
 type Pool struct {
-	w   *Worker
-	sem chan struct{}
-	wg  sync.WaitGroup
+	w        *Worker
+	sem      chan struct{}
+	wg       sync.WaitGroup
+	mu       sync.Mutex // serializes admission with the start of drain
+	draining bool
+	drain    chan struct{}
 }
 
 func NewPool(w *Worker, maxInflight int) *Pool {
-	return &Pool{w: w, sem: make(chan struct{}, maxInflight)}
+	return &Pool{w: w, sem: make(chan struct{}, maxInflight), drain: make(chan struct{})}
 }
 
 // Handle matches notify.Handler: it blocks until a slot is free (backpressure
@@ -27,8 +30,19 @@ func (p *Pool) Handle(ctx context.Context, runID string, done func(ack bool, red
 	case <-ctx.Done():
 		done(false, 0)
 		return
+	case <-p.drain:
+		done(false, 0)
+		return
+	}
+	p.mu.Lock()
+	if p.draining {
+		p.mu.Unlock()
+		<-p.sem
+		done(false, 0)
+		return
 	}
 	p.wg.Add(1)
+	p.mu.Unlock()
 	go func() {
 		defer p.wg.Done()
 		defer func() { <-p.sem }()
@@ -37,5 +51,14 @@ func (p *Pool) Handle(ctx context.Context, runID string, done func(ack bool, red
 	}()
 }
 
-// Wait blocks until in-flight executions finish (graceful shutdown).
-func (p *Pool) Wait() { p.wg.Wait() }
+// Wait permanently closes admission, then waits for accepted executions to
+// finish. The shared lock ensures no Add can race with a zero-count Wait.
+func (p *Pool) Wait() {
+	p.mu.Lock()
+	if !p.draining {
+		p.draining = true
+		close(p.drain)
+	}
+	p.mu.Unlock()
+	p.wg.Wait()
+}

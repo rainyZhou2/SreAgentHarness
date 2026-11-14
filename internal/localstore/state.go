@@ -52,8 +52,18 @@ func (s *Store) createCheckpointLocked(r domain.Run, lease domain.Lease, res dom
 			cursor = &v
 		}
 	}
+	lastEventSeq := s.runs[r.ID].LastEventSeq
+	if s.buf != nil {
+		// Kernel transactions defer event emission until object commit. The
+		// checkpoint still pins the logical boundary after this Step's events.
+		for _, event := range s.buf.events {
+			if event.runID == r.ID {
+				lastEventSeq++
+			}
+		}
+	}
 	cp := checkpointRec{ID: newID(), RunID: r.ID, LastCommittedStepSeq: lease.StepSeq,
-		LastEventSeq: s.runs[r.ID].LastEventSeq, ProfileID: r.ProfileID, ProfileVersion: r.ProfileVersion,
+		LastEventSeq: lastEventSeq, ProfileID: r.ProfileID, ProfileVersion: r.ProfileVersion,
 		CompactionEpoch: r.CompactionEpoch, ManifestRef: res.CheckpointRef, ManifestHash: res.CheckpointHash,
 		Replayable: true, CreatedAt: now()}
 	if lease.ContextSnapshotID != "" {

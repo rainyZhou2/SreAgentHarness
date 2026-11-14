@@ -18,6 +18,24 @@ import (
 func (s *Store) ClaimStep(ctx context.Context, runID, workerID string, ttl time.Duration) (domain.Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var lease domain.Lease
+	var claimErr error
+	err := s.withStateTxLocked(ctx, func() error {
+		lease, claimErr = s.claimStepLocked(ctx, runID, workerID, ttl)
+		// Recovery, desired-state settlement and approval parking can change
+		// state even when no Step is runnable. Those changes must commit.
+		if errors.Is(claimErr, domain.ErrNoRunnableStep) {
+			return nil
+		}
+		return claimErr
+	})
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	return lease, claimErr
+}
+
+func (s *Store) claimStepLocked(ctx context.Context, runID, workerID string, ttl time.Duration) (domain.Lease, error) {
 	r, ok := s.runs[runID]
 	if !ok {
 		return domain.Lease{}, domain.ErrNotFound
@@ -233,30 +251,76 @@ func (s *Store) consumeGrantLocked(st domain.Step, in domain.ActionIntent) (bool
 	return false, nil
 }
 
+// leasedRunLocked checks the same live ownership contract as the PostgreSQL
+// store. A fence alone does not authorize writes after lease expiry, nor may
+// an expired holder revive its own lease before recovery notices it.
+func (s *Store) leasedRunLocked(lease domain.Lease) (domain.Run, error) {
+	r, ok := s.runs[lease.RunID]
+	if !ok || r.TenantID != lease.TenantID || r.Status != domain.RunRunning ||
+		r.FenceToken != lease.FenceToken || r.LeaseOwner == nil ||
+		*r.LeaseOwner != lease.WorkerID || r.LeaseUntil == nil || !r.LeaseUntil.After(now()) {
+		return domain.Run{}, domain.ErrLeaseLost
+	}
+	return r, nil
+}
+
 func (s *Store) RenewLease(ctx context.Context, lease domain.Lease, ttl time.Duration) (domain.DesiredState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.runs[lease.RunID]
-	if !ok || r.FenceToken != lease.FenceToken || r.LeaseOwner == nil || *r.LeaseOwner != lease.WorkerID ||
-		r.Status != domain.RunRunning {
-		return "", domain.ErrLeaseLost
+	r, err := s.leasedRunLocked(lease)
+	if err != nil {
+		return "", err
 	}
 	u := now().Add(ttl)
 	r.LeaseUntil = &u
-	s.saveRun(r)
+	// A heartbeat changes only this Run and emits no events. Keep the
+	// candidate private until its SQLite transaction commits, rather than
+	// snapshotting all historical state on every renewal.
+	data, err := json.Marshal(r)
+	if err != nil {
+		return "", err
+	}
+	buf := newStateBuf()
+	buf.puts[objectKey("run", r.ID)] = putOp{kind: "run", id: r.ID, data: data}
+	if err := s.commitBufferLocked(ctx, buf); err != nil {
+		return "", err
+	}
+	s.runs[r.ID] = r
 	return r.DesiredState, nil
 }
 
 func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domain.StepSuccess) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.runs[lease.RunID]
-	if !ok || r.FenceToken != lease.FenceToken {
-		return domain.ErrLeaseLost
+	return s.withStateTxLocked(ctx, func() error { return s.commitSuccessLocked(ctx, lease, res) })
+}
+
+func (s *Store) commitSuccessLocked(ctx context.Context, lease domain.Lease, res domain.StepSuccess) error {
+	r, err := s.leasedRunLocked(lease)
+	if err != nil {
+		return err
 	}
 	att, ok := s.attempts[lease.AttemptID]
 	if !ok || att.Status != "RUNNING" || att.FenceToken != lease.FenceToken {
 		return domain.ErrLeaseLost
+	}
+	// Validate every KV write before touching the attempt, snapshot, or effect
+	// ledger. Simulate versions in order so duplicate keys obey the same CAS
+	// semantics as the eventual writes, without leaving a partial commit.
+	versions := make(map[string]int64, len(res.KVWrites))
+	for _, w := range res.KVWrites {
+		if w.Key.Scope != "run" || w.Key.OwnerID != r.ID || w.Key.TenantID != r.TenantID {
+			return errors.New("step commits may only write run-private KV")
+		}
+		key := kvKey(w.Key)
+		version, seen := versions[key]
+		if !seen {
+			version = s.kv[key].Version
+		}
+		if w.ExpectedVersion != nil && *w.ExpectedVersion != version {
+			return domain.ErrVersionConflict
+		}
+		versions[key] = version + 1
 	}
 	delete(s.snapshots, lease.ContextSnapshotID)
 	end := now()
@@ -286,14 +350,8 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domai
 		s.saveEffect(eff)
 	}
 	for _, w := range res.KVWrites {
-		if w.Key.Scope != "run" || w.Key.OwnerID != r.ID || w.Key.TenantID != r.TenantID {
-			return errors.New("step commits may only write run-private KV")
-		}
 		cur := s.kv[kvKey(w.Key)]
 		v := cur.Version + 1
-		if w.ExpectedVersion != nil && *w.ExpectedVersion != cur.Version {
-			return domain.ErrVersionConflict
-		}
 		cur.Key, cur.Data, cur.SchemaID, cur.Version, cur.Deleted = w.Key, append([]byte(nil), w.Data...), w.SchemaID, v, w.Delete
 		if w.TTL > 0 {
 			t := now().Add(w.TTL)
@@ -401,9 +459,13 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res domai
 func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f domain.StepFailure) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.runs[lease.RunID]
-	if !ok || r.FenceToken != lease.FenceToken {
-		return domain.ErrLeaseLost
+	return s.withStateTxLocked(ctx, func() error { return s.commitFailureLocked(ctx, lease, f) })
+}
+
+func (s *Store) commitFailureLocked(ctx context.Context, lease domain.Lease, f domain.StepFailure) error {
+	r, err := s.leasedRunLocked(lease)
+	if err != nil {
+		return err
 	}
 	att, ok := s.attempts[lease.AttemptID]
 	if !ok || att.Status != "RUNNING" || att.FenceToken != lease.FenceToken {
@@ -471,8 +533,22 @@ func (s *Store) CommitFailure(ctx context.Context, lease domain.Lease, f domain.
 func (s *Store) PrepareEffect(ctx context.Context, lease domain.Lease, target string) (domain.EffectState, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r, ok := s.runs[lease.RunID]; !ok || r.FenceToken != lease.FenceToken {
-		return "", "", domain.ErrLeaseLost
+	var state domain.EffectState
+	var ref string
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		state, ref, err = s.prepareEffectLocked(ctx, lease, target)
+		return err
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return state, ref, nil
+}
+
+func (s *Store) prepareEffectLocked(ctx context.Context, lease domain.Lease, target string) (domain.EffectState, string, error) {
+	if _, err := s.leasedRunLocked(lease); err != nil {
+		return "", "", err
 	}
 	e, ok := s.effects[lease.IdempotencyKey]
 	if !ok {
@@ -500,10 +576,13 @@ func (s *Store) PrepareEffect(ctx context.Context, lease domain.Lease, target st
 func (s *Store) RecordEffectResult(ctx context.Context, lease domain.Lease, target, resultRef string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.runs[lease.RunID]
-	if !ok || r.Status != domain.RunRunning || r.FenceToken != lease.FenceToken || r.LeaseOwner == nil ||
-		*r.LeaseOwner != lease.WorkerID || r.LeaseUntil == nil || !r.LeaseUntil.After(now()) {
-		return domain.ErrLeaseLost
+	return s.withStateTxLocked(ctx, func() error { return s.recordEffectResultLocked(ctx, lease, target, resultRef) })
+}
+
+func (s *Store) recordEffectResultLocked(ctx context.Context, lease domain.Lease, target, resultRef string) error {
+	r, err := s.leasedRunLocked(lease)
+	if err != nil {
+		return err
 	}
 	e, ok := s.effects[lease.IdempotencyKey]
 	if !ok || e.State != "DISPATCHED" {
