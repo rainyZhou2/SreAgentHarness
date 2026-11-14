@@ -58,14 +58,14 @@ func newFakeRuns() *fakeRuns {
 	return &fakeRuns{runs: map[string]*fakeRun{}, byKey: map[string]string{}}
 }
 
-func (f *fakeRuns) StartRun(_ context.Context, req RunRequest) (string, error) {
+func (f *fakeRuns) ReserveRun(_ context.Context, req RunRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if id, ok := f.byKey[req.IdempotencyKey]; ok {
 		return id, nil
 	}
 	id := cpkit.NewID()
-	f.runs[id] = &fakeRun{req: req, state: RunState{Status: "RUNNING"}}
+	f.runs[id] = &fakeRun{req: req, state: RunState{Status: "PENDING_ACTIVATION"}}
 	f.byKey[req.IdempotencyKey] = id
 	f.order = append(f.order, id)
 	return id, nil
@@ -654,4 +654,20 @@ func TestChangeAndAlertCorrelateIntoOneWork(t *testing.T) {
 	if o, _ := h.store.GetEvent(h.ctx, "t1", old.InboxID); o.WorkID != "" || a2.WorkID == "" {
 		t.Fatalf("lookback ignored: %+v", o)
 	}
+}
+
+func (f *fakeRuns) ActivateRun(_ context.Context, req work.RunActivation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.runs[req.RunID]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	if r.state.Terminal {
+		return &domain.RejectedError{Reason: "run_terminal"}
+	}
+	if r.state.Status == "PENDING_ACTIVATION" {
+		r.state = RunState{Status: "RUNNING"}
+	}
+	return nil
 }

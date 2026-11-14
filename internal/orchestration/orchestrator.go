@@ -791,7 +791,7 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			if snapID != "" {
 				labels[SnapshotLabel] = snapID
 			}
-			runID, err := d.o.Runs.StartRun(ctx, RunRequest{TenantID: w.TenantID, ActorID: "work:" + w.ID, Goal: goal,
+			runID, err := d.o.Runs.ReserveRun(ctx, RunRequest{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation, StageID: stage.ID, ActorID: "work:" + w.ID, Goal: goal,
 				ProfileID: a.ProfileID, ProfileVersion: a.ProfileVersion, Mode: a.Mode, Services: w.Goal.SubjectRefs,
 				Labels: labels, Source: "work:" + string(w.Kind), IdempotencyKey: key})
 			if err != nil {
@@ -820,15 +820,14 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		d.o.Metrics.stage(string(stage.Type), "started")
 		m := work.Mutation{StageState: mustJSON(st), Links: links, AddRuns: len(links),
 			Events: []work.NewEvent{{Type: "work.runs_started", Payload: map[string]any{"stage_id": stage.ID,
-				"runs": st.Runs, "assignments": assignments}}}}
+				"runs": st.Runs, "assignments": assignments, "pending_activation": true}}}}
 		if plan.event != nil {
 			m.Events = append(m.Events, *plan.event)
 		}
 		if w.Status != work.StatusActive {
 			m.Status = statusPtr(work.StatusActive)
 		}
-		wake := now.Add(d.o.RunPoll)
-		return step{m: m, wake: &wake}, nil
+		return step{m: m, again: true}, nil
 	}
 
 	changed, needsHuman, allDone := false, false, true
@@ -858,6 +857,12 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 			rs = RunState{Status: "TIMEOUT", Terminal: true, FailureReason: "assignment time budget exceeded"}
 			r.Status, changed = rs.Status, true
 			linkStatus[r.RunID] = "CANCELLED"
+		}
+		if rs.Status == "PENDING_ACTIVATION" {
+			if err := d.o.Runs.ActivateRun(ctx, work.RunActivation{TenantID: w.TenantID, WorkID: w.ID,
+				RunID: r.RunID, Generation: w.Generation, StageID: stage.ID, ExpectedVersion: w.Version, LeaseOwner: d.o.Owner}); err != nil {
+				return step{}, fmt.Errorf("activate linked run %s: %w", r.RunID, err)
+			}
 		}
 		if !rs.Terminal {
 			allDone = false
@@ -1000,7 +1005,7 @@ func (d *driver) synthesize(ctx context.Context, envs []evidence.ResultEnvelope)
 	inputs := append([]evidence.ResultEnvelope(nil), envs...)
 	for _, h := range existing {
 		byKey[h.Key] = h
-		if h.Decision != nil && !h.Decision.CurrentFor(scope, h.Key) {
+		if h.Decision != nil && !h.CurrentDecisionFor(scope) {
 			continue
 		}
 		if len(envs) == 0 {
