@@ -28,6 +28,7 @@ coverage.*
 # superpowers plans/specs and v2 design doc stay local
 /docs/superpowers/
 /docs/v2-control-plane.md
+/docs/architecture/
 
 # workspace-local MCP/IDE config
 /.comate/
