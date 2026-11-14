@@ -61,9 +61,9 @@ jobs:
         with:
           go-version-file: go.mod
       - name: go test
-        run: go test ./... -count=1
+        run: go test -p 1 ./... -count=1
       - name: go test -race
-        run: go test -race ./... -count=1
+        run: go test -p 1 -race ./... -count=1
 
   local-mode:
     name: single-user local mode (no database)
