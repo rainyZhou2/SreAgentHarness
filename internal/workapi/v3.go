@@ -216,7 +216,7 @@ func (a *API) workView(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	v := protocol.View{Work: wk, WaitingOn: work.WaitingOn(wk, len(unmet) > 0 && wk.Status == work.StatusNew),
+	v := protocol.View{SchemaVersion: protocol.SchemaVersion, ContractVersion: protocol.ContractVersion, MinimumReaderVersion: protocol.MinimumReaderVersion, Work: wk, WaitingOn: work.WaitingOn(wk, len(unmet) > 0 && wk.Status == work.StatusNew),
 		Controls: protocol.Controls(wk.Status), LastSeq: wk.LastSeq}
 	for i, st := range wk.Template.Stages {
 		status := "pending"
@@ -247,17 +247,25 @@ func (a *API) workView(w http.ResponseWriter, r *http.Request) {
 	if dispatched {
 		v.CancelNote = "Cancelling stops further scheduling. Actions already dispatched are not undone; their effects stay tracked until they are verified or resolved by a human."
 	}
-	if outs, err := a.Store.ListOutcomes(ctx, p.Tenant, wk.ID, 1); err == nil && len(outs) > 0 {
+	outs, err := a.Store.ListOutcomes(ctx, p.Tenant, wk.ID, 1)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	if len(outs) > 0 {
 		v.Outcome = &protocol.OutcomeView{Verdict: string(outs[0].Verdict), EvaluatedAt: outs[0].EvaluatedAt, Reasons: outs[0].Reasons,
 			EvidenceID: outs[0].ID}
 	}
-	if kids, err := a.Store.Children(ctx, p.Tenant, wk.ID); err == nil {
-		for _, k := range kids {
-			n := work.GraphNode{ID: k.ID, ParentID: wk.ID, Depth: k.Depth, Kind: k.Kind, Status: k.Status, Title: k.Title, Queue: k.Queue,
-				Reason: k.Reason}
-			n.WaitingOn = work.WaitingOn(k, strings.HasPrefix(k.Reason, "held"))
-			v.Children = append(v.Children, n)
-		}
+	kids, err := a.Store.Children(ctx, p.Tenant, wk.ID)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	for _, k := range kids {
+		n := work.GraphNode{ID: k.ID, ParentID: wk.ID, Depth: k.Depth, Kind: k.Kind, Status: k.Status, Title: k.Title, Queue: k.Queue,
+			Reason: k.Reason}
+		n.WaitingOn = work.WaitingOn(k, strings.HasPrefix(k.Reason, "held"))
+		v.Children = append(v.Children, n)
 	}
 	etag(w, wk.Version)
 	writeJSON(w, http.StatusOK, v)

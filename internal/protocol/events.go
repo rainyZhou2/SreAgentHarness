@@ -77,16 +77,18 @@ const (
 
 // Event is one entry of the contract.
 type Event struct {
-	SchemaVersion int       `json:"schema_version"`
-	EventID       string    `json:"event_id"`
-	Sequence      int64     `json:"sequence,omitempty"`
-	OccurredAt    time.Time `json:"occurred_at"`
-	TenantID      string    `json:"tenant_id"`
-	WorkID        string    `json:"work_id,omitempty"`
-	RunID         string    `json:"run_id,omitempty"`
-	StepID        string    `json:"step_id,omitempty"`
-	ParentEventID string    `json:"parent_event_id,omitempty"`
-	Type          string    `json:"type"`
+	SchemaVersion        int       `json:"schema_version"`
+	ContractVersion      int       `json:"contract_version,omitempty"`
+	MinimumReaderVersion int       `json:"minimum_reader_version,omitempty"`
+	EventID              string    `json:"event_id"`
+	Sequence             int64     `json:"sequence,omitempty"`
+	OccurredAt           time.Time `json:"occurred_at"`
+	TenantID             string    `json:"tenant_id"`
+	WorkID               string    `json:"work_id,omitempty"`
+	RunID                string    `json:"run_id,omitempty"`
+	StepID               string    `json:"step_id,omitempty"`
+	ParentEventID        string    `json:"parent_event_id,omitempty"`
+	Type                 string    `json:"type"`
 	// Ephemeral events are not persisted and have no sequence.
 	Ephemeral bool            `json:"ephemeral,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
@@ -100,7 +102,7 @@ func (e Event) Durable() bool { return !e.Ephemeral && e.Sequence > 0 }
 // name, so a newer server never hides events from an older client — the
 // client skips what it does not know.
 func FromWork(e work.Event) Event {
-	out := Event{SchemaVersion: SchemaVersion, EventID: e.ID, Sequence: e.Seq, OccurredAt: e.OccurredAt, TenantID: e.TenantID,
+	out := Event{SchemaVersion: SchemaVersion, ContractVersion: ContractVersion, MinimumReaderVersion: MinimumReaderVersion, EventID: e.ID, Sequence: e.Seq, OccurredAt: e.OccurredAt, TenantID: e.TenantID,
 		WorkID: e.WorkID, ParentEventID: e.CausationID, Type: e.Type, Payload: e.Payload}
 	var p map[string]any
 	if len(e.Payload) > 0 {
@@ -210,7 +212,7 @@ func FromWorkEvents(evs []work.Event) []Event {
 // client that reconnects does not get it again and must not need it.
 func Delta(tenantID, workID, runID, text string, at time.Time) Event {
 	b, _ := json.Marshal(map[string]string{"text": text})
-	return Event{SchemaVersion: SchemaVersion, OccurredAt: at, TenantID: tenantID, WorkID: workID, RunID: runID,
+	return Event{SchemaVersion: SchemaVersion, ContractVersion: ContractVersion, MinimumReaderVersion: MinimumReaderVersion, OccurredAt: at, TenantID: tenantID, WorkID: workID, RunID: runID,
 		Type: ModelDelta, Ephemeral: true, Payload: b}
 }
 
@@ -218,8 +220,11 @@ func Delta(tenantID, workID, runID, text string, at time.Time) Event {
 // what, what it waits for, what was dispatched and may have had an effect,
 // and what the last independent outcome said.
 type View struct {
-	Work      work.Work `json:"work"`
-	WaitingOn string    `json:"waiting_on,omitempty"`
+	SchemaVersion        int       `json:"schema_version,omitempty"`
+	ContractVersion      int       `json:"contract_version,omitempty"`
+	MinimumReaderVersion int       `json:"minimum_reader_version,omitempty"`
+	Work                 work.Work `json:"work"`
+	WaitingOn            string    `json:"waiting_on,omitempty"`
 	// Controls say what an operator may do now. Cancelling stops further
 	// scheduling; it never undoes an action that was already dispatched.
 	Controls   []string         `json:"controls"`
