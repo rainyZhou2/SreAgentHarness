@@ -140,6 +140,14 @@ PostgreSQL（唯一真相）  +  NATS JetStream（唤醒与事件分发）
 - **事件平面**：Relay 以租约单活追尾事件日志，JetStream 按 Run 分发；SSE 网关补齐一次后只接收推送。
 - **内核只依赖接口**：不 import PostgreSQL、NATS 或模型 SDK，适配器可独立替换和测试。
 
+Work 控制面拥有长期目标，同一个 Kernel 拥有其 Run、Step 和 Attempt。Work 所属 Run 及其 Flow 子 Run 通过只读工具调查；生产变更通过 Action Runtime，将策略、审批和派发绑定到当前 Work generation。Run 预留、所有者关联和激活保留各自的持久恢复边界。
+
+模板可将 `repeat_from` 指向等待阶段。机器目标通过稳定观察窗口后，控制面在同一事务记录本代 Outcome、递增 generation 并注册下一次等待；Run、Action、费用预算按整个生命周期累计。`inference-continuous` 为推理 TTFT 事件提供这一模式，每代动作需要独立审批。未知副作用先通过只读 Inspect 检查，无法确认则进入人工恢复，不重新派发。自动 WorkBench 场景位于 `internal/workbench/testdata/sglang-continuous.json`，使用脚本化指标和隔离执行器，并非真实 Serving 集群验收。
+
+可选的 `inference-incident-v2` 模板并行运行必需的 Mitigation 子 Work 与可选的只读 RCA 子 Work。调用者必须提供机器恢复目标；Mitigation 通过 `inherit_success` 显式继承，父 Work 独立验证同一目标。恢复后，未得出确定结论的 RCA 可以继续运行。现有事故路由保持兼容；跨子 Work 报告聚合和完整的 Incident 正交状态投影尚未实现。
+
+Decision adjudicator v3 规范化裁决输入，并在 API、评分和复盘读取时重新验证当前 Ledger。历史 v2 裁决仍可重放，但需重新裁决才能成为当前有效结论。升级时应暂停调度和裁决写入、排空旧 Worker，将消费者和 Worker 一并升级后再恢复；v2 二进制不能解释新写入的 v3 裁决。回滚需要停止 v3 写入并保留读取已有 v3 记录的能力，不能只替换回旧二进制。这些新增字段无需 SQL migration。回滚到不理解 `repeat_from` 的旧二进制前，须暂停循环 Work。
+
 ### 编排 DSL
 
 Profile 可以设置 `strategy: "flow"` 并内嵌 `flow` 图。DSL 编译到现有 Step 引擎：父 Run 只做协调，agent / tool / subflow 节点各自成为子 Run，因此租约、Fence、审批、副作用账本和断点恢复全部复用。并行用子 Run 承载，join 节点汇总；子 Run 继承父 Profile 且只能收窄工具和权限。
@@ -240,6 +248,8 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 - **触发方式。** `POST /v1/memory/curation/run`（operator）、`harness memory curate`、桌面端**记忆 → 智能体学到的 → 立即检查记忆**；本地模式下，启动 1 分钟后检查一次，之后每隔 `HARNESS_CURATE_INTERVAL`（默认 24h，`off` 关闭）。团队服务端没有按租户的调度器，按需运行。建议存放在 `memory_curation_proposals`（迁移 0032，行级安全；本地存储里是 JSON 对象）。
 
 ### 记忆检索
+
+固定记忆和历史 `harness.memory_search` 结果在进入模型上下文前重新检查租户、当前版本、生命周期、有效期、环境和数据级别；个人固定记忆还必须属于发起 Run 的用户。原始 Artifact 保留为不可变审计记录。这一过滤尚不能撤回旧压缩摘要或笔记中已衍生的自由文本。
 
 - **历史运行搜索**：`harness.run_search`（R0，`query`，可选 `service`、`status`、`limit` ≤ 10）搜索已结束的运行——当时的问题、结论和假设——这样即使没人把某次排查提升为记忆，智能体也能找到它是怎么结束的。可见范围是调用者自己的对话和非用户发起的运行（触发器、定时、Work），看不到其他用户的对话，跳过 flow 的子运行和调用方自己，会脱敏，并标注为“历史”而非证据。它扫描最近的已结束运行（默认 300 条、6 秒预算），文本带缓存，被截断时会明确说明；数据库全文索引可以去掉这个上限。
 
@@ -407,7 +417,7 @@ Work 引擎（`HARNESS_WORK_ENGINE_ENABLED`）在可恢复的 run 内核之上�
 - **动作安全。** 资源身份（别名共享同一把锁，重建的资源使旧审批失效）、descriptor 契约哈希、未知效果会阻断对同一目标的后续写入、演练 / 白名单 / 范围 / 严格预授权、带事件号并需第二人复核的 break-glass，以及用于执行器契约的 `actiontest.Certify`。
 - **World 质量。** 采集器健康、来源权威度与冲突检测对生产动作失败关闭；过期事实被保留，不会被删除。
 - **Work 图。** 受父 Work 权限上限约束的子 Work、带原子环检测的依赖边、`children` 阶段、取消级联；按证据账本校验的结构化 agent Finding（看独立证据，不按多数票）；Runbook 注册表、由复盘生成的 Improvement Work 和意图路由。
-- **事件与协议。** 带版本的事件信封、签名来源、迟到事件处理、可追溯的关联决策与基于拓扑的线索。稳定的事件契约（`?protocol=1`）、统一的 `/v1/works/{id}/view`，以及支持断线续传 `Subscribe` 的 Go SDK。
+- **事件与协议。** 带版本的事件信封、签名来源、迟到事件处理、可追溯的关联决策与基于拓扑的线索。稳定的事件契约（`?protocol=1`）、统一的 `/v1/works/{id}/view`，以及支持断线续传 `Subscribe` 的 Go SDK。事件、分页和快照声明 schema、contract 与 minimum reader 版本；新 SDK 兼容旧 v1 格式，但遇到不兼容版本、损坏帧或序号缺口会停止读取并保留最后有效 Cursor。终态订阅会读取至所捕获快照的 `LastSeq` 后才结束；此边界之后新增的审计事件需要再次订阅。旧客户端二进制仍需维持 v1 服务端语义，不兼容变更须使用新版本端点。Run 事件中继逐条持久化成功前缀，Cursor 在行锁后复核租约且不可倒退；接收器每次重试前续租，外部投递仍为至少一次语义。
 - **AI 基础设施。** 基于 UUID 的 GPU 身份（换卡与 MIG 变化）、ECC/NVLink/PCIe 信号、TPOT/E2E/缓存/prefill/decode 信号、prefill/decode 诊断、带守卫的 `serving.scale_prefill|decode`、成本模型，以及 S3/MinIO 制品存储。
 - **规则即代码。** `monitoring.rule_validate`、`monitoring.rule_propose`（R0）和 `monitoring.apply_via_gitops`（R2，仅通过 pull request）。
 
