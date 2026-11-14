@@ -1,0 +1,299 @@
+{
+  "name": "sglang-continuous-unknown-effect",
+  "description": "Two SGLang TTFT incidents in one durable Work: duplicate signals, separate approvals, unknown dispatch results resolved by inspection, independently verified outcomes, and a fresh wait generation.",
+  "environment": "production",
+  "templates": [
+    {
+      "id": "sglang-continuous",
+      "kind": "ai_infra",
+      "stages": [
+        {
+          "id": "observe",
+          "type": "wait",
+          "wait": {
+            "mode": "event",
+            "predicate": {
+              "sources": [
+                "inference"
+              ],
+              "event_types": [
+                "inference.ttft_breach"
+              ]
+            }
+          }
+        },
+        {
+          "id": "investigate",
+          "type": "run",
+          "phase": "investigate",
+          "run": {
+            "goal": "TTFT breach on ${subjects}: tell prefill from decode"
+          }
+        },
+        {
+          "id": "mitigate",
+          "type": "action",
+          "phase": "mitigate",
+          "on_failure": "investigate",
+          "action": {
+            "from_proposal": "investigate",
+            "allowed": [
+              "serving.scale_prefill",
+              "serving.scale_decode"
+            ]
+          }
+        },
+        {
+          "id": "verify",
+          "type": "verify",
+          "phase": "verify",
+          "on_failure": "investigate",
+          "on_timeout": "block",
+          "verify": {
+            "recheck_every": "1m",
+            "timeout": "30m"
+          }
+        }
+      ],
+      "repeat_from": "observe",
+      "limits": {
+        "max_runs": 10,
+        "max_actions": 4,
+        "max_duration": "24h"
+      }
+    }
+  ],
+  "work": {
+    "kind": "ai_infra",
+    "title": "TTFT p95 above SLO on llama",
+    "template": "sglang-continuous",
+    "goal": {
+      "intent": "restore time-to-first-token within SLO",
+      "subject_refs": [
+        "deployment://prod/llama"
+      ],
+      "success": {
+        "stable_for": "5m",
+        "all_of": [
+          {
+            "id": "ttft",
+            "kind": "metric",
+            "window": "3m",
+            "metric": {
+              "source": "inference",
+              "query": "ttft_p95",
+              "aggregate": "max",
+              "operator": "<",
+              "threshold": 0.5
+            }
+          },
+          {
+            "id": "tpot",
+            "kind": "metric",
+            "window": "3m",
+            "metric": {
+              "source": "inference",
+              "query": "tpot_p95",
+              "aggregate": "max",
+              "operator": "<",
+              "threshold": 0.05
+            }
+          },
+          {
+            "id": "cost",
+            "kind": "metric",
+            "window": "3m",
+            "metric": {
+              "source": "inference",
+              "query": "hourly_cost_usd",
+              "aggregate": "max",
+              "operator": "<=",
+              "threshold": 64
+            }
+          }
+        ]
+      }
+    }
+  },
+  "metrics": [
+    {
+      "source": "inference",
+      "query": "ttft_p95",
+      "points": [
+        {
+          "at": "0s",
+          "v": 1.8
+        },
+        {
+          "at": "20m",
+          "v": 1.8
+        }
+      ]
+    },
+    {
+      "source": "inference",
+      "query": "tpot_p95",
+      "points": [
+        {
+          "at": "0s",
+          "v": 0.031
+        }
+      ]
+    },
+    {
+      "source": "inference",
+      "query": "hourly_cost_usd",
+      "points": [
+        {
+          "at": "0s",
+          "v": 48
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "at": "1m",
+      "source_type": "metric",
+      "source_ref": "inference://llama/prefill_queue",
+      "quality": "valid",
+      "relation": "supports",
+      "kind": "observation",
+      "independence_group": "inference://llama/prefill_queue",
+      "trust_tier": "T3",
+      "summary": "prefill queue 42 (limit 16); decode queue 1"
+    },
+    {
+      "at": "1m",
+      "source_type": "metric",
+      "source_ref": "inference://llama/tpot_p95",
+      "quality": "valid",
+      "relation": "correlates",
+      "kind": "observation",
+      "independence_group": "inference://llama/tpot_p95",
+      "trust_tier": "T3",
+      "summary": "TPOT p95 31ms, inside its 50ms SLO"
+    }
+  ],
+  "runs": [
+    {
+      "stage": "investigate",
+      "duration": "3m",
+      "tool_calls": 6,
+      "result": {
+        "answer": "TTFT is high while TPOT holds and only the prefill queue is backed up: prefill saturation. Scale the prefill pool by two.",
+        "hypotheses": [
+          {
+            "id": "h1",
+            "statement": "the prefill pool of llama is saturated",
+            "status": "VERIFIED",
+            "supports": [
+              "inference://llama/prefill_queue",
+              "inference://llama/tpot_p95"
+            ]
+          }
+        ],
+        "loop": {
+          "cost_usd": 0.2
+        },
+        "proposed_action": {
+          "action": "serving.scale_prefill",
+          "target": "deployment://prod/llama",
+          "args": {
+            "replicas": 6
+          }
+        }
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "serving.scale_prefill",
+      "risk": "R2",
+      "resource_kinds": [
+        "deployment"
+      ],
+      "metrics": [
+        {
+          "source": "inference",
+          "query": "ttft_p95",
+          "v": 0.34
+        },
+        {
+          "source": "inference",
+          "query": "hourly_cost_usd",
+          "v": 64
+        }
+      ],
+      "outcome": "unknown",
+      "inspect": "applied"
+    }
+  ],
+  "approvals": [
+    {
+      "action": "serving.scale_prefill",
+      "approver": "ml-platform-oncall",
+      "comment": "inside the cost budget"
+    },
+    {
+      "action": "serving.scale_prefill",
+      "approver": "ml-platform-oncall",
+      "comment": "inside the cost budget"
+    }
+  ],
+  "horizon": "40m",
+  "expect": {
+    "status": "WAITING",
+    "generation": 3,
+    "cycles": 2,
+    "waiting_stage": "observe",
+    "dispatches": {
+      "serving.scale_prefill": 2
+    },
+    "max_runs": 2,
+    "max_actions": 2,
+    "root_cause": "unknown"
+  },
+  "signals": [
+    {
+      "at": "1m",
+      "event": {
+        "source": "inference",
+        "type": "inference.ttft_breach",
+        "subject_ref": "deployment://prod/llama",
+        "dedup_key": "episode-0",
+        "event_id": "ttft-0"
+      }
+    },
+    {
+      "at": "1m",
+      "event": {
+        "source": "inference",
+        "type": "inference.ttft_breach",
+        "subject_ref": "deployment://prod/llama",
+        "dedup_key": "episode-0",
+        "event_id": "ttft-0"
+      }
+    },
+    {
+      "at": "20m",
+      "event": {
+        "source": "inference",
+        "type": "inference.ttft_breach",
+        "subject_ref": "deployment://prod/llama",
+        "dedup_key": "episode-1",
+        "event_id": "ttft-1"
+      }
+    },
+    {
+      "at": "20m",
+      "event": {
+        "source": "inference",
+        "type": "inference.ttft_breach",
+        "subject_ref": "deployment://prod/llama",
+        "dedup_key": "episode-1",
+        "event_id": "ttft-1"
+      }
+    }
+  ]
+}

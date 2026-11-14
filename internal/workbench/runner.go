@@ -51,6 +51,10 @@ type Result struct {
 	Unused           []string           `json:"unused,omitempty"` // scripted steps never consumed
 	Failures         []string           `json:"failures,omitempty"`
 	Passed           bool               `json:"passed"`
+	Generation       int                `json:"generation"`
+	Cycles           int                `json:"cycles"`
+	WaitingStage     string             `json:"waiting_stage,omitempty"`
+	Dispatches       map[string]int     `json:"dispatches,omitempty"`
 	// Report is the primary Work's postmortem; Events its timeline types.
 	Report           *postmortem.Report `json:"-"`
 	Events           []string           `json:"-"`
@@ -60,18 +64,19 @@ type Result struct {
 }
 
 type env struct {
-	c       Case
-	ctx     context.Context
-	clock   *simClock
-	store   *cpsql.Store
-	runs    *simRuns
-	metrics *simMetrics
-	world   *world.Service
-	acts    *action.Runtime
-	orch    *orchestration.Orchestrator
-	rec     *orchestration.Reconciler
-	ing     *orchestration.Ingestor
-	svc     *orchestration.Service
+	c         Case
+	ctx       context.Context
+	clock     *simClock
+	store     *cpsql.Store
+	runs      *simRuns
+	metrics   *simMetrics
+	world     *world.Service
+	acts      *action.Runtime
+	orch      *orchestration.Orchestrator
+	rec       *orchestration.Reconciler
+	ing       *orchestration.Ingestor
+	svc       *orchestration.Service
+	executors map[string]*simExecutor
 
 	primary string
 	works   []string
@@ -140,11 +145,14 @@ func (r *Runner) setup(ctx context.Context, c Case, path string) (*env, error) {
 	metrics := newSimMetrics(c.Start, c.Metrics)
 	ev := &outcome.Evaluator{Metrics: metricRegistry{metrics}, States: orchestration.WorldFacts{World: ws}, Events: s}
 	reg := action.NewRegistry()
+	executors := make(map[string]*simExecutor)
 	for _, a := range c.Actions {
-		if err := reg.Register(&simExecutor{spec: a, world: ws, metrics: metrics}); err != nil {
+		executor := &simExecutor{spec: a, world: ws, metrics: metrics}
+		if err := reg.Register(executor); err != nil {
 			s.Close()
 			return nil, err
 		}
+		executors[a.Name] = executor
 	}
 	acts := &action.Runtime{Store: s, Registry: reg, World: ws, Outcomes: ev, Clock: clock.Now, Log: log,
 		Policy:   policy.Engine{Version: "bench", Environment: c.Environment, AllowR1WithoutApproval: c.Environment != "production"},
@@ -165,6 +173,7 @@ func (r *Runner) setup(ctx context.Context, c Case, path string) (*env, error) {
 	runs := newSimRuns(clock, c.Runs)
 	ing := &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Clock: clock.Now, Log: log, Changes: s}
 	e := &env{c: c, ctx: ctx, clock: clock, store: s, runs: runs, metrics: metrics, world: ws, acts: acts, ing: ing,
+		executors: executors,
 		orch: &orchestration.Orchestrator{Store: s, Runs: runs, Actions: acts, Evaluator: ev, Clock: clock.Now, Owner: "bench",
 			RunPoll: min(5*time.Second, c.Tick.D()), Log: log, Catalog: cat},
 		svc: &orchestration.Service{Store: s, Runs: runs, Catalog: cat, Clock: clock.Now, Log: log},
@@ -415,6 +424,16 @@ func (e *env) collect(res *Result) error {
 		return err
 	}
 	res.Status, res.Reason = w.Status, w.Reason
+	res.Generation = w.Generation
+	if stage, ok := w.CurrentStage(); ok && w.Status == work.StatusWaiting {
+		res.WaitingStage = stage.ID
+	}
+	res.Dispatches = make(map[string]int, len(e.executors))
+	for name, executor := range e.executors {
+		executor.mu.Lock()
+		res.Dispatches[name] = executor.calls
+		executor.mu.Unlock()
+	}
 	acts, err := e.store.ListActions(e.ctx, e.c.Tenant, e.primary)
 	if err != nil {
 		return err
@@ -449,6 +468,9 @@ func (e *env) collect(res *Result) error {
 	}
 	for _, x := range evs {
 		res.Events = append(res.Events, x.Type)
+		if x.Type == "work.cycle_completed" {
+			res.Cycles++
+		}
 	}
 	return nil
 }
@@ -460,6 +482,20 @@ func check(c Case, res *Result) {
 	sc := res.Scorecard
 	if x.Status != "" && res.Status != x.Status {
 		fail("status %s, want %s (%s)", res.Status, x.Status, res.Reason)
+	}
+	if x.Generation > 0 && res.Generation != x.Generation {
+		fail("generation %d, want %d", res.Generation, x.Generation)
+	}
+	if x.Cycles > 0 && res.Cycles != x.Cycles {
+		fail("cycles %d, want %d", res.Cycles, x.Cycles)
+	}
+	if x.WaitingStage != "" && res.WaitingStage != x.WaitingStage {
+		fail("waiting stage %q, want %q", res.WaitingStage, x.WaitingStage)
+	}
+	for name, count := range x.Dispatches {
+		if res.Dispatches[name] != count {
+			fail("dispatches for %s: %d, want %d", name, res.Dispatches[name], count)
+		}
 	}
 	if x.Pass != nil && sc.Pass != *x.Pass {
 		fail("scorecard pass=%v, want %v (failed gates %v)", sc.Pass, *x.Pass, sc.FailedGates)

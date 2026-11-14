@@ -199,8 +199,12 @@ type Expect struct {
 	Works int `json:"works,omitempty"`
 	// RootCause is a substring of the report's root cause; "unknown"
 	// asserts there is none.
-	RootCause   string         `json:"root_cause,omitempty"`
-	MaxDuration cpkit.Duration `json:"max_duration,omitempty"`
+	RootCause    string         `json:"root_cause,omitempty"`
+	MaxDuration  cpkit.Duration `json:"max_duration,omitempty"`
+	Generation   int            `json:"generation,omitempty"`
+	Cycles       int            `json:"cycles,omitempty"`
+	WaitingStage string         `json:"waiting_stage,omitempty"`
+	Dispatches   map[string]int `json:"dispatches,omitempty"`
 }
 
 // Defaults.
