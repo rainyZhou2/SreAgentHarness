@@ -140,6 +140,14 @@ PostgreSQL (source of truth)  +  NATS JetStream (wake-ups and event delivery)
 - **Event plane**: a leased relay tails the event log, JetStream fans events out per run, and the SSE gateway reads the log once before streaming live updates.
 - **The kernel depends only on interfaces**: it never imports PostgreSQL, NATS or a model SDK, so adapters are replaceable and testable.
 
+The Work control plane owns long-lived goals; the same kernel owns their Runs, Steps and Attempts. Work-owned Runs, including flow descendants, investigate through read-only tools. Production changes go through the Action runtime, which binds policy, approval and dispatch to the current Work generation. Run reservation, owner linking and activation retain separate durable recovery boundaries.
+
+Templates may set `repeat_from` to a wait stage. After the machine goal passes its observation window, the control plane atomically records the completed generation's Outcome, increments the generation and installs the next wait. Lifetime Run, Action and cost budgets remain cumulative. `inference-continuous` supplies this pattern for inference TTFT events; each new generation needs its own approval. Unknown effects use read-only inspection and fall back to manual recovery rather than redispatch. The automated WorkBench scenario is in `internal/workbench/testdata/sglang-continuous.json`; it uses scripted metrics and an isolated executor, not a live serving cluster.
+
+The opt-in `inference-incident-v2` template runs a required mitigation child and an optional, read-only RCA child concurrently. It requires a caller-supplied machine recovery goal; mitigation inherits it explicitly through `inherit_success`, while the parent independently verifies the same goal. An inconclusive RCA can remain open after recovery. The existing incident route is unchanged. Cross-child report aggregation and a complete orthogonal Incident status projection are not yet implemented.
+
+Decision adjudicator v3 canonicalizes inputs and revalidates current ledger evidence before API, scorecard and postmortem consumption. Historical v2 decisions remain replayable but require re-adjudication to become current. Pause scheduling and decision writes, drain older workers, upgrade consumers and workers together, then resume; a v2 binary cannot interpret newly written v3 decisions. A binary rollback therefore requires stopping v3 writers and retaining v3 readers for their records, not merely reverting the executable. No SQL migration is required for these additive fields. Pause repeating Works before rolling back to a binary that does not understand `repeat_from`.
+
 ### Orchestration DSL
 
 A profile can set `strategy: "flow"` and embed a `flow` graph. The DSL compiles to the existing step engine: the parent run only coordinates, while agent / tool / subflow nodes become child runs, so leases, fences, approvals, the effect ledger and checkpoint recovery are reused. Parallelism is carried by child runs and joined by a `join` node; a child inherits the parent profile and can only narrow its tools and permissions.
@@ -240,6 +248,8 @@ Long-term memory rots: duplicates pile up, facts change, lessons get refuted, en
 - **Triggering.** `POST /v1/memory/curation/run` (operator), `harness memory curate`, the desktop **Memory → Learned by the agent → Check memories now**, and, in local mode, a pass one minute after start and then every `HARNESS_CURATE_INTERVAL` (default 24h; `off` disables). The team server has no tenant scheduler, so it runs on demand. Proposals live in `memory_curation_proposals` (migration 0032, row-level security; JSON objects in the local store).
 
 ### Memory search
+
+Pinned memories and historical `harness.memory_search` results are checked again before model context assembly: tenant, current version, lifecycle, expiry, environment and data class must still permit recall. Personal pins additionally require the Run's user owner. Original artifacts remain immutable audit records. This filtering does not yet retract memory-derived free text from older compaction summaries or notes.
 
 - **Past-run search**: `harness.run_search` (R0, `query`, optional `service`, `status`, `limit` ≤ 10) searches finished runs — what was asked, the conclusion and the hypotheses — so an agent can find how an earlier investigation ended even if nobody promoted it to a memory. It sees the caller's own chats and non-user runs (triggers, schedules, Works), never another user's chats, skips child runs of a flow and the calling run itself, redacts secrets, and labels results as history rather than evidence. It scans the most recent finished runs (300 by default, 6 s budget) with cached text and says when it was cut short; a database full-text index would lift the bound.
 
@@ -452,6 +462,17 @@ use.
   late-event handling, recorded correlation decisions and topology-assisted
   leads. A stable event contract (`?protocol=1`), a unified
   `/v1/works/{id}/view`, and a Go SDK with a resumable `Subscribe`.
+  Events, pages and snapshots declare schema, contract and minimum reader
+  versions. The SDK reads legacy v1 data, but stops on incompatible versions,
+  malformed frames or sequence gaps without advancing the last valid cursor.
+  A terminal subscription drains through the captured snapshot's `LastSeq`
+  before closing; audit events appended after that boundary need a new
+  subscription.
+  Existing client binaries still require v1 server semantics; incompatible
+  changes need a new versioned endpoint. The Run relay checkpoints each
+  published prefix; cursor writes recheck lease expiry after acquiring the
+  row lock and cannot move backwards. Sinks renew before retrying; external
+  delivery remains at least once.
 - **AI infrastructure.** UUID-based GPU identity (replacement and MIG
   changes), ECC/NVLink/PCIe signals, TPOT/E2E/cache/prefill/decode signals,
   prefill/decode diagnosis, guarded `serving.scale_prefill|decode`, a cost
