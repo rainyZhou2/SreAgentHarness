@@ -22,6 +22,7 @@ type StartRunRequest struct {
 	ProfileVersion int64
 	IncidentID     *string
 	IdempotencyKey string
+	WorkOwner      *domain.WorkRunOwner
 }
 
 // ErrArtifactUnavailable is returned when the goal artifact cannot be stored.
@@ -61,6 +62,9 @@ func (s *Server) StartRun(ctx context.Context, req StartRunRequest) (domain.Run,
 	}
 	gc.Services = domain.NormalizeServices(gc.Services)
 	data, _ := json.Marshal(goalDoc{Goal: req.Goal, Context: &gc})
+	if s.Artifacts == nil {
+		return domain.Run{}, false, ErrArtifactUnavailable
+	}
 	ref, hash, err := s.Artifacts.Put(ctx, req.TenantID, "goal", data)
 	if err != nil {
 		return domain.Run{}, false, ErrArtifactUnavailable
@@ -68,7 +72,7 @@ func (s *Server) StartRun(ctx context.Context, req StartRunRequest) (domain.Run,
 	return s.Store.CreateRun(ctx, domain.CreateRunRequest{
 		TenantID: req.TenantID, IncidentID: req.IncidentID, ProfileID: req.ProfileID, ProfileVersion: req.ProfileVersion,
 		GoalRef: ref, GoalHash: hash, IdempotencyKey: req.IdempotencyKey, InitiatorType: req.InitiatorType,
-		InitiatorID: req.ActorID, RolloutID: rollout,
+		InitiatorID: req.ActorID, RolloutID: rollout, WorkOwner: req.WorkOwner, PendingActivation: req.WorkOwner != nil,
 	})
 }
 

@@ -228,6 +228,9 @@ func New(o Options) (*Engine, error) {
 	if o.Store == nil || o.Server == nil {
 		return nil, errors.New("workengine: store and server are required")
 	}
+	if _, ok := o.Server.Store.(workRunStore); !ok {
+		return nil, errors.New("workengine: kernel store must support durable Work reservations")
+	}
 	log := o.Log
 	if log == nil {
 		log = slog.Default()
@@ -354,7 +357,7 @@ func New(o Options) (*Engine, error) {
 			DryRun:  o.Flags.ActionDryRun, Allowed: o.Flags.ActionAllowlist, Scope: o.Flags.ActionScope,
 			Preauthorized: o.Flags.Preauthorized}
 	}
-	runs := KernelRuns{Server: o.Server}
+	runs := KernelRuns{Server: o.Server, WorkAuthority: o.Store}
 	ing := &orchestration.Ingestor{Store: o.Store, Router: router, Catalog: cat, Shadow: o.Flags.Shadow, Clock: clock,
 		Log: log, Metrics: m, Sources: sources2, Changes: o.Store, Neighbors: neighbors(ws)}
 	svc := &orchestration.Service{Store: o.Store, Runs: runs, Catalog: cat, Clock: clock, Log: log,
@@ -370,7 +373,7 @@ func New(o Options) (*Engine, error) {
 		requested: requested, schema: o.Schema, capabilities: o.Capabilities, actionDescs: reg.Descriptors(), metricNames: names,
 		Orch: &orchestration.Orchestrator{Store: o.Store, Runs: runs, Actions: rt, Evaluator: ev, Clock: clock, Log: log,
 			Metrics: m, Owner: o.Owner, World: ws, Queues: queues, Pools: pools, Catalog: cat},
-		Reconciler: &orchestration.Reconciler{Store: o.Store, Ingestor: ing, Actions: rt, Clock: clock, Log: log, Metrics: m,
+		Reconciler: &orchestration.Reconciler{Store: o.Store, Ingestor: ing, Actions: rt, Clock: clock, Log: log, Metrics: m, Runs: runs, Inventory: runs,
 			Retention: inboxRetention(o.Flags)},
 		API: &workapi.API{Store: o.Store, Service: svc, Ingestor: ing, Actions: rt, World: ws, Clock: clock, Log: log,
 			Audit: o.Server.Audit, Sources: sources},

@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"go-sre-harness/internal/action"
@@ -16,12 +17,16 @@ import (
 // left unprocessed, actions stuck in DISPATCHED, expired correlation
 // groups. Every sweep is idempotent, so all replicas may run it.
 type Reconciler struct {
-	Store    *cpsql.Store
-	Ingestor *Ingestor
-	Actions  *action.Runtime
-	Clock    cpkit.Clock
-	Log      *slog.Logger
-	Metrics  *Metrics
+	Runs      Runs
+	Inventory RunInventory
+	runMu     sync.Mutex
+	runCursor string
+	Store     *cpsql.Store
+	Ingestor  *Ingestor
+	Actions   *action.Runtime
+	Clock     cpkit.Clock
+	Log       *slog.Logger
+	Metrics   *Metrics
 	// Interval is the timer resolution (default 2s); SweepEvery the
 	// recovery cadence (default 30s).
 	Interval   time.Duration
@@ -100,6 +105,9 @@ func (r *Reconciler) FireDue(ctx context.Context) (int, error) {
 
 // Sweep runs the recovery sweeps once.
 func (r *Reconciler) Sweep(ctx context.Context) {
+	if err := r.RecoverRuns(ctx); err != nil && ctx.Err() == nil {
+		r.log().Warn("work run recovery failed", "err", err)
+	}
 	if r.Ingestor != nil {
 		if _, err := r.Ingestor.Sweep(ctx, 30*time.Second, 200); err != nil && ctx.Err() == nil {
 			r.log().Warn("inbox sweep failed", "err", err)

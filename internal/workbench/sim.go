@@ -15,6 +15,7 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/world"
 )
 
@@ -34,13 +35,14 @@ func (c *simClock) Add(d time.Duration) {
 // ---- runs ----
 
 type simRun struct {
-	script   *ScriptedRun
-	req      orchestration.RunRequest
-	started  time.Time
-	finishAt time.Time
-	stage    string
-	role     string
-	canceled bool
+	script    *ScriptedRun
+	req       orchestration.RunRequest
+	started   time.Time
+	finishAt  time.Time
+	stage     string
+	role      string
+	canceled  bool
+	activated bool
 }
 
 // simRuns answers run starts from the case script on the simulated clock.
@@ -58,7 +60,7 @@ func newSimRuns(clock *simClock, scripts []ScriptedRun) *simRuns {
 	return &simRuns{clock: clock, scripts: scripts, used: map[string]int{}, runs: map[string]*simRun{}, byKey: map[string]string{}}
 }
 
-func (f *simRuns) StartRun(_ context.Context, req orchestration.RunRequest) (string, error) {
+func (f *simRuns) ReserveRun(_ context.Context, req orchestration.RunRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if id, ok := f.byKey[req.IdempotencyKey]; ok {
@@ -105,6 +107,8 @@ func (f *simRuns) RunState(_ context.Context, _, runID string) (orchestration.Ru
 	switch {
 	case r.canceled:
 		return orchestration.RunState{Status: "CANCELLED", Terminal: true}, nil
+	case !r.activated:
+		return orchestration.RunState{Status: "PENDING_ACTIVATION"}, nil
 	case f.clock.Now().Before(r.finishAt):
 		return orchestration.RunState{Status: "RUNNING"}, nil
 	case r.script == nil:
@@ -123,7 +127,7 @@ func (f *simRuns) RunState(_ context.Context, _, runID string) (orchestration.Ru
 func (f *simRuns) CancelRun(_ context.Context, _, runID, _, _, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r := f.runs[runID]; r != nil && f.clock.Now().Before(r.finishAt) {
+	if r := f.runs[runID]; r != nil && (!r.activated || f.clock.Now().Before(r.finishAt)) {
 		r.canceled = true
 	}
 	return nil
@@ -320,4 +324,23 @@ func firstNonEmpty(xs ...string) string {
 		}
 	}
 	return ""
+}
+
+func (f *simRuns) ActivateRun(_ context.Context, req work.RunActivation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.runs[req.RunID]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	if r.canceled {
+		return &domain.RejectedError{Reason: "run_cancelled"}
+	}
+	if !r.activated {
+		duration := r.finishAt.Sub(r.started)
+		r.started = f.clock.Now()
+		r.finishAt = r.started.Add(duration)
+		r.activated = true
+	}
+	return nil
 }

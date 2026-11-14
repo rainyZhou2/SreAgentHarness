@@ -15,11 +15,15 @@ import (
 	"time"
 
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/world"
 )
 
-// RunRequest asks the kernel for one run.
+// RunRequest reserves one non-executable Run until its Work owner is committed.
 type RunRequest struct {
+	WorkID         string
+	Generation     int
+	StageID        string
 	TenantID       string
 	ActorID        string
 	Goal           string
@@ -45,7 +49,8 @@ type RunState struct {
 
 // Runs is the kernel port.
 type Runs interface {
-	StartRun(ctx context.Context, req RunRequest) (runID string, err error)
+	ReserveRun(ctx context.Context, req RunRequest) (runID string, err error)
+	ActivateRun(ctx context.Context, req work.RunActivation) error
 	RunState(ctx context.Context, tenantID, runID string) (RunState, error)
 	CancelRun(ctx context.Context, tenantID, runID, actorID, reason, key string) error
 }
@@ -57,4 +62,18 @@ type WorldFacts struct{ World *world.Service }
 func (w WorldFacts) CurrentFact(ctx context.Context, tenantID, subject, predicate string, at time.Time) (outcome.FactValue, bool, error) {
 	v, obs, ref, ok, err := w.World.CurrentFact(ctx, tenantID, subject, predicate, at)
 	return outcome.FactValue{Value: v, ObservedAt: obs, Ref: ref}, ok, err
+}
+
+// WorkRun identifies reservation provenance, not the current Work authority.
+type WorkRun struct {
+	TenantID   string
+	RunID      string
+	WorkID     string
+	Generation int
+	StageID    string
+}
+
+// RunInventory scans nonterminal Work reservations using a bounded RunID cursor.
+type RunInventory interface {
+	ListWorkRuns(ctx context.Context, after string, limit int) ([]WorkRun, error)
 }

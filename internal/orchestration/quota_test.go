@@ -26,9 +26,9 @@ type countingRuns struct {
 	peak     int
 }
 
-func (c *countingRuns) StartRun(ctx context.Context, req RunRequest) (string, error) {
+func (c *countingRuns) ReserveRun(ctx context.Context, req RunRequest) (string, error) {
 	before := c.fakeRuns.started()
-	id, err := c.fakeRuns.StartRun(ctx, req)
+	id, err := c.fakeRuns.ReserveRun(ctx, req)
 	if err == nil && c.fakeRuns.started() > before {
 		c.mu.Lock()
 		c.inflight++

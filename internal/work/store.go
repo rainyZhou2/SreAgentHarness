@@ -246,3 +246,14 @@ type Store interface {
 	// CountByStatus is the gauge source for harness_work_active.
 	CountByStatus(ctx context.Context) (map[string]map[string]int, error)
 }
+
+// RunActivation authorizes a linked Run within the currently leased Work stage.
+type RunActivation struct {
+	TenantID        string
+	WorkID          string
+	RunID           string
+	Generation      int
+	StageID         string
+	ExpectedVersion int64
+	LeaseOwner      string
+}

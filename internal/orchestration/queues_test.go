@@ -17,7 +17,7 @@ import (
 )
 
 // blockingRuns starts runs instantly, except for Works marked slow, whose
-// StartRun blocks until release is closed (a stuck downstream).
+// ReserveRun blocks until release is closed (a stuck downstream).
 type blockingRuns struct {
 	*fakeRuns
 	mu      sync.Mutex
@@ -26,7 +26,7 @@ type blockingRuns struct {
 	started map[string]time.Time
 }
 
-func (b *blockingRuns) StartRun(ctx context.Context, req RunRequest) (string, error) {
+func (b *blockingRuns) ReserveRun(ctx context.Context, req RunRequest) (string, error) {
 	b.mu.Lock()
 	slow := b.slow[req.Labels["work_id"]]
 	b.started[req.Labels["work_id"]] = time.Now()
@@ -38,7 +38,7 @@ func (b *blockingRuns) StartRun(ctx context.Context, req RunRequest) (string, er
 			return "", ctx.Err()
 		}
 	}
-	return b.fakeRuns.StartRun(ctx, req)
+	return b.fakeRuns.ReserveRun(ctx, req)
 }
 
 func (b *blockingRuns) startedAt(workID string) (time.Time, bool) {

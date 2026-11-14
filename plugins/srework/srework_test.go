@@ -40,7 +40,7 @@ type runs struct {
 	goals []string
 }
 
-func (r *runs) StartRun(_ context.Context, req orchestration.RunRequest) (string, error) {
+func (r *runs) ReserveRun(_ context.Context, req orchestration.RunRequest) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.goals = append(r.goals, req.Goal)
@@ -315,3 +315,5 @@ func TestTopologyAndPersistentState(t *testing.T) {
 		t.Fatalf("inspect after restart: %+v %v", ins, err)
 	}
 }
+
+func (r *runs) ActivateRun(context.Context, work.RunActivation) error { return nil }
