@@ -3,6 +3,7 @@ package evidence
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ const (
 	DecisionInconclusive = "INCONCLUSIVE"
 	DecisionContested    = "CONTESTED"
 	DecisionProfile      = "sre.rca"
-	AdjudicatorVersion   = "1"
+	AdjudicatorVersion   = "2"
 )
 
 // ErrDecisionLimit requires a smaller investigation before durable adjudication.
@@ -50,20 +51,37 @@ type DecisionVerdict struct {
 	AdjudicatedAt           time.Time `json:"adjudicated_at"`
 }
 
-// CurrentFor rejects legacy, foreign and obsolete decisions at reader boundaries.
+// CurrentFor rejects legacy, foreign, obsolete and unreproducible decisions.
 func (d *DecisionVerdict) CurrentFor(scope DecisionScope, key string) bool {
+	_, ok := d.currentHypothesis(scope, key)
+	return ok
+}
+
+func (d *DecisionVerdict) currentHypothesis(scope DecisionScope, key string) (Hypothesis, bool) {
 	if scope.TenantID == "" || scope.WorkID == "" || scope.Generation < 1 || key == "" || d == nil || d.DecisionScope != scope || d.DecisionKey != key || d.Profile != DecisionProfile || d.ProfileVersion != 1 || d.AdjudicatorVersion != AdjudicatorVersion || d.InputDigest == "" || d.AdjudicatedAt.IsZero() {
-		return false
+		return Hypothesis{}, false
 	}
-	switch d.Verdict {
-	case DecisionConfirmed, DecisionProbable:
-		return d.IndependentSupportCount > 0 && d.IndependentRefuteCount == 0 && len(d.UnresolvedConflicts) == 0 && len(d.AcceptedEvidenceRefs) > 0
-	case DecisionInconclusive:
-		return d.IndependentSupportCount == 0
-	case DecisionContested:
-		return d.IndependentSupportCount > 0 && d.IndependentRefuteCount > 0 && len(d.UnresolvedConflicts) > 0
+	_, replayed, err := replayDecision(*d)
+	if err != nil {
+		return Hypothesis{}, false
 	}
-	return false
+	actual, err := cpkit.Hash(d)
+	if err != nil {
+		return Hypothesis{}, false
+	}
+	expected, err := cpkit.Hash(replayed.Decision)
+	return replayed, err == nil && actual == expected
+}
+
+// CurrentDecisionFor also binds the displayed claim to the adjudicated input.
+func (h Hypothesis) CurrentDecisionFor(scope DecisionScope) bool {
+	expected, ok := h.Decision.currentHypothesis(scope, h.Key)
+	return ok && sameClaim(h, expected)
+}
+
+func sameClaim(a, b Hypothesis) bool {
+	return a.Statement == b.Statement && a.Category == b.Category &&
+		slices.Equal(a.Supporting, b.Supporting) && slices.Equal(a.Refuting, b.Refuting) && slices.Equal(a.Proponents, b.Proponents)
 }
 
 // HypothesisStatus maps the decision to the legacy hypothesis vocabulary.
@@ -206,6 +224,31 @@ func ValidateDecisionBatch(hypotheses []Hypothesis) error {
 	return nil
 }
 
+// ValidateAdjudication binds a submitted hypothesis to the durable evidence
+// snapshot and returns the findings derived by the same adjudicator.
+func ValidateAdjudication(h Hypothesis, ledger []Record) ([]Finding, error) {
+	d := h.Decision
+	if d == nil || !h.CurrentDecisionFor(d.DecisionScope) {
+		return nil, fmt.Errorf("%w: unreproducible decision", ErrInvalid)
+	}
+	input := decisionInput(d.DecisionScope, h.Key, d.Input.Results, ledger, d.AdjudicatedAt)
+	digest, err := cpkit.Hash(input)
+	if err != nil || digest != d.InputDigest {
+		return nil, fmt.Errorf("%w: decision input differs from durable evidence", ErrInvalid)
+	}
+	syn, expected, err := Adjudicate(input.Scope, input.Results, input.Evidence, input.At)
+	if err != nil {
+		return nil, err
+	}
+	if len(expected) != 1 {
+		return nil, fmt.Errorf("%w: ambiguous decision claim", ErrInvalid)
+	}
+	if !sameClaim(h, expected[0]) {
+		return nil, fmt.Errorf("%w: hypothesis differs from adjudicated claim", ErrInvalid)
+	}
+	return syn.Findings, nil
+}
+
 // DecisionInput preserves bounded immutable adjudication inputs for offline replay.
 type DecisionInput struct {
 	Scope    DecisionScope    `json:"scope"`
@@ -238,16 +281,19 @@ func decisionInput(scope DecisionScope, key string, envs []ResultEnvelope, ledge
 		}
 	}
 	selected := map[string]bool{}
-	supersessionRefs := map[string]bool{}
+	ledgerByID := map[string]Record{}
+	selectedSources := map[string]bool{}
 	for _, r := range ledger {
-		if r.TenantID != scope.TenantID || r.WorkID != scope.WorkID {
+		if r.TenantID != scope.TenantID || r.WorkID != scope.WorkID || r.CapturedAt.After(at) {
 			continue
+		}
+		if r.ID != "" {
+			ledgerByID[r.ID] = r
 		}
 		if aliases[r.ID] || aliases["evidence:"+r.ID] || (r.SourceRef != "" && aliases[r.SourceRef]) {
 			selected[r.ID] = true
-			supersessionRefs[r.ID] = true
 			if r.SourceRef != "" {
-				supersessionRefs[r.SourceRef] = true
+				selectedSources[r.SourceRef] = true
 			}
 			in.Evidence = append(in.Evidence, r)
 		}
@@ -257,8 +303,33 @@ func decisionInput(scope DecisionScope, key string, envs []ResultEnvelope, ledge
 		if r.TenantID != scope.TenantID || r.WorkID != scope.WorkID || selected[r.ID] || r.CapturedAt.After(at) {
 			continue
 		}
-		if supersessionRefs[strings.TrimPrefix(r.Supersedes, "evidence:")] {
+		// Preserve the resolver's identity precedence when projecting the
+		// snapshot: removing an unrelated ID must not turn it into a source alias.
+		ref, canonical := strings.CutPrefix(r.Supersedes, "evidence:")
+		relevant := selectedSources[ref]
+		_, namesID := ledgerByID[ref]
+		if canonical || namesID {
+			relevant = selected[ref]
+		}
+		if relevant {
 			in.Evidence = append(in.Evidence, r)
+		}
+	}
+	// A cited superseder may name an otherwise unrelated record by raw ID.
+	// Retain that identity, including its dependencies, so replay cannot
+	// reinterpret the raw ID as a source alias when projecting the ledger.
+	included := map[string]bool{}
+	for _, r := range in.Evidence {
+		included[r.ID] = true
+	}
+	for i := 0; i < len(in.Evidence); i++ {
+		ref, canonical := strings.CutPrefix(in.Evidence[i].Supersedes, "evidence:")
+		if canonical {
+			continue
+		}
+		if target, ok := ledgerByID[ref]; ok && !included[target.ID] {
+			included[target.ID] = true
+			in.Evidence = append(in.Evidence, target)
 		}
 	}
 	sort.Slice(in.Evidence, func(i, j int) bool { return in.Evidence[i].ID < in.Evidence[j].ID })
@@ -267,22 +338,30 @@ func decisionInput(scope DecisionScope, key string, envs []ResultEnvelope, ledge
 
 // ReplayDecision is pure: it never reads providers, writes stores or dispatches actions.
 func ReplayDecision(d DecisionVerdict) (DecisionVerdict, error) {
-	if d.Input == nil || d.Profile != DecisionProfile || d.ProfileVersion != 1 || d.AdjudicatorVersion != AdjudicatorVersion {
-		return DecisionVerdict{}, fmt.Errorf("%w: unsupported decision replay", ErrInvalid)
-	}
-	digest, err := cpkit.Hash(*d.Input)
-	if err != nil {
-		return DecisionVerdict{}, fmt.Errorf("%w: decision input: %v", ErrInvalid, err)
-	}
-	if d.Input.Scope != d.DecisionScope || !d.Input.At.Equal(d.AdjudicatedAt) || digest != d.InputDigest {
-		return DecisionVerdict{}, fmt.Errorf("%w: decision input digest mismatch", ErrInvalid)
-	}
-	_, hs, err := Adjudicate(d.Input.Scope, d.Input.Results, d.Input.Evidence, d.Input.At)
+	_, h, err := replayDecision(d)
 	if err != nil {
 		return DecisionVerdict{}, err
 	}
-	if len(hs) != 1 || hs[0].Key != d.DecisionKey {
-		return DecisionVerdict{}, fmt.Errorf("%w: decision key mismatch", ErrInvalid)
+	return *h.Decision, nil
+}
+
+func replayDecision(d DecisionVerdict) (Synthesis, Hypothesis, error) {
+	if d.Input == nil || d.Profile != DecisionProfile || d.ProfileVersion != 1 || d.AdjudicatorVersion != AdjudicatorVersion {
+		return Synthesis{}, Hypothesis{}, fmt.Errorf("%w: unsupported decision replay", ErrInvalid)
 	}
-	return *hs[0].Decision, nil
+	digest, err := cpkit.Hash(*d.Input)
+	if err != nil {
+		return Synthesis{}, Hypothesis{}, fmt.Errorf("%w: decision input: %v", ErrInvalid, err)
+	}
+	if d.Input.Scope != d.DecisionScope || !d.Input.At.Equal(d.AdjudicatedAt) || digest != d.InputDigest {
+		return Synthesis{}, Hypothesis{}, fmt.Errorf("%w: decision input digest mismatch", ErrInvalid)
+	}
+	syn, hs, err := Adjudicate(d.Input.Scope, d.Input.Results, d.Input.Evidence, d.Input.At)
+	if err != nil {
+		return Synthesis{}, Hypothesis{}, err
+	}
+	if len(hs) != 1 || hs[0].Key != d.DecisionKey {
+		return Synthesis{}, Hypothesis{}, fmt.Errorf("%w: decision key mismatch", ErrInvalid)
+	}
+	return syn, hs[0], nil
 }

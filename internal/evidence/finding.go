@@ -107,7 +107,7 @@ func synthesize(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at 
 		for _, h := range env.Hypotheses {
 			f := Finding{TenantID: scope.TenantID, WorkID: scope.WorkID, Generation: scope.Generation, RunID: env.RunID, Role: who, Statement: cpkit.Truncate(h.Statement, MaxStatement),
 				HypothesisID: HypothesisKey(h.Statement), Confidence: h.Confidence, Claimed: strings.ToLower(h.Status),
-				NextChecks: env.NextChecks, Gaps: env.Uncertainties, CreatedAt: at}
+				NextChecks: env.NextChecks, Gaps: append([]string(nil), env.Uncertainties...), CreatedAt: at}
 			var sawCausal bool
 			accept := func(refs []string, supporting bool) ([]string, int) {
 				groups := map[string]bool{}

@@ -62,7 +62,7 @@ func fp(v float64) *float64 { return &v }
 func incident() *fake {
 	closed := t0.Add(40 * time.Minute)
 	disp := t0.Add(22 * time.Minute)
-	return &fake{
+	f := &fake{
 		w: work.Work{ID: "w1", TenantID: "t", Generation: 1, Kind: work.KindIncident, Status: work.StatusSucceeded, Title: "checkout 5xx",
 			CreatedAt: t0, ClosedAt: &closed, Goal: work.GoalSpec{SubjectRefs: []string{"deployment://prod/checkout"}}},
 		evs: []work.Event{
@@ -82,12 +82,13 @@ func incident() *fake {
 		},
 		recs: []evidence.Record{{ID: "ev-deploy", TrustTier: "T1"}, {ID: "ev-log", TrustTier: "T4"}, {ID: "ev-metric", TrustTier: "T2"}},
 		hyps: []evidence.Hypothesis{
-			{Key: "h1", Statement: "release v2 introduced a nil map write", Status: evidence.HypSupported, Category: evidence.CatRootCause, Decision: testDecision("h1", evidence.DecisionConfirmed, []string{"ev-deploy", "ev-metric"}), Supporting: []string{"ev-deploy", "ev-metric"}},
-			{Key: "h2", Statement: "database saturation", Status: evidence.HypRefuted, Decision: testRefutedDecision("h2")},
+			testHypothesis("release v2 introduced a nil map write", evidence.CatRootCause, evidence.DecisionConfirmed, []string{"ev-deploy", "ev-metric"}),
+			testHypothesis("database saturation", "", evidence.DecisionInconclusive, []string{"refutation"}),
 			{Key: "h3", Statement: "the model says DNS", Status: evidence.HypSupported, Supporting: []string{"ev-log"}},
-			{Key: "h4", Statement: "cache stampede", Status: evidence.HypSupported, Category: evidence.CatContributing, Decision: testDecision("h4", evidence.DecisionConfirmed, []string{"ev-metric"}), Supporting: []string{"ev-metric"}},
+			testHypothesis("cache stampede", evidence.CatContributing, evidence.DecisionConfirmed, []string{"ev-metric"}),
 		},
 	}
+	return f
 }
 
 func TestBuildIncidentReport(t *testing.T) {
@@ -97,7 +98,7 @@ func TestBuildIncidentReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r.RootCause == nil || r.RootCause.Statement != "release v2 introduced a nil map write" ||
-		strings.Join(r.RootCause.EvidenceRefs, ",") != "ev-deploy,ev-metric" {
+		strings.Join(r.RootCause.EvidenceRefs, ",") != "evidence:ev-deploy,evidence:ev-metric" {
 		t.Fatalf("root cause: %+v", r.RootCause)
 	}
 	if len(r.Contributing) != 1 || r.Contributing[0].Statement != "cache stampede" {
@@ -254,14 +255,27 @@ func TestCorrelationCannotBecomeRootCause(t *testing.T) {
 	}
 }
 
-func testDecision(key, verdict string, refs []string) *evidence.DecisionVerdict {
-	return &evidence.DecisionVerdict{DecisionScope: evidence.DecisionScope{TenantID: "t", WorkID: "w1", Generation: 1}, DecisionKey: key, Profile: evidence.DecisionProfile, ProfileVersion: 1, Verdict: verdict, AcceptedEvidenceRefs: refs, IndependentSupportCount: 1, InputDigest: "digest", AdjudicatorVersion: evidence.AdjudicatorVersion, AdjudicatedAt: t0}
-}
-func testRefutedDecision(key string) *evidence.DecisionVerdict {
-	d := testDecision(key, evidence.DecisionInconclusive, nil)
-	d.IndependentSupportCount = 0
-	d.IndependentRefuteCount = 1
-	return d
+func testHypothesis(statement, category, verdict string, refs []string) evidence.Hypothesis {
+	relation := evidence.RelSupports
+	if verdict == evidence.DecisionConfirmed {
+		relation = evidence.RelCausedBy
+	}
+	if verdict == evidence.DecisionInconclusive {
+		relation = evidence.RelRefutes
+	}
+	var records []evidence.Record
+	for _, ref := range refs {
+		records = append(records, evidence.Record{ID: ref, TenantID: "t", WorkID: "w1", SourceRef: "obs://" + ref, ContentHash: ref, TrustTier: "T2", Quality: evidence.QualityValid, Relation: relation, CapturedAt: t0})
+	}
+	h := evidence.ResultHypothesis{Statement: statement, Category: category, Supports: refs}
+	if relation == evidence.RelRefutes {
+		h.Supports, h.Refutes = nil, refs
+	}
+	_, hypotheses, err := evidence.Adjudicate(evidence.DecisionScope{TenantID: "t", WorkID: "w1", Generation: 1}, []evidence.ResultEnvelope{{RunID: "r", Status: "COMPLETED", Hypotheses: []evidence.ResultHypothesis{h}}}, records, t0)
+	if err != nil {
+		panic(err)
+	}
+	return hypotheses[0]
 }
 
 func TestPostmortemConsumesCurrentDecisionOnly(t *testing.T) {

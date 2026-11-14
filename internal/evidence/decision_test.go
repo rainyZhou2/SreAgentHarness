@@ -167,3 +167,85 @@ func TestAdjudicationPreflightsDurableAuditBound(t *testing.T) {
 		t.Fatalf("oversized audit must be refused before commit: %d %v", len(hs), err)
 	}
 }
+
+func TestCurrentDecisionRequiresReproducibleVerdict(t *testing.T) {
+	at := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	scope := DecisionScope{"t", "w", 1}
+	for _, corruption := range []string{"verdict", "digest", "missing input", "support count", "claimed support", "next checks"} {
+		t.Run(corruption, func(t *testing.T) {
+			_, hs, err := Adjudicate(scope, []ResultEnvelope{{RunID: "r", Status: "COMPLETED", Hypotheses: []ResultHypothesis{{Statement: "cause"}}}}, nil, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := hs[0].Decision
+			if !d.CurrentFor(scope, hs[0].Key) {
+				t.Fatal("genuine decision rejected")
+			}
+			switch corruption {
+			case "verdict":
+				d.Verdict, d.IndependentSupportCount, d.AcceptedEvidenceRefs = DecisionConfirmed, 1, []string{"evidence:invented"}
+			case "digest":
+				d.InputDigest = "forged"
+			case "missing input":
+				d.Input = nil
+			case "support count":
+				d.IndependentRefuteCount = 100
+			case "claimed support":
+				d.ClaimedSupport = true
+			case "next checks":
+				d.RequiredNextChecks = nil
+			}
+			if d.CurrentFor(scope, hs[0].Key) {
+				t.Fatalf("%s: unreproducible verdict accepted", corruption)
+			}
+		})
+	}
+}
+
+func TestReferenceSupersessionAndHistoricalAliases(t *testing.T) {
+	at := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	scope := DecisionScope{"t", "w", 1}
+	old := Record{ID: "old", TenantID: "t", WorkID: "w", SourceRef: "obs://metric", ContentHash: "old", CapturedAt: at, TrustTier: "T2", Quality: QualityValid, Relation: RelCausedBy}
+	for _, mode := range []string{"replacement", "future alias"} {
+		t.Run(mode, func(t *testing.T) {
+			next := old
+			next.ID, next.ContentHash, next.CapturedAt = "new", "new", at.Add(time.Hour)
+			ref, decisionAt := old.SourceRef, at
+			if mode == "replacement" {
+				next.Supersedes = old.SourceRef
+				ref, decisionAt = "evidence:new", next.CapturedAt
+			}
+			_, hs, err := Adjudicate(scope, []ResultEnvelope{{RunID: "r", Status: "COMPLETED", Hypotheses: []ResultHypothesis{{Statement: "cause", Supports: []string{ref}}}}}, []Record{old, next}, decisionAt)
+			if err != nil || len(hs) != 1 || hs[0].Decision.Verdict != DecisionConfirmed {
+				t.Fatalf("valid evidence refused: %+v %v", hs, err)
+			}
+			replay, err := ReplayDecision(*hs[0].Decision)
+			if err != nil || replay.InputDigest != hs[0].Decision.InputDigest || replay.Verdict != DecisionConfirmed {
+				t.Fatalf("replay differs: %+v %v", replay, err)
+			}
+		})
+	}
+}
+
+func TestCurrentHypothesisCannotChangeAdjudicatedClaim(t *testing.T) {
+	scope := DecisionScope{"t", "w", 1}
+	at := time.Now().UTC()
+	_, hs, err := Adjudicate(scope, []ResultEnvelope{{RunID: "r", Status: "COMPLETED", Hypotheses: []ResultHypothesis{{Statement: "cause", Category: CatContributing}}}}, nil, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []string{"statement", "category", "supporting"} {
+		h := hs[0]
+		switch change {
+		case "statement":
+			h.Statement = "other cause"
+		case "category":
+			h.Category = CatRootCause
+		case "supporting":
+			h.Supporting = []string{"invented"}
+		}
+		if h.CurrentDecisionFor(scope) {
+			t.Fatalf("changed %s accepted", change)
+		}
+	}
+}

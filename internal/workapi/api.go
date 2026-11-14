@@ -227,7 +227,7 @@ func (a *API) Register(mux *http.ServeMux) {
 		decisions := []evidence.DecisionVerdict{}
 		scope := evidence.DecisionScope{TenantID: t, WorkID: id, Generation: w.Generation}
 		for _, h := range hs {
-			if h.Decision.CurrentFor(scope, h.Key) {
+			if h.CurrentDecisionFor(scope) {
 				decisions = append(decisions, *h.Decision)
 			}
 		}

@@ -239,7 +239,7 @@ func (e *Evaluator) grounding(sc *Scorecard, w work.Work, hyps []evidence.Hypoth
 	scope := evidence.DecisionScope{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation}
 	for _, h := range hyps {
 		d := h.Decision
-		current := d.CurrentFor(scope, h.Key)
+		current := h.CurrentDecisionFor(scope)
 		supported := current && (d.Verdict == evidence.DecisionConfirmed || d.Verdict == evidence.DecisionProbable)
 		if supported {
 			sc.SupportedConclusions++
