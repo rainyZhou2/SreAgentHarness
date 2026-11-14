@@ -2,6 +2,37 @@ package domain
 
 import "strings"
 
+// ResolveRunWorkOwnership confines a Work root and all its descendants to the
+// Action write path, including legacy roots created before WorkOwner existed.
+// readParent must read persisted Runs in the caller's transaction. Ownership is
+// never inferred from goal labels or tool arguments. Broken ancestry fails closed.
+func ResolveRunWorkOwnership(run Run, readParent func(string) (Run, error)) (bool, error) {
+	tenant := run.TenantID
+	seen := map[string]bool{}
+	for depth := 0; depth < 64; depth++ {
+		if run.TenantID != tenant || seen[run.ID] {
+			return false, &RejectedError{Reason: "invalid_run_ancestry"}
+		}
+		seen[run.ID] = true
+		if run.WorkOwner != nil || run.InitiatorType == "work" || (run.InitiatorID != nil && strings.HasPrefix(*run.InitiatorID, "work:")) {
+			return true, nil
+		}
+		if run.ParentRunID == nil {
+			return false, nil
+		}
+		parentID := *run.ParentRunID
+		parent, err := readParent(parentID)
+		if err != nil {
+			return false, err
+		}
+		if parent.ID != parentID {
+			return false, &RejectedError{Reason: "invalid_run_ancestry"}
+		}
+		run = parent
+	}
+	return false, &RejectedError{Reason: "run_ancestry_limit"}
+}
+
 // ValidateWorkRunReservation checks the reservation boundary before any write.
 func ValidateWorkRunReservation(req CreateRunRequest) error {
 	if req.WorkOwner == nil {

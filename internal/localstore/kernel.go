@@ -65,6 +65,16 @@ func (s *Store) claimStepLocked(ctx context.Context, runID, workerID string, ttl
 	if r.NotBefore != nil && r.NotBefore.After(now()) {
 		return domain.Lease{}, domain.ErrNoRunnableStep
 	}
+	workOwned, err := domain.ResolveRunWorkOwnership(r, func(id string) (domain.Run, error) {
+		parent, ok := s.runs[id]
+		if !ok || parent.TenantID != r.TenantID {
+			return domain.Run{}, domain.ErrNotFound
+		}
+		return parent, nil
+	})
+	if err != nil {
+		return domain.Lease{}, err
+	}
 
 	steps := sortedSteps(s.steps, runID)
 	var target *domain.Step
@@ -144,7 +154,7 @@ func (s *Store) claimStepLocked(ctx context.Context, runID, workerID string, ttl
 	s.put("attempt", attemptID, r.ID, int64(target.CurrentAttempt), att)
 	s.appendEvent(r.TenantID, r.ID, target.ID, attemptID, "step.started", "worker", workerID, map[string]any{
 		"seq": target.Seq, "kind": target.Kind})
-	return domain.Lease{TenantID: r.TenantID, RunID: r.ID, StepID: target.ID, StepSeq: target.Seq,
+	return domain.Lease{WorkOwned: workOwned, TenantID: r.TenantID, RunID: r.ID, StepID: target.ID, StepSeq: target.Seq,
 		AttemptID: attemptID, AttemptNo: target.CurrentAttempt, WorkerID: workerID, FenceToken: r.FenceToken,
 		Kind: target.Kind, ExecutorName: target.ExecutorName, FlowNodeID: target.FlowNodeID,
 		InputRef: target.InputRef, InputHash: target.InputHash, GoalRef: r.GoalRef,

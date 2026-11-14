@@ -18,7 +18,7 @@ var _ orchestration.Runs = KernelRuns{}
 type KernelRuns struct {
 	Server        *api.Server
 	WorkAuthority interface {
-		CheckRunActivation(context.Context, work.RunActivation) error
+		WithRunActivation(context.Context, work.RunActivation, func(context.Context) error) error
 	}
 	// MaxResultBytes bounds the result read from the artifact store.
 	MaxResultBytes int
@@ -52,10 +52,12 @@ func (k KernelRuns) ActivateRun(ctx context.Context, req work.RunActivation) err
 	if !ok || k.WorkAuthority == nil {
 		return errors.New("work run activation is unsupported")
 	}
-	if err := k.WorkAuthority.CheckRunActivation(ctx, req); err != nil {
-		return fmt.Errorf("authorize run activation: %w", err)
+	if err := k.WorkAuthority.WithRunActivation(ctx, req, func(activationCtx context.Context) error {
+		return store.ActivateWorkRun(activationCtx, req.TenantID, req.RunID, domain.WorkRunOwner{WorkID: req.WorkID, Generation: req.Generation, StageID: req.StageID})
+	}); err != nil {
+		return fmt.Errorf("activate authorized run: %w", err)
 	}
-	return store.ActivateWorkRun(ctx, req.TenantID, req.RunID, domain.WorkRunOwner{WorkID: req.WorkID, Generation: req.Generation, StageID: req.StageID})
+	return nil
 }
 
 func (k KernelRuns) ListWorkRuns(ctx context.Context, after string, limit int) ([]orchestration.WorkRun, error) {

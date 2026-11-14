@@ -234,6 +234,9 @@ type ActionIntent struct {
 
 // Lease is what a successful claim hands to the worker (§14.2).
 type Lease struct {
+	// WorkOwned is resolved by the claiming store from immutable Run ancestry.
+	// It confines direct tool execution; it does not grant current Work authority.
+	WorkOwned         bool
 	TenantID          string
 	RunID             string
 	StepID            string
