@@ -206,6 +206,13 @@ func (e *env) work() string {
 	if err != nil {
 		e.t.Fatal(err)
 	}
+	active := work.StatusActive
+	// These tests drive actions directly. Do not enqueue their Works for an
+	// unrelated orchestration package sharing the integration database.
+	if _, err := e.store.ApplyWork(e.ctx, work.Mutation{TenantID: e.tn, WorkID: w.ID, ExpectedVersion: w.Version,
+		Status: &active, ClearWake: true, ActorType: "system", ActorID: "test", Now: e.clock.now()}); err != nil {
+		e.t.Fatal(err)
+	}
 	return w.ID
 }
 

@@ -1236,6 +1236,9 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 		}
 		return d.waitFor(st, fmt.Sprintf("awaiting approval of %s on %s", rec.ActionName, rec.TargetRef), &deadline), nil
 	case action.StateReady:
+		if w.Status != work.StatusActive {
+			return step{again: true, m: work.Mutation{Status: statusPtr(work.StatusActive)}}, nil
+		}
 		release, ok := d.o.Pools.actionSlot(w.TenantID)
 		if !ok {
 			return d.queued("actions", "queued: production action pool is full", 5*time.Second)
