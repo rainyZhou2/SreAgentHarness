@@ -20,10 +20,14 @@ func NewReferenceResolver(scope DecisionScope, ledger []Record) *ReferenceResolv
 
 func newReferenceResolverAt(scope DecisionScope, ledger []Record, at time.Time) *ReferenceResolver {
 	r := &ReferenceResolver{aliases: map[string]Record{}, ambiguous: map[string]bool{}, superseded: map[string]bool{}}
+	bySource := map[string][]Record{}
+	byID := map[string]Record{}
 	for _, e := range ledger {
-		if e.TenantID != scope.TenantID || e.WorkID != scope.WorkID || e.ID == "" {
+		if e.TenantID != scope.TenantID || e.WorkID != scope.WorkID || e.ID == "" || (!at.IsZero() && e.CapturedAt.After(at)) {
 			continue
 		}
+		byID[e.ID] = e
+		bySource[e.SourceRef] = append(bySource[e.SourceRef], e)
 		for _, alias := range []string{e.ID, "evidence:" + e.ID, e.SourceRef} {
 			if alias == "" {
 				continue
@@ -33,8 +37,22 @@ func newReferenceResolverAt(scope DecisionScope, ledger []Record, at time.Time) 
 			}
 			r.aliases[alias] = e
 		}
-		if e.Supersedes != "" && (at.IsZero() || !e.CapturedAt.After(at)) {
-			r.superseded[strings.TrimPrefix(e.Supersedes, "evidence:")] = true
+	}
+	for _, e := range byID {
+		ref, canonical := strings.CutPrefix(e.Supersedes, "evidence:")
+		if ref == "" {
+			continue
+		}
+		var predecessors []Record
+		if old, ok := byID[ref]; ok {
+			predecessors = []Record{old}
+		} else if !canonical {
+			predecessors = bySource[ref]
+		}
+		for _, old := range predecessors {
+			if old.ID != e.ID && !old.CapturedAt.After(e.CapturedAt) {
+				r.superseded[old.ID] = true
+			}
 		}
 	}
 	return r
@@ -60,7 +78,7 @@ func (r *ReferenceResolver) Resolve(ref, runID string) (Record, error) {
 	if found.ID == "" {
 		return Record{}, fmt.Errorf("%w: not in this Work's evidence ledger", ErrInvalid)
 	}
-	if r.superseded[found.ID] || r.superseded[found.SourceRef] {
+	if r.superseded[found.ID] {
 		return Record{}, fmt.Errorf("%w: evidence superseded", ErrInvalid)
 	}
 	return found, nil

@@ -287,7 +287,7 @@ func (r *Report) causes(w work.Work, hyps []evidence.Hypothesis) {
 	var roots []Cause
 	for _, h := range hyps {
 		d := h.Decision
-		if !d.CurrentFor(scope, h.Key) {
+		if !h.CurrentDecisionFor(scope) {
 			r.OpenHypotheses = append(r.OpenHypotheses, clip(h.Statement)+" (unadjudicated or obsolete decision)")
 			continue
 		}

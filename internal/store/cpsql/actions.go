@@ -476,7 +476,7 @@ func (s *Store) ListHypotheses(ctx context.Context, tenantID, workID string) ([]
 		}
 		h.Version = v
 		h.Status = evidence.HypInconclusive
-		if h.Decision.CurrentFor(evidence.DecisionScope{TenantID: tenantID, WorkID: workID, Generation: generation}, h.Key) {
+		if h.CurrentDecisionFor(evidence.DecisionScope{TenantID: tenantID, WorkID: workID, Generation: generation}) {
 			h.Status = h.Decision.HypothesisStatus()
 		}
 		out = append(out, h)

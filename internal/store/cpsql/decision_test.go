@@ -196,3 +196,83 @@ func TestLegacyHypothesisJSONRead(t *testing.T) {
 		}
 	})
 }
+
+func TestDecisionBatchRejectsForgedVerdict(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store) {
+		w := mustCreate(t, s, tenant())
+		m := decisionMutation(t, w)
+		d := m.Hypotheses[1].Decision
+		d.Verdict, d.IndependentSupportCount = evidence.DecisionConfirmed, 1
+		d.AcceptedEvidenceRefs = []string{"evidence:invented"}
+		if _, err := s.ApplyWork(context.Background(), m); !errors.Is(err, evidence.ErrInvalid) {
+			t.Fatalf("fabricated confirmation accepted: %v", err)
+		}
+		assertDecisionRollback(t, s, w)
+	})
+}
+
+func TestDecisionBatchBindsDurableEvidenceAndClaim(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store) {
+		for _, change := range []string{"missing record", "changed quality", "omitted superseder", "omitted alias", "statement", "category", "support refs", "finding verdict", "missing finding", "unrelated record"} {
+			t.Run(change, func(t *testing.T) {
+				ctx := context.Background()
+				w := mustCreate(t, s, tenant())
+				r := evidence.Record{ID: cpkit.NewID(), TenantID: w.TenantID, WorkID: w.ID, SourceType: evidence.SourceMetric, SourceRef: "obs://metric", ContentHash: "observation", TrustTier: "T2", Quality: evidence.QualityValid, Relation: evidence.RelCausedBy, CapturedAt: t0}
+				if change != "missing record" {
+					if change == "changed quality" {
+						r.Quality = evidence.QualityStale
+					}
+					var err error
+					r, _, err = s.AddEvidence(ctx, r)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				r.Quality = evidence.QualityValid
+				for _, mode := range []string{"omitted superseder", "omitted alias", "unrelated record"} {
+					if change != mode {
+						continue
+					}
+					extra := r
+					extra.ID, extra.ContentHash = cpkit.NewID(), "extra"
+					if mode != "omitted alias" {
+						extra.SourceRef = "obs://extra"
+					}
+					if mode == "omitted superseder" {
+						extra.Supersedes = r.ID
+					}
+					if _, _, err := s.AddEvidence(ctx, extra); err != nil {
+						t.Fatal(err)
+					}
+				}
+				syn, hs, err := evidence.Adjudicate(evidence.DecisionScope{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation}, []evidence.ResultEnvelope{{RunID: cpkit.NewID(), AgentRole: "investigator", Status: "COMPLETED", Hypotheses: []evidence.ResultHypothesis{{Statement: "bad deploy", Category: evidence.CatContributing, Supports: []string{r.SourceRef}}}}}, []evidence.Record{r}, t0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch change {
+				case "statement":
+					hs[0].Statement = "unrelated cause"
+				case "category":
+					hs[0].Category = evidence.CatRootCause
+				case "support refs":
+					hs[0].Supporting = []string{"invented"}
+				case "missing finding":
+					syn.Findings = nil
+				case "finding verdict":
+					syn.Findings[0].Verdict = evidence.FindingRefuted
+				}
+				_, err = s.ApplyWork(ctx, work.Mutation{TenantID: w.TenantID, WorkID: w.ID, ExpectedVersion: w.Version, ActorType: "system", Now: t0, Findings: syn.Findings, Hypotheses: hs})
+				if change == "unrelated record" {
+					if err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				if !errors.Is(err, evidence.ErrInvalid) {
+					t.Fatalf("unbound %s accepted: %v", change, err)
+				}
+				assertDecisionRollback(t, s, w)
+			})
+		}
+	})
+}

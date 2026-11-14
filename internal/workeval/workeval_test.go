@@ -66,8 +66,12 @@ func TestScoreHealthyWork(t *testing.T) {
 				State: action.StateRejected, Reason: "precondition: generation changed"}},
 		links: []work.RunLink{{RunID: "r1", CostMicros: 250000}, {RunID: "r2", CostMicros: 50000}},
 		evs:   []evidence.Record{{ID: "ev1", TrustTier: "T3"}, {ID: "ev2", TrustTier: "T4"}},
-		hyps: []evidence.Hypothesis{{Key: "h1", Status: evidence.HypSupported, Decision: &evidence.DecisionVerdict{DecisionScope: evidence.DecisionScope{TenantID: "t", WorkID: "w", Generation: 1}, DecisionKey: "h1", Profile: evidence.DecisionProfile, ProfileVersion: 1, Verdict: evidence.DecisionProbable, AcceptedEvidenceRefs: []string{"evidence:ev1"}, IndependentSupportCount: 1, InputDigest: "digest", AdjudicatorVersion: evidence.AdjudicatorVersion, AdjudicatedAt: t0}, Supporting: []string{"ev1"}},
-			{Key: "h2", Status: evidence.HypRefuted}}}
+		hyps:  []evidence.Hypothesis{{Key: "h2", Status: evidence.HypRefuted}}}
+	_, supported, err := evidence.Adjudicate(evidence.DecisionScope{TenantID: "t", WorkID: "w", Generation: 1}, []evidence.ResultEnvelope{{RunID: "r", Status: "COMPLETED", Hypotheses: []evidence.ResultHypothesis{{Statement: "cause", Supports: []string{"ev1"}}}}}, []evidence.Record{{ID: "ev1", TenantID: "t", WorkID: "w", TrustTier: "T3", Quality: evidence.QualityValid, Relation: evidence.RelSupports, CapturedAt: t0, ContentHash: "observation"}}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.hyps = append(supported, f.hyps...)
 	e := &Evaluator{Ledger: f, ToolCalls: func(context.Context, string, string) (int, error) { return 7, nil },
 		MemoryMatch: func(context.Context, work.Work) (int, int, error) { return 1, 2, nil }}
 	sc, err := e.Score(context.Background(), "t", "w")
