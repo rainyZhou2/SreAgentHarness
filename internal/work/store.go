@@ -7,6 +7,7 @@ import (
 
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/outcome"
 )
 
@@ -154,6 +155,10 @@ type Mutation struct {
 	CancelAllWatches bool
 	Outcome          *outcome.Evaluation
 	Subjects         []SubjectLink
+	// Findings and Hypotheses commit the adjudicated decision with the Work
+	// CAS and stage transition. Hypothesis.Version is its expected version.
+	Findings   []evidence.Finding
+	Hypotheses []evidence.Hypothesis
 }
 
 // CheckMutation validates the parts of a mutation that do not need the
@@ -161,6 +166,9 @@ type Mutation struct {
 func CheckMutation(m *Mutation) error {
 	if m.TenantID == "" || m.WorkID == "" {
 		return invalidf("tenant and work id are required")
+	}
+	if (len(m.Findings) > 0 || len(m.Hypotheses) > 0) && m.ExpectedVersion <= 0 {
+		return invalidf("a decision batch requires an expected Work version")
 	}
 	if m.Status != nil && !m.Status.Valid() {
 		return invalidf("unknown status %q", *m.Status)

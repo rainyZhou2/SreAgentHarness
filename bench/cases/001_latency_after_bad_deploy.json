@@ -1,6 +1,6 @@
 {
   "name": "001-latency-after-bad-deploy",
-  "description": "Search P99 rises after a release. The deploy event and the alert land in one Work; the investigation cites the change and the latency metric, a rollback (R2) is approved, P99 and the error rate hold for a stable window, and the Work succeeds on the metrics — not on the run's say-so.",
+  "description": "Search P99 rises after a release. The deploy event and the alert land in one Work; the investigation cites the change and the latency metric, a rollback (R2) is approved, P99 and the error rate hold for a stable window, and the Work succeeds on the metrics — not on the run's say-so. The observations support investigation or mitigation, but do not establish a confirmed root cause.",
   "environment": "production",
   "rules": [
     {
@@ -159,21 +159,21 @@
     {
       "at": "7m",
       "source_type": "change",
-      "source_ref": "argocd://search-api/sync/214",
+      "source_ref": "argocd://search-api/sync/214", "quality": "valid", "relation": "temporally_precedes", "kind": "change", "independence_group": "argocd://search-api/sync/214",
       "trust_tier": "T2",
       "summary": "search-api synced to v2.14.0 six minutes before the alert"
     },
     {
       "at": "7m",
       "source_type": "metric",
-      "source_ref": "prom://search_p99_seconds",
+      "source_ref": "prom://search_p99_seconds", "quality": "valid", "relation": "correlates", "kind": "observation", "independence_group": "prom://search_p99_seconds",
       "trust_tier": "T3",
       "summary": "P99 2.9s since two minutes after the sync; SLO 0.8s"
     },
     {
       "at": "7m",
       "source_type": "trace",
-      "source_ref": "jaeger://search-api/slow",
+      "source_ref": "jaeger://search-api/slow", "quality": "valid", "relation": "supports", "kind": "observation", "independence_group": "jaeger://search-api/slow",
       "trust_tier": "T3",
       "summary": "slow spans are in the ranking stage added by v2.14.0"
     }
@@ -254,7 +254,7 @@
     ],
     "max_runs": 1,
     "max_actions": 1,
-    "root_cause": "v2.14.0",
+    "root_cause": "unknown",
     "max_duration": "45m"
   }
 }

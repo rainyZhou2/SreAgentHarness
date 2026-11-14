@@ -1,6 +1,6 @@
 {
   "name": "008-inference-ttft-queue-saturation",
-  "description": "TTFT breaches its SLO while TPOT holds: the prefill queue is saturated. The prefill pool is scaled (approved, capacity and cost guarded by the executor), and the Work succeeds only when TTFT and TPOT are inside their SLOs for a stable window with the hourly cost inside the budget.",
+  "description": "TTFT breaches its SLO while TPOT holds: the prefill queue is saturated. The prefill pool is scaled (approved, capacity and cost guarded by the executor), and the Work succeeds only when TTFT and TPOT are inside their SLOs for a stable window with the hourly cost inside the budget. The observations support investigation or mitigation, but do not establish a confirmed root cause.",
   "environment": "production",
   "templates": [{"id": "bench-ttft", "kind": "ai_infra", "stages": [
     {"id": "investigate", "type": "run", "phase": "investigate", "run": {"goal": "TTFT breach on ${subjects}: tell prefill from decode"}},
@@ -20,8 +20,8 @@
     {"source": "inference", "query": "hourly_cost_usd", "points": [{"at": "0s", "v": 48}]}
   ],
   "evidence": [
-    {"at": "1m", "source_type": "metric", "source_ref": "inference://llama/prefill_queue", "trust_tier": "T3", "summary": "prefill queue 42 (limit 16); decode queue 1"},
-    {"at": "1m", "source_type": "metric", "source_ref": "inference://llama/tpot_p95", "trust_tier": "T3", "summary": "TPOT p95 31ms, inside its 50ms SLO"}
+    {"at": "1m", "source_type": "metric", "source_ref": "inference://llama/prefill_queue", "quality": "valid", "relation": "supports", "kind": "observation", "independence_group": "inference://llama/prefill_queue", "trust_tier": "T3", "summary": "prefill queue 42 (limit 16); decode queue 1"},
+    {"at": "1m", "source_type": "metric", "source_ref": "inference://llama/tpot_p95", "quality": "valid", "relation": "correlates", "kind": "observation", "independence_group": "inference://llama/tpot_p95", "trust_tier": "T3", "summary": "TPOT p95 31ms, inside its 50ms SLO"}
   ],
   "runs": [{"stage": "investigate", "duration": "3m", "tool_calls": 6, "result": {
     "answer": "TTFT is high while TPOT holds and only the prefill queue is backed up: prefill saturation. Scale the prefill pool by two.",
@@ -34,5 +34,5 @@
   "approvals": [{"action": "serving.scale_prefill", "approver": "ml-platform-oncall", "comment": "inside the cost budget"}],
   "horizon": "2h",
   "expect": {"status": "SUCCEEDED", "pass": true, "applied": ["serving.scale_prefill"], "forbidden": ["serving.scale_decode"], "max_runs": 1,
-    "root_cause": "prefill"}
+    "root_cause": "unknown"}
 }

@@ -63,7 +63,7 @@ func incident() *fake {
 	closed := t0.Add(40 * time.Minute)
 	disp := t0.Add(22 * time.Minute)
 	return &fake{
-		w: work.Work{ID: "w1", TenantID: "t", Kind: work.KindIncident, Status: work.StatusSucceeded, Title: "checkout 5xx",
+		w: work.Work{ID: "w1", TenantID: "t", Generation: 1, Kind: work.KindIncident, Status: work.StatusSucceeded, Title: "checkout 5xx",
 			CreatedAt: t0, ClosedAt: &closed, Goal: work.GoalSpec{SubjectRefs: []string{"deployment://prod/checkout"}}},
 		evs: []work.Event{
 			ev(1, "work.created", 0, map[string]any{"kind": "incident", "title": "checkout 5xx"}),
@@ -82,10 +82,10 @@ func incident() *fake {
 		},
 		recs: []evidence.Record{{ID: "ev-deploy", TrustTier: "T1"}, {ID: "ev-log", TrustTier: "T4"}, {ID: "ev-metric", TrustTier: "T2"}},
 		hyps: []evidence.Hypothesis{
-			{Key: "h1", Statement: "release v2 introduced a nil map write", Status: evidence.HypSupported, Supporting: []string{"ev-deploy", "ev-metric"}},
-			{Key: "h2", Statement: "database saturation", Status: evidence.HypRefuted},
+			{Key: "h1", Statement: "release v2 introduced a nil map write", Status: evidence.HypSupported, Category: evidence.CatRootCause, Decision: testDecision("h1", evidence.DecisionConfirmed, []string{"ev-deploy", "ev-metric"}), Supporting: []string{"ev-deploy", "ev-metric"}},
+			{Key: "h2", Statement: "database saturation", Status: evidence.HypRefuted, Decision: testRefutedDecision("h2")},
 			{Key: "h3", Statement: "the model says DNS", Status: evidence.HypSupported, Supporting: []string{"ev-log"}},
-			{Key: "h4", Statement: "cache stampede", Status: evidence.HypSupported, Supporting: []string{"ev-metric"}},
+			{Key: "h4", Statement: "cache stampede", Status: evidence.HypSupported, Category: evidence.CatContributing, Decision: testDecision("h4", evidence.DecisionConfirmed, []string{"ev-metric"}), Supporting: []string{"ev-metric"}},
 		},
 	}
 }
@@ -104,7 +104,7 @@ func TestBuildIncidentReport(t *testing.T) {
 		t.Fatalf("contributing: %+v", r.Contributing)
 	}
 	// Support from untrusted evidence never becomes a conclusion.
-	if len(r.OpenHypotheses) != 1 || !strings.Contains(r.OpenHypotheses[0], "untrusted") || len(r.Refuted) != 1 {
+	if len(r.OpenHypotheses) != 1 || !strings.Contains(r.OpenHypotheses[0], "unadjudicated") || len(r.Refuted) != 1 {
 		t.Fatalf("hypotheses: %+v / %+v", r.OpenHypotheses, r.Refuted)
 	}
 	if !strings.HasPrefix(r.Trigger, "signal: type=alert.firing") || r.DurationSeconds != 2400 {
@@ -127,12 +127,12 @@ func TestBuildIncidentReport(t *testing.T) {
 	}
 	// 21 minutes to the first mitigation exceeds the 15 minute target.
 	// h3 is "supported" by T4 evidence only: an ungrounded conclusion gap.
-	if r.Scorecard == nil || len(r.Gaps) != 2 || !strings.Contains(r.Gaps[0], "diagnosis gap") || !strings.Contains(r.Gaps[1], "h3") ||
-		len(r.FollowUps) != 2 || r.FollowUps[0].Title != "Shorten time to diagnosis" || r.FollowUps[1].Priority != "low" {
+	if r.Scorecard == nil || len(r.Gaps) != 2 || !strings.Contains(r.Gaps[0], "response gap") || !strings.Contains(r.Gaps[1], "h3") ||
+		len(r.FollowUps) != 2 || r.FollowUps[0].Title != "Shorten time to first action proposal" || r.FollowUps[1].Priority != "low" {
 		t.Fatalf("gaps/follow-ups: %v %+v", r.Gaps, r.FollowUps)
 	}
 	md := Markdown(r)
-	for _, s := range []string{"# Postmortem: checkout 5xx", "## Root cause\n\nrelease v2", "| deployment.rollback |", "### Ruled out", "[medium] **Shorten time to diagnosis**"} {
+	for _, s := range []string{"# Postmortem: checkout 5xx", "## Root cause\n\nrelease v2", "| deployment.rollback |", "### Ruled out", "[medium] **Shorten time to first action proposal**"} {
 		if !strings.Contains(md, s) {
 			t.Errorf("markdown misses %q:\n%s", s, md)
 		}
@@ -166,7 +166,7 @@ func TestUnknownRootCauseAndUnresolvedEffects(t *testing.T) {
 		titles["Reconcile deployment.rollback on deployment://prod/checkout"] != "high" || len(titles) != 3 {
 		t.Fatalf("follow-ups: %+v", r.FollowUps)
 	}
-	if !strings.Contains(Markdown(r), "Unknown. No hypothesis is supported by trusted evidence.") {
+	if !strings.Contains(Markdown(r), "Unknown. No unique confirmed root-cause decision.") {
 		t.Fatal("markdown must say the root cause is unknown")
 	}
 }
@@ -238,5 +238,46 @@ func TestBuiltinReviewTemplates(t *testing.T) {
 	}
 	if strings.Join(types, ",") != "run,action,wait,confirm" || fu.Stages[1].Action.Allowed[0] != "ticket.create" {
 		t.Fatalf("follow-up stages: %v", types)
+	}
+}
+
+func TestCorrelationCannotBecomeRootCause(t *testing.T) {
+	f := incident()
+	f.recs = []evidence.Record{{ID: "change", TrustTier: "T2", Quality: evidence.QualityValid, Relation: evidence.RelCorrelates}}
+	f.hyps = []evidence.Hypothesis{{Key: "change", Statement: "deployment caused outage", Status: evidence.HypSupported, Supporting: []string{"change"}}}
+	r, err := (&Builder{Ledger: f}).Build(context.Background(), "t", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.RootCause != nil {
+		t.Fatalf("correlation became certain root cause: %+v", r.RootCause)
+	}
+}
+
+func testDecision(key, verdict string, refs []string) *evidence.DecisionVerdict {
+	return &evidence.DecisionVerdict{DecisionScope: evidence.DecisionScope{TenantID: "t", WorkID: "w1", Generation: 1}, DecisionKey: key, Profile: evidence.DecisionProfile, ProfileVersion: 1, Verdict: verdict, AcceptedEvidenceRefs: refs, IndependentSupportCount: 1, InputDigest: "digest", AdjudicatorVersion: evidence.AdjudicatorVersion, AdjudicatedAt: t0}
+}
+func testRefutedDecision(key string) *evidence.DecisionVerdict {
+	d := testDecision(key, evidence.DecisionInconclusive, nil)
+	d.IndependentSupportCount = 0
+	d.IndependentRefuteCount = 1
+	return d
+}
+
+func TestPostmortemConsumesCurrentDecisionOnly(t *testing.T) {
+	for _, verdict := range []string{evidence.DecisionProbable, evidence.DecisionInconclusive, evidence.DecisionContested} {
+		f := incident()
+		f.hyps = f.hyps[:1]
+		f.hyps[0].Decision.Verdict = verdict
+		r, err := (&Builder{Ledger: f}).Build(context.Background(), "t", "w1")
+		if err != nil || r.RootCause != nil {
+			t.Fatalf("%s became certain: %+v %v", verdict, r.RootCause, err)
+		}
+	}
+	f := incident()
+	f.w.Generation++
+	r, err := (&Builder{Ledger: f}).Build(context.Background(), "t", "w1")
+	if err != nil || r.RootCause != nil {
+		t.Fatalf("old generation accepted: %+v %v", r.RootCause, err)
 	}
 }

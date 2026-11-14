@@ -1,17 +1,22 @@
 package workapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go-sre-harness/internal/auth"
+	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/store/cpsql"
@@ -20,8 +25,9 @@ import (
 )
 
 type env struct {
-	t   *testing.T
-	mux http.Handler
+	t     *testing.T
+	mux   http.Handler
+	store *cpsql.Store
 }
 
 func newEnv(t *testing.T) *env {
@@ -54,7 +60,7 @@ func newEnv(t *testing.T) *env {
 		}
 		mux.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 	})
-	return &env{t: t, mux: h}
+	return &env{t: t, mux: h, store: s}
 }
 
 func (e *env) do(method, path, tenant, roles string, body any, hdr map[string]string) (int, map[string]any, http.Header) {
@@ -310,5 +316,122 @@ func TestWorkQueueRoutes(t *testing.T) {
 	code, moved, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", cmd, map[string]string{"Idempotency-Key": "sq1"})
 	if code != 200 || moved["queue"] != "routine-work" {
 		t.Fatalf("set_queue: %d %v", code, moved)
+	}
+}
+
+func TestDecisionsEndpointIsolationAndLegacyCompatibility(t *testing.T) {
+	e := newEnv(t)
+	code, w, _ := e.do("POST", "/v1/works", "t1", "operator", map[string]any{"kind": "incident", "goal": map[string]any{"intent": "diagnose"}}, map[string]string{"Idempotency-Key": "decision-work"})
+	if code != http.StatusCreated {
+		t.Fatalf("create %d %v", code, w)
+	}
+	path := "/v1/works/" + w["id"].(string) + "/decisions"
+	if code, _, _ := e.do("GET", path, "t1", "viewer", nil, nil); code != http.StatusOK {
+		t.Fatalf("decisions %d", code)
+	}
+	if code, _, _ := e.do("GET", path, "t2", "viewer", nil, nil); code != http.StatusNotFound {
+		t.Fatalf("foreign tenant %d", code)
+	}
+	if code, _, _ := e.do("GET", path, "t1", "", nil, nil); code != http.StatusForbidden {
+		t.Fatalf("missing role %d", code)
+	}
+}
+
+func TestDecisionContractAcrossAPIViewsAndGenerations(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	code, created, _ := e.do("POST", "/v1/works", "t1", "operator", map[string]any{
+		"kind": "incident", "goal": map[string]any{"intent": "diagnose controlled regression"},
+	}, map[string]string{"Idempotency-Key": "decision-contract"})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, created)
+	}
+	id := created["id"].(string)
+	w, err := e.store.GetWork(ctx, "t1", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC()
+	rec, _, err := e.store.AddEvidence(ctx, evidence.Record{TenantID: "t1", WorkID: id, SourceType: evidence.SourceTool,
+		SourceRef: "experiment://checkout/version-reproduction", TrustTier: "T2", Quality: evidence.QualityValid,
+		Relation: evidence.RelCausedBy, Kind: evidence.KindObservation, CapturedAt: at,
+		Summary: "Controlled v1/v2/v1 reproduction isolates a checkout panic to v2."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	syn, hyps, err := evidence.Adjudicate(evidence.DecisionScope{TenantID: "t1", WorkID: id, Generation: w.Generation},
+		[]evidence.ResultEnvelope{{RunID: cpkit.NewID(), AgentRole: "investigator", Status: "COMPLETED",
+			Hypotheses: []evidence.ResultHypothesis{{Statement: "checkout v2 introduced a panic", Category: evidence.CatRootCause,
+				Status: "VERIFIED", Supports: []string{rec.SourceRef}}}}}, []evidence.Record{rec}, at)
+	if err != nil || len(hyps) != 1 || hyps[0].Decision.Verdict != evidence.DecisionConfirmed {
+		t.Fatalf("adjudication: %+v %v", hyps, err)
+	}
+	w, err = e.store.ApplyWork(ctx, work.Mutation{TenantID: "t1", WorkID: id, ExpectedVersion: w.Version, ActorType: "system", Now: at,
+		Findings: syn.Findings, Hypotheses: hyps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/v1/works/" + id
+	code, decisions, _ := e.do("GET", base+"/decisions", "t1", "viewer", nil, nil)
+	items, _ := decisions["items"].([]any)
+	if code != http.StatusOK || len(items) != 1 {
+		t.Fatalf("decisions: %d %v", code, decisions)
+	}
+	decision := items[0].(map[string]any)
+	want := hyps[0].Decision
+	if decision["input_digest"] != want.InputDigest || decision["verdict"] != want.Verdict || decision["decision_key"] != want.DecisionKey || decision["generation"] != float64(w.Generation) {
+		t.Fatalf("decision changed at API boundary: %v", decision)
+	}
+	code, hypotheses, _ := e.do("GET", base+"/hypotheses", "t1", "viewer", nil, nil)
+	hitems, _ := hypotheses["items"].([]any)
+	if code != http.StatusOK || len(hitems) != 1 {
+		t.Fatalf("hypotheses: %d %v", code, hypotheses)
+	}
+	hypothesis := hitems[0].(map[string]any)
+	hdecision, _ := hypothesis["decision"].(map[string]any)
+	if hypothesis["status"] != evidence.HypSupported || hdecision["input_digest"] != want.InputDigest || hdecision["verdict"] != want.Verdict {
+		t.Fatalf("hypothesis disagrees with decision: %v", hypothesis)
+	}
+	if !reflect.DeepEqual(decision, hdecision) {
+		t.Fatalf("hypothesis and decisions endpoints expose different records: %v vs %v", hdecision, decision)
+	}
+	code, report, _ := e.do("GET", base+"/postmortem", "t1", "viewer", nil, nil)
+	rdecisions, _ := report["decisions"].([]any)
+	root, _ := report["root_cause"].(map[string]any)
+	if code != http.StatusOK || len(rdecisions) != 1 || root["statement"] != hyps[0].Statement {
+		t.Fatalf("postmortem: %d %v", code, report)
+	}
+	rdecision := rdecisions[0].(map[string]any)
+	if rdecision["input_digest"] != want.InputDigest || rdecision["verdict"] != want.Verdict {
+		t.Fatalf("report disagrees with decision: %v", rdecision)
+	}
+	if !reflect.DeepEqual(decision, rdecision) {
+		t.Fatalf("postmortem and decisions endpoints expose different records: %v vs %v", rdecision, decision)
+	}
+
+	next := w.Generation + 1
+	if _, err := e.store.ApplyWork(ctx, work.Mutation{TenantID: "t1", WorkID: id, ExpectedVersion: w.Version, ActorType: "system", Now: at.Add(time.Second), Generation: &next}); err != nil {
+		t.Fatal(err)
+	}
+	code, decisions, _ = e.do("GET", base+"/decisions", "t1", "viewer", nil, nil)
+	items, _ = decisions["items"].([]any)
+	if code != http.StatusOK || len(items) != 0 {
+		t.Fatalf("old generation leaked as current: %d %v", code, decisions)
+	}
+	code, report, _ = e.do("GET", base+"/postmortem", "t1", "viewer", nil, nil)
+	rdecisions, _ = report["decisions"].([]any)
+	if code != http.StatusOK || report["root_cause"] != nil || len(rdecisions) != 0 {
+		t.Fatalf("old generation still establishes a cause: %d %v", code, report)
+	}
+	// The historical hypothesis stays readable, while current-decision
+	// consumers exclude it until the new generation has been adjudicated.
+	code, hypotheses, _ = e.do("GET", base+"/hypotheses", "t1", "viewer", nil, nil)
+	hitems, _ = hypotheses["items"].([]any)
+	if code != http.StatusOK || len(hitems) != 1 {
+		t.Fatalf("historical hypothesis lost: %d %v", code, hypotheses)
+	}
+	hdecision = hitems[0].(map[string]any)["decision"].(map[string]any)
+	if hdecision["input_digest"] != want.InputDigest || hdecision["generation"] != float64(next-1) {
+		t.Fatalf("historical decision rewritten: %v", hdecision)
 	}
 }

@@ -116,7 +116,7 @@ var (
 // Usable reports whether the record may support a conclusion: stale,
 // partial, injected and unresolved evidence is kept for audit but does not
 // count toward a verdict.
-func (r Record) Usable() bool { return r.Quality == "" || r.Quality == QualityValid }
+func (r Record) Usable() bool { return r.Quality == QualityValid }
 
 // Group is the independence group of the record; records without one are
 // independent by content.
@@ -203,15 +203,16 @@ const (
 
 // Hypothesis is a Work-level hypothesis tracked across runs.
 type Hypothesis struct {
-	ID         string   `json:"id"`
-	TenantID   string   `json:"tenant_id"`
-	WorkID     string   `json:"work_id"`
-	Key        string   `json:"key"` // normalized statement key (dedup across agents)
-	Statement  string   `json:"statement"`
-	Category   string   `json:"category"`
-	Status     string   `json:"status"`
-	Supporting []string `json:"supporting_evidence_refs,omitempty"`
-	Refuting   []string `json:"refuting_evidence_refs,omitempty"`
+	ID         string           `json:"id"`
+	TenantID   string           `json:"tenant_id"`
+	WorkID     string           `json:"work_id"`
+	Key        string           `json:"key"` // normalized statement key (dedup across agents)
+	Statement  string           `json:"statement"`
+	Category   string           `json:"category"`
+	Status     string           `json:"status"`
+	Decision   *DecisionVerdict `json:"decision,omitempty"`
+	Supporting []string         `json:"supporting_evidence_refs,omitempty"`
+	Refuting   []string         `json:"refuting_evidence_refs,omitempty"`
 	// Confidence is the model's self-estimate, kept for calibration only.
 	Confidence float64   `json:"confidence"`
 	Proponents []string  `json:"proponents,omitempty"` // agent roles / run ids
@@ -397,9 +398,8 @@ type MergedHypothesis struct {
 	Proponents []string `json:"proponents"`
 }
 
-// Merge combines agent results without voting: per hypothesis, evidence
-// for and against is unioned and the status derived from it; agents that
-// disagree are reported as conflicts; failed agents are gaps.
+// Merge summarizes untrusted agent claims for display. Only Adjudicate can
+// promote a hypothesis; reported disagreements remain unresolved claims.
 func Merge(results []ResultEnvelope) MergeReport {
 	rep := MergeReport{Summaries: map[string]string{}}
 	byKey := map[string]*MergedHypothesis{}
@@ -463,7 +463,7 @@ func Merge(results []ResultEnvelope) MergeReport {
 	sort.Strings(keys)
 	for _, k := range keys {
 		m := byKey[k]
-		m.Status = DeriveStatus(len(m.Supporting), len(m.Refuting))
+		m.Status = HypOpen
 		if len(support[k]) > 0 && len(refute[k]) > 0 {
 			c := Conflict{Key: k, Statement: m.Statement}
 			for w := range support[k] {
@@ -475,7 +475,7 @@ func Merge(results []ResultEnvelope) MergeReport {
 			sort.Strings(c.SupportBy)
 			sort.Strings(c.RefuteBy)
 			rep.Conflicts = append(rep.Conflicts, c)
-			m.Status = HypChallenged
+			m.Status = HypInconclusive
 		}
 		rep.Hypotheses = append(rep.Hypotheses, *m)
 	}

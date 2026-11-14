@@ -5,7 +5,7 @@
     "kind": "incident", "title": "payments latency", "template": "incident",
     "goal": {"intent": "explain latency", "subject_refs": ["service://prod/payments"]}
   },
-  "evidence": [{"source_type": "tool", "source_ref": "mcp://wiki/page-7", "trust_tier": "T4", "summary": "wiki says DNS is flaky"}],
+  "evidence": [{"source_type": "tool", "source_ref": "mcp://wiki/page-7", "quality": "valid", "relation": "supports", "kind": "observation", "independence_group": "mcp://wiki/page-7", "trust_tier": "T4", "summary": "wiki says DNS is flaky"}],
   "runs": [
     {"stage": "investigate", "duration": "3m",
      "result": {"answer": "DNS is the cause.", "hypotheses": [{"id": "h1", "statement": "DNS resolution is slow", "status": "VERIFIED", "supports": ["mcp://wiki/page-7"]}]}},

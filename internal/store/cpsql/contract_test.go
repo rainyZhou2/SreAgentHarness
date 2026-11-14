@@ -574,7 +574,7 @@ func TestEvidenceStore(t *testing.T) {
 		h := evidence.Hypothesis{ID: cpkit.NewID(), TenantID: tn, WorkID: w.ID, Statement: "bad deploy v2",
 			Supporting: []string{a.ID}}
 		h1, err := s.UpsertHypothesis(ctx, h, 0)
-		if err != nil || h1.Status != evidence.HypSupported {
+		if err != nil || h1.Status != evidence.HypInconclusive {
 			t.Fatalf("hyp: %v %+v", err, h1)
 		}
 		if _, err := s.UpsertHypothesis(ctx, h, 0); !errors.Is(err, evidence.ErrVersionConflict) {
@@ -582,7 +582,7 @@ func TestEvidenceStore(t *testing.T) {
 		}
 		h1.Refuting = []string{"ev-2"}
 		h2, err := s.UpsertHypothesis(ctx, h1, h1.Version)
-		if err != nil || h2.Status != evidence.HypChallenged {
+		if err != nil || h2.Status != evidence.HypInconclusive {
 			t.Fatalf("update: %v %+v", err, h2)
 		}
 		hs, _ := s.ListHypotheses(ctx, tn, w.ID)

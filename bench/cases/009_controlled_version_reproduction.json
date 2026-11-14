@@ -1,0 +1,80 @@
+{
+  "name": "009-controlled-version-reproduction",
+  "description": "A simulated isolated v1/v2/v1 experiment holds requests and dependencies fixed, reproduces the panic only on v2, and verifies its disappearance on reversion. This explicit causal observation supports a confirmed diagnosis; the operator separately confirms the investigation outcome.",
+  "templates": [
+    {
+      "id": "bench-causal",
+      "stages": [
+        {
+          "id": "investigate",
+          "type": "run",
+          "run": {
+            "goal": "Review the controlled version experiment"
+          }
+        },
+        {
+          "id": "confirm",
+          "type": "confirm"
+        }
+      ]
+    }
+  ],
+  "work": {
+    "kind": "incident",
+    "title": "Controlled checkout regression reproduction",
+    "template": "bench-causal",
+    "goal": {
+      "intent": "explain the regression",
+      "subject_refs": [
+        "service://test/checkout"
+      ]
+    }
+  },
+  "evidence": [
+    {
+      "source_type": "tool",
+      "source_ref": "experiment://checkout/controlled-v1-v2-v1",
+      "trust_tier": "T2",
+      "quality": "valid",
+      "relation": "caused_by",
+      "kind": "observation",
+      "independence_group": "controlled-run-7",
+      "summary": "Identical isolated requests and dependencies: v1 passes, v2 reproducibly panics, reversion to v1 passes. Version is the only changed variable."
+    }
+  ],
+  "runs": [
+    {
+      "stage": "investigate",
+      "duration": "1m",
+      "result": {
+        "answer": "The controlled version experiment attributes the panic to checkout v2.",
+        "hypotheses": [
+          {
+            "statement": "checkout v2 introduced a panic",
+            "category": "root_cause",
+            "status": "VERIFIED",
+            "supports": [
+              "experiment://checkout/controlled-v1-v2-v1"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "human": [
+    {
+      "stage": "confirm",
+      "command": "confirm",
+      "payload": {
+        "verdict": "satisfied"
+      }
+    }
+  ],
+  "expect": {
+    "status": "SUCCEEDED",
+    "pass": true,
+    "root_cause": "checkout v2",
+    "max_runs": 1,
+    "max_actions": 1
+  }
+}

@@ -29,7 +29,7 @@ func TestMergeKeepsEvidenceAndReportsGaps(t *testing.T) { // T17
 			pool = &rep.Hypotheses[i]
 		}
 	}
-	if pool == nil || pool.Status != HypChallenged || len(pool.Supporting) != 1 || len(pool.Refuting) != 1 ||
+	if pool == nil || pool.Status != HypInconclusive || len(pool.Supporting) != 1 || len(pool.Refuting) != 1 ||
 		pool.Supporting[0] != "run:run-a#obs:step2" {
 		t.Fatalf("pool: %+v", pool)
 	}
