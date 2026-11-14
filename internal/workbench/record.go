@@ -81,6 +81,25 @@ func Record(ctx context.Context, src Source, tenantID, workID string) (Case, err
 
 	// Runs: owner links in creation order, results rebuilt from ledgers.
 	sort.SliceStable(links, func(i, j int) bool { return links[i].CreatedAt.Before(links[j].CreatedAt) })
+	sourceCounts := map[string]int{}
+	for _, ev := range evs {
+		sourceCounts[ev.SourceRef]++
+	}
+	refs := make(map[string]string, 2*len(evs))
+	for _, ev := range evs {
+		source := ev.SourceRef
+		if sourceCounts[source] > 1 {
+			// An exact ledger ID must remain exact when an address has several
+			// observations. Do not turn it into an ambiguous source alias.
+			source = "replay-evidence://" + ev.ID
+		} else {
+			refs[ev.SourceRef] = source
+		}
+		refs[ev.ID], refs["evidence:"+ev.ID] = source, source
+		if sourceCounts[ev.Supersedes] > 1 {
+			return Case{}, fmt.Errorf("record evidence %s: ambiguous supersession source %s", ev.ID, ev.Supersedes)
+		}
+	}
 	hypsOf, actOf := attribute(tpl, links, hyps, acts)
 	for _, l := range links {
 		if l.StageID == "" {
@@ -93,7 +112,7 @@ func Record(ctx context.Context, src Source, tenantID, workID string) (Case, err
 		if failed(l) {
 			sr.Status, sr.FailureReason = "failed", "recorded run ended "+firstNonEmpty(l.Outcome, l.Status)
 		}
-		sr.Result = runResult(l, hypsOf[l.RunID], actOf[l.RunID])
+		sr.Result = runResult(l, hypsOf[l.RunID], actOf[l.RunID], refs)
 		c.Runs = append(c.Runs, sr)
 	}
 
@@ -161,13 +180,15 @@ func Record(ctx context.Context, src Source, tenantID, workID string) (Case, err
 		c.Metrics = append(c.Metrics, *series[k])
 	}
 
-	// Evidence not produced by runs (runs re-produce theirs).
+	// Raw run summaries are reproduced by the scripted runs. Tool and other
+	// observations remain evidence even when a run collected them.
 	for _, r := range evs {
-		if r.RunID != "" {
+		if r.SourceType == evidence.SourceRun && r.TrustTier == "T4" && r.Quality == "" {
 			continue
 		}
-		c.Evidence = append(c.Evidence, Evidence{At: off(r.CapturedAt), SourceType: r.SourceType, SourceRef: r.SourceRef,
-			TrustTier: r.TrustTier, Summary: r.Summary})
+		c.Evidence = append(c.Evidence, Evidence{At: off(r.CapturedAt), SourceType: r.SourceType, SourceRef: refs[r.ID],
+			TrustTier: r.TrustTier, Summary: r.Summary, Quality: r.Quality, Relation: r.Relation, Kind: r.Kind, IndependenceGroup: r.IndependenceGroup,
+			Supersedes: replayRef(r.Supersedes, refs, r.RunID), ContentHash: r.ContentHash})
 	}
 
 	// Human confirmations at the stage they were given.
@@ -260,7 +281,7 @@ func failed(l work.RunLink) bool {
 }
 
 // runResult rebuilds the result document of one run from the ledgers.
-func runResult(l work.RunLink, hyps []evidence.Hypothesis, act *action.Record) json.RawMessage {
+func runResult(l work.RunLink, hyps []evidence.Hypothesis, act *action.Record, refs map[string]string) json.RawMessage {
 	doc := map[string]any{"answer": "recorded run " + l.RunID}
 	var hs []map[string]any
 	for _, h := range hyps {
@@ -271,8 +292,43 @@ func runResult(l work.RunLink, hyps []evidence.Hypothesis, act *action.Record) j
 		case evidence.HypRefuted:
 			status = "REFUTED"
 		}
+		if h.Decision != nil && h.Decision.ClaimedSupport {
+			status = "VERIFIED"
+		}
+		supports, refutes := replayRefs(h.Supporting, refs, l.RunID), replayRefs(h.Refuting, refs, l.RunID)
+		if h.Decision != nil && h.Decision.Input != nil {
+			// Replaying only the accepted refs would erase rejected claims and
+			// make an originally ungrounded conclusion pass the grounding gate.
+			supports, refutes = nil, nil
+			var snapshot []evidence.Record
+			for _, rec := range h.Decision.Input.Evidence {
+				if !rec.CapturedAt.After(h.Decision.Input.At) {
+					snapshot = append(snapshot, rec)
+				}
+			}
+			resolver := evidence.NewReferenceResolver(h.Decision.Input.Scope, snapshot)
+			resolve := func(raw []string, runID string) []string {
+				out := make([]string, 0, len(raw))
+				for _, ref := range raw {
+					if rec, err := resolver.Resolve(ref, runID); err == nil {
+						ref = "evidence:" + rec.ID
+					}
+					out = append(out, replayRef(ref, refs, runID))
+				}
+				return out
+			}
+			for _, env := range h.Decision.Input.Results {
+				for _, input := range env.Hypotheses {
+					if evidence.HypothesisKey(input.Statement) != h.Key {
+						continue
+					}
+					supports = append(supports, resolve(input.Supports, env.RunID)...)
+					refutes = append(refutes, resolve(input.Refutes, env.RunID)...)
+				}
+			}
+		}
 		hs = append(hs, map[string]any{"id": h.Key, "statement": h.Statement, "category": h.Category, "status": status,
-			"supports": h.Supporting, "refutes": h.Refuting})
+			"supports": supports, "refutes": refutes})
 	}
 	if len(hs) > 0 {
 		doc["hypotheses"] = hs
@@ -289,6 +345,26 @@ func runResult(l work.RunLink, hyps []evidence.Hypothesis, act *action.Record) j
 	}
 	b, _ := json.Marshal(doc)
 	return b
+}
+
+// Replay allocates fresh ledger IDs. Stable source references are resolved
+// to those IDs by the same adjudicator used in the original execution.
+func replayRefs(refs []string, sources map[string]string, runID string) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, replayRef(ref, sources, runID))
+	}
+	return out
+}
+
+func replayRef(ref string, sources map[string]string, runID string) string {
+	if source := sources[ref]; source != "" {
+		return source
+	}
+	if source := sources["run:"+runID+"#"+ref]; source != "" {
+		return source
+	}
+	return ref
 }
 
 // Comparison is a replay against the recorded Work.

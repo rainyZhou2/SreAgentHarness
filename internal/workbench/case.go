@@ -103,11 +103,17 @@ type Point struct {
 
 // Evidence is operator/telemetry evidence added to the primary Work.
 type Evidence struct {
-	At         cpkit.Duration `json:"at,omitempty"`
-	SourceType string         `json:"source_type"`
-	SourceRef  string         `json:"source_ref"`
-	TrustTier  string         `json:"trust_tier"`
-	Summary    string         `json:"summary,omitempty"`
+	At                cpkit.Duration `json:"at,omitempty"`
+	SourceType        string         `json:"source_type"`
+	SourceRef         string         `json:"source_ref"`
+	TrustTier         string         `json:"trust_tier"`
+	Summary           string         `json:"summary,omitempty"`
+	Quality           string         `json:"quality,omitempty"`
+	Relation          string         `json:"relation,omitempty"`
+	Kind              string         `json:"kind,omitempty"`
+	IndependenceGroup string         `json:"independence_group,omitempty"`
+	Supersedes        string         `json:"supersedes,omitempty"`
+	ContentHash       string         `json:"content_hash,omitempty"`
 }
 
 // ScriptedRun answers the runs a stage starts. Runs for the same stage

@@ -85,11 +85,12 @@ type Scorecard struct {
 	OutOfScopeActions      int      `json:"out_of_scope_actions"`
 	SecondaryIncidents     []string `json:"secondary_incidents,omitempty"`
 
-	DiagnosisSeconds float64 `json:"diagnosis_seconds"`
-	DurationSeconds  float64 `json:"duration_seconds"`
-	Runs             int     `json:"runs"`
-	ToolCalls        int     `json:"tool_calls"`
-	CostUSD          float64 `json:"cost_usd"`
+	TimeToFirstActionProposalSeconds *float64 `json:"time_to_first_action_proposal_seconds,omitempty"`
+	DiagnosisSeconds                 float64  `json:"diagnosis_seconds"`
+	DurationSeconds                  float64  `json:"duration_seconds"`
+	Runs                             int      `json:"runs"`
+	ToolCalls                        int      `json:"tool_calls"`
+	CostUSD                          float64  `json:"cost_usd"`
 
 	MemoriesRecalled int `json:"memories_recalled"`
 	MemoriesMatched  int `json:"memories_matched"`
@@ -126,8 +127,6 @@ const (
 	GateUnverifiedClaim = "success_without_verified_outcome"
 )
 
-func trusted(tier string) bool { return tier == "T1" || tier == "T2" || tier == "T3" }
-
 // Score evaluates one Work.
 func (e *Evaluator) Score(ctx context.Context, tenantID, workID string) (Scorecard, error) {
 	w, err := e.Ledger.GetWork(ctx, tenantID, workID)
@@ -147,23 +146,25 @@ func (e *Evaluator) Score(ctx context.Context, tenantID, workID string) (Scoreca
 	if err != nil {
 		return sc, err
 	}
-	evs, err := e.Ledger.ListEvidence(ctx, tenantID, workID, 1000)
-	if err != nil {
-		return sc, err
-	}
 	hyps, err := e.Ledger.ListHypotheses(ctx, tenantID, workID)
 	if err != nil {
 		return sc, err
 	}
 
 	e.outcomes(&sc, w, evals)
-	e.grounding(&sc, hyps, evs)
-	e.actions(ctx, &sc, w, acts)
-	e.cost(ctx, &sc, w, links, acts)
+	e.grounding(&sc, w, hyps)
+	if err := e.actions(ctx, &sc, w, acts); err != nil {
+		return sc, err
+	}
+	if err := e.cost(ctx, &sc, w, links, acts); err != nil {
+		return sc, err
+	}
 	if e.MemoryMatch != nil {
-		if m, t, err := e.MemoryMatch(ctx, w); err == nil {
-			sc.MemoriesMatched, sc.MemoriesRecalled = m, t
+		m, t, err := e.MemoryMatch(ctx, w)
+		if err != nil {
+			return sc, fmt.Errorf("memory applicability: %w", err)
 		}
+		sc.MemoriesMatched, sc.MemoriesRecalled = m, t
 	}
 	gate := func(ok bool, name string) {
 		if !ok {
@@ -234,29 +235,17 @@ func (e *Evaluator) outcomes(sc *Scorecard, w work.Work, evals []outcome.Evaluat
 	}
 }
 
-func (e *Evaluator) grounding(sc *Scorecard, hyps []evidence.Hypothesis, evs []evidence.Record) {
-	byRef := map[string]evidence.Record{}
-	for _, r := range evs {
-		byRef[r.ID] = r
-		if r.SourceRef != "" {
-			byRef[r.SourceRef] = r
-		}
-	}
+func (e *Evaluator) grounding(sc *Scorecard, w work.Work, hyps []evidence.Hypothesis) {
+	scope := evidence.DecisionScope{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation}
 	for _, h := range hyps {
-		if h.Status != evidence.HypSupported {
-			continue
-		}
-		sc.SupportedConclusions++
-		grounded := false
-		for _, ref := range h.Supporting {
-			if r, ok := byRef[ref]; ok && trusted(r.TrustTier) {
-				grounded = true
-				break
-			}
-		}
-		if grounded {
+		d := h.Decision
+		current := d.CurrentFor(scope, h.Key)
+		supported := current && (d.Verdict == evidence.DecisionConfirmed || d.Verdict == evidence.DecisionProbable)
+		if supported {
+			sc.SupportedConclusions++
 			sc.GroundedConclusions++
-		} else {
+		} else if h.Status == evidence.HypSupported || (current && d.ClaimedSupport) {
+			sc.SupportedConclusions++
 			sc.UngroundedRefs = append(sc.UngroundedRefs, h.Key)
 		}
 	}
@@ -273,7 +262,7 @@ func violation(reason string) bool {
 
 func dispatched(a action.Record) bool { return a.MayHaveDispatched || a.DispatchedAt != nil }
 
-func (e *Evaluator) actions(ctx context.Context, sc *Scorecard, w work.Work, acts []action.Record) {
+func (e *Evaluator) actions(ctx context.Context, sc *Scorecard, w work.Work, acts []action.Record) error {
 	sort.SliceStable(acts, func(i, j int) bool { return acts[i].CreatedAt.Before(acts[j].CreatedAt) })
 	unknownSince := map[string]time.Time{} // target -> first unknown dispatch
 	for _, a := range acts {
@@ -319,7 +308,7 @@ func (e *Evaluator) actions(ctx context.Context, sc *Scorecard, w work.Work, act
 		seen[a.TargetRef] = true
 		others, err := e.Ledger.ListWorks(ctx, work.Filter{TenantID: w.TenantID, Subject: a.TargetRef, Kind: work.KindIncident, Limit: 50})
 		if err != nil {
-			continue
+			return fmt.Errorf("secondary incidents: %w", err)
 		}
 		for _, o := range others {
 			if o.ID == w.ID || o.CreatedAt.Before(*a.DispatchedAt) || o.CreatedAt.After(a.DispatchedAt.Add(window)) {
@@ -328,6 +317,7 @@ func (e *Evaluator) actions(ctx context.Context, sc *Scorecard, w work.Work, act
 			sc.SecondaryIncidents = append(sc.SecondaryIncidents, o.ID)
 		}
 	}
+	return nil
 }
 
 func inScope(target string, subjects []string) bool {
@@ -342,30 +332,45 @@ func inScope(target string, subjects []string) bool {
 	return false
 }
 
-func (e *Evaluator) cost(ctx context.Context, sc *Scorecard, w work.Work, links []work.RunLink, acts []action.Record) {
+func (e *Evaluator) cost(ctx context.Context, sc *Scorecard, w work.Work, links []work.RunLink, acts []action.Record) error {
 	end := w.UpdatedAt
 	if w.ClosedAt != nil {
 		end = *w.ClosedAt
 	}
 	sc.DurationSeconds = round(end.Sub(w.CreatedAt).Seconds())
 	diag := end
+	var firstProposal time.Time
 	for _, a := range acts {
-		if a.CreatedAt.Before(diag) && !a.CreatedAt.IsZero() {
+		if a.CreatedAt.IsZero() {
+			continue
+		}
+		if firstProposal.IsZero() || a.CreatedAt.Before(firstProposal) {
+			firstProposal = a.CreatedAt
+		}
+		if a.CreatedAt.Before(diag) {
 			diag = a.CreatedAt
 		}
 	}
+	if !firstProposal.IsZero() {
+		seconds := round(firstProposal.Sub(w.CreatedAt).Seconds())
+		sc.TimeToFirstActionProposalSeconds = &seconds
+	}
+	// Retain the legacy field's Work-end bound for existing consumers.
 	sc.DiagnosisSeconds = round(diag.Sub(w.CreatedAt).Seconds())
 	var micros int64
 	for _, l := range links {
 		sc.Runs++
 		micros += l.CostMicros
 		if e.ToolCalls != nil {
-			if n, err := e.ToolCalls(ctx, w.TenantID, l.RunID); err == nil {
-				sc.ToolCalls += n
+			n, err := e.ToolCalls(ctx, w.TenantID, l.RunID)
+			if err != nil {
+				return fmt.Errorf("run tool usage: %w", err)
 			}
+			sc.ToolCalls += n
 		}
 	}
 	sc.CostUSD = round(float64(micros) / 1e6)
+	return nil
 }
 
 func round(v float64) float64 { return math.Round(v*1000) / 1000 }

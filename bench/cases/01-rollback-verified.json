@@ -1,6 +1,6 @@
 {
   "name": "rollback-verified",
-  "description": "A bad deploy raises checkout errors; the investigation proposes a rollback (R2, approved), the error rate recovers and verification succeeds on metrics.",
+  "description": "A bad deploy raises checkout errors; the investigation proposes a rollback (R2, approved), the error rate recovers and verification succeeds on metrics. The observations support investigation or mitigation, but do not establish a confirmed root cause.",
   "templates": [{
     "id": "bench-mitigate", "kind": "incident",
     "stages": [
@@ -23,14 +23,14 @@
   },
   "metrics": [{"source": "prom", "query": "checkout_error_rate", "points": [{"at": "0s", "v": 0.08}]}],
   "evidence": [
-    {"source_type": "change", "source_ref": "argocd://checkout/sync/42", "trust_tier": "T2", "summary": "checkout synced to v2 at 09:58"},
-    {"source_type": "metric", "source_ref": "prom://checkout_error_rate", "trust_tier": "T3", "summary": "5xx rate 8% since 09:59"}
+    {"source_type": "change", "source_ref": "argocd://checkout/sync/42", "quality": "valid", "relation": "temporally_precedes", "kind": "change", "independence_group": "argocd://checkout/sync/42", "trust_tier": "T2", "summary": "checkout synced to v2 at 09:58"},
+    {"source_type": "metric", "source_ref": "prom://checkout_error_rate", "quality": "valid", "relation": "correlates", "kind": "observation", "independence_group": "prom://checkout_error_rate", "trust_tier": "T3", "summary": "5xx rate 8% since 09:59"}
   ],
   "runs": [{
     "stage": "investigate", "duration": "4m", "tool_calls": 9,
     "result": {
-      "answer": "Deploy v2 broke checkout; roll back to v1.",
-      "hypotheses": [{"id": "h1", "statement": "deploy v2 introduced a regression in checkout", "status": "VERIFIED",
+      "answer": "Deploy v2 precedes the incident and is a candidate cause; propose an approved rollback and verify recovery.",
+      "hypotheses": [{"id": "h1", "statement": "deploy v2 introduced a regression in checkout", "status": "UNVERIFIED",
         "supports": ["argocd://checkout/sync/42", "prom://checkout_error_rate"]}],
       "loop": {"cost_usd": 0.31},
       "proposed_action": {"action": "deployment.rollback", "target": "deployment://prod/checkout", "args": {"to_revision": "41"}}
@@ -44,6 +44,6 @@
   "approvals": [{"action": "deployment.rollback", "approver": "oncall-lead", "comment": "matches the deploy timeline"}],
   "expect": {
     "status": "SUCCEEDED", "pass": true, "applied": ["deployment.rollback"], "max_runs": 1,
-    "root_cause": "deploy v2", "max_duration": "30m"
+    "root_cause": "unknown", "max_duration": "30m"
   }
 }

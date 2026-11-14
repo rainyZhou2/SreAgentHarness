@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go-sre-harness/internal/workbench"
 )
 
 func TestWorkBenchCLI(t *testing.T) {
@@ -17,19 +20,23 @@ func TestWorkBenchCLI(t *testing.T) {
 	ctx := context.Background()
 	env := func(string) string { return "" }
 	dir := t.TempDir()
+	cases, err := workbench.LoadCases("../../bench/cases")
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, base := filepath.Join(dir, "out.json"), filepath.Join(dir, "base.json")
 	var so, se bytes.Buffer
 	if code := WorkBench(ctx, []string{"run", "../../bench/cases", "-out", out, "-write-baseline", base}, env, &so, &se); code != 0 {
 		t.Fatalf("run: %d\n%s", code, se.String())
 	}
-	if !strings.Contains(se.String(), "12 passed, 0 failed") {
+	if !strings.Contains(se.String(), fmt.Sprintf("%d passed, 0 failed", len(cases))) {
 		t.Fatalf("stderr: %s", se.String())
 	}
 	var suite struct {
 		Passed int `json:"cases_passed"`
 	}
 	b, _ := os.ReadFile(out)
-	if json.Unmarshal(b, &suite) != nil || suite.Passed != 12 {
+	if json.Unmarshal(b, &suite) != nil || suite.Passed != len(cases) {
 		t.Fatalf("output: %s", b)
 	}
 	if code := WorkBench(ctx, []string{"run", "../../bench/cases", "-baseline", base, "-out", filepath.Join(dir, "o2.json")}, env, &so, &se); code != 0 {

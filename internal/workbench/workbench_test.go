@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/workeval"
@@ -184,5 +186,162 @@ func TestCaseValidation(t *testing.T) {
 		if _, err := ParseCases([]byte(b)); err == nil {
 			t.Errorf("accepted %s", b)
 		}
+	}
+}
+
+func TestCausalEvidenceRecordReplay(t *testing.T) {
+	// This fixture is a controlled isolated experiment, unlike the temporal
+	// correlations in the mitigation cases. Only the tested version changes.
+	cs, err := ParseCases([]byte(`{
+	  "name":"controlled-version-reproduction",
+	  "templates":[{"id":"causal","stages":[{"id":"investigate","type":"run","run":{"goal":"diagnose"}},{"id":"confirm","type":"confirm"}]}],
+	  "work":{"kind":"incident","template":"causal","goal":{"intent":"explain regression","subject_refs":["service://test/checkout"]}},
+	  "evidence":[{"source_type":"tool","source_ref":"experiment://checkout/controlled-v1-v2-v1","trust_tier":"T2",
+	    "quality":"valid","relation":"caused_by","kind":"observation","independence_group":"controlled-run-7",
+	    "summary":"Identical isolated requests and dependencies: v1 passes, v2 reproducibly panics, reversion to v1 passes."}],
+	  "runs":[{"stage":"investigate","duration":"1m","result":{"hypotheses":[{"statement":"checkout v2 introduced a panic","category":"root_cause","status":"VERIFIED","supports":["experiment://checkout/controlled-v1-v2-v1"]}]}}],
+	  "human":[{"stage":"confirm","command":"confirm","payload":{"verdict":"satisfied"}}],
+	  "expect":{"status":"SUCCEEDED","pass":true,"root_cause":"checkout v2"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, dir := cs[0], t.TempDir()
+	original, err := (&Runner{Dir: dir}).Run(context.Background(), c)
+	if err != nil || !original.Passed {
+		t.Fatalf("causal case: %+v %v", original, err)
+	}
+	src, err := cpsql.OpenSQLite(filepath.Join(dir, safeName(c.Name), "cp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	recorded, err := Record(context.Background(), src, c.Tenant, original.WorkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported []map[string]any
+	if err := json.Unmarshal(MarshalIndent(recorded.Evidence), &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != 1 || exported[0]["quality"] != evidence.QualityValid || exported[0]["relation"] != evidence.RelCausedBy || exported[0]["kind"] != evidence.KindObservation || exported[0]["independence_group"] != "controlled-run-7" {
+		t.Fatalf("evidence dimensions lost: %s", MarshalIndent(recorded.Evidence))
+	}
+	if len(recorded.Runs) != 1 || !strings.Contains(string(recorded.Runs[0].Result), c.Evidence[0].SourceRef) || strings.Contains(string(recorded.Runs[0].Result), "evidence:") {
+		t.Fatalf("run references were not rebound to stable sources: %s", MarshalIndent(recorded.Runs))
+	}
+	cmp, err := Replay(context.Background(), &Runner{}, src, &workeval.Evaluator{Ledger: src}, c.Tenant, original.WorkID)
+	if err != nil || !cmp.Match || cmp.Replay.RootCause != original.RootCause || cmp.Replay.Scorecard.GroundedConclusions != 1 {
+		t.Fatalf("causal replay differs: %+v %v", cmp, err)
+	}
+	links, err := src.ListRunLinks(context.Background(), c.Tenant, original.WorkID)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("run link: %+v %v", links, err)
+	}
+	if _, _, err := src.AddEvidence(context.Background(), evidence.Record{TenantID: c.Tenant, WorkID: original.WorkID, RunID: links[0].RunID,
+		SourceType: evidence.SourceTool, SourceRef: "experiment://checkout/tool-observation", TrustTier: "T2", Quality: evidence.QualityValid,
+		Relation: evidence.RelSupports, Kind: evidence.KindObservation, Summary: "Tool observation collected by the investigation run"}); err != nil {
+		t.Fatal(err)
+	}
+	recorded, err = Record(context.Background(), src, c.Tenant, original.WorkID)
+	if err != nil || len(recorded.Evidence) != 2 {
+		t.Fatalf("run-owned tool evidence lost: %+v %v", recorded.Evidence, err)
+	}
+}
+
+func TestReplayPreservesRejectedClaim(t *testing.T) {
+	c, dir := load(t, "04-ungrounded-conclusion.json"), t.TempDir()
+	original, err := (&Runner{Dir: dir}).Run(context.Background(), c)
+	if err != nil || !original.Passed || original.Scorecard.Pass {
+		t.Fatalf("ungrounded fixture did not exercise gate: %+v %v", original, err)
+	}
+	src, err := cpsql.OpenSQLite(filepath.Join(dir, safeName(c.Name), "cp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	cmp, err := Replay(context.Background(), &Runner{}, src, &workeval.Evaluator{Ledger: src}, c.Tenant, original.WorkID)
+	if err != nil || !cmp.Match || cmp.Replay.Scorecard.Pass {
+		t.Fatalf("replay erased the rejected claim: %+v %v", cmp, err)
+	}
+}
+
+func TestReplayPreservesSupersession(t *testing.T) {
+	c, dir := load(t, "009_controlled_version_reproduction.json"), t.TempDir()
+	var correction Evidence
+	if err := json.Unmarshal([]byte(`{"source_type":"tool","source_ref":"experiment://checkout/correction","trust_tier":"T2","quality":"valid","relation":"refutes","kind":"observation","supersedes":"experiment://checkout/controlled-v1-v2-v1","summary":"The original run used mismatched dependencies; corrected reproduction does not reproduce the failure."}`), &correction); err != nil {
+		t.Fatal(err)
+	}
+	c.Evidence = append(c.Evidence, correction)
+	c.Expect.RootCause = "unknown"
+	pass := false
+	c.Expect.Pass, c.Expect.Gates = &pass, []string{workeval.GateUngrounded}
+	original, err := (&Runner{Dir: dir}).Run(context.Background(), c)
+	if err != nil || !original.Passed {
+		t.Fatalf("superseded evidence counted: %+v %v", original, err)
+	}
+	src, err := cpsql.OpenSQLite(filepath.Join(dir, safeName(c.Name), "cp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	cmp, err := Replay(context.Background(), &Runner{}, src, &workeval.Evaluator{Ledger: src}, c.Tenant, original.WorkID)
+	if err != nil || !cmp.Match || cmp.Replay.RootCause != "" {
+		t.Fatalf("replay revived superseded evidence: %+v %v", cmp, err)
+	}
+}
+
+func TestReplayPreservesCanonicalRefWithAmbiguousSource(t *testing.T) {
+	c, dir := load(t, "009_controlled_version_reproduction.json"), t.TempDir()
+	original, err := (&Runner{Dir: dir}).Run(context.Background(), c)
+	if err != nil || !original.Passed {
+		t.Fatalf("original: %+v %v", original, err)
+	}
+	src, err := cpsql.OpenSQLite(filepath.Join(dir, safeName(c.Name), "cp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	ctx := context.Background()
+	ledger, err := src.ListEvidence(ctx, c.Tenant, original.WorkID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cause evidence.Record
+	for _, r := range ledger {
+		if r.SourceRef == c.Evidence[0].SourceRef {
+			cause = r
+		}
+	}
+	copy := cause
+	copy.ID, copy.ContentHash, copy.Summary = "", "another-observation", "Another observation shares the source address"
+	copy.IndependenceGroup = "other"
+	if _, _, err := src.AddEvidence(ctx, copy); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = src.ListEvidence(ctx, c.Tenant, original.WorkID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := src.GetWork(ctx, c.Tenant, original.WorkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := src.ListHypotheses(ctx, c.Tenant, original.WorkID)
+	if err != nil || len(previous) != 1 {
+		t.Fatalf("hypotheses: %+v %v", previous, err)
+	}
+	syn, hyps, err := evidence.Adjudicate(evidence.DecisionScope{TenantID: c.Tenant, WorkID: w.ID, Generation: w.Generation},
+		[]evidence.ResultEnvelope{{RunID: cpkit.NewID(), AgentRole: "experiment", Status: "COMPLETED", Hypotheses: []evidence.ResultHypothesis{{Statement: previous[0].Statement, Category: evidence.CatRootCause, Status: "VERIFIED", Supports: []string{"evidence:" + cause.ID}}}}}, ledger, w.UpdatedAt)
+	if err != nil || len(hyps) != 1 || hyps[0].Decision.Verdict != evidence.DecisionConfirmed {
+		t.Fatalf("exact canonical ref should resolve: %+v %v", hyps, err)
+	}
+	hyps[0].ID, hyps[0].Version = previous[0].ID, previous[0].Version
+	if _, err := src.ApplyWork(ctx, work.Mutation{TenantID: c.Tenant, WorkID: w.ID, ExpectedVersion: w.Version, ActorType: "system", Now: w.UpdatedAt, Findings: syn.Findings, Hypotheses: hyps}); err != nil {
+		t.Fatal(err)
+	}
+	cmp, err := Replay(ctx, &Runner{}, src, &workeval.Evaluator{Ledger: src}, c.Tenant, w.ID)
+	if err != nil || !cmp.Match || cmp.Replay.RootCause == "" {
+		t.Fatalf("canonical ref became ambiguous on replay: %+v %v", cmp, err)
 	}
 }

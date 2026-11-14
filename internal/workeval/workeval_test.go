@@ -53,7 +53,7 @@ func fp(v float64) *float64 { return &v }
 func TestScoreHealthyWork(t *testing.T) {
 	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
 	disp, closed := t0.Add(5*time.Minute), t0.Add(20*time.Minute)
-	f := &fake{works: map[string]work.Work{"w": {ID: "w", TenantID: "t", Kind: work.KindIncident, Status: work.StatusSucceeded,
+	f := &fake{works: map[string]work.Work{"w": {ID: "w", TenantID: "t", Generation: 1, Kind: work.KindIncident, Status: work.StatusSucceeded,
 		CreatedAt: t0, ClosedAt: &closed, Goal: work.GoalSpec{SubjectRefs: []string{"deployment://prod/checkout"}}}},
 		evals: []outcome.Evaluation{ // newest first
 			{ID: "e2", Verdict: outcome.Satisfied, Objectives: []outcome.ObjectiveResult{{ID: "err", Verdict: outcome.Satisfied, Value: fp(0.002)},
@@ -66,7 +66,7 @@ func TestScoreHealthyWork(t *testing.T) {
 				State: action.StateRejected, Reason: "precondition: generation changed"}},
 		links: []work.RunLink{{RunID: "r1", CostMicros: 250000}, {RunID: "r2", CostMicros: 50000}},
 		evs:   []evidence.Record{{ID: "ev1", TrustTier: "T3"}, {ID: "ev2", TrustTier: "T4"}},
-		hyps: []evidence.Hypothesis{{Key: "h1", Status: evidence.HypSupported, Supporting: []string{"ev1"}},
+		hyps: []evidence.Hypothesis{{Key: "h1", Status: evidence.HypSupported, Decision: &evidence.DecisionVerdict{DecisionScope: evidence.DecisionScope{TenantID: "t", WorkID: "w", Generation: 1}, DecisionKey: "h1", Profile: evidence.DecisionProfile, ProfileVersion: 1, Verdict: evidence.DecisionProbable, AcceptedEvidenceRefs: []string{"evidence:ev1"}, IndependentSupportCount: 1, InputDigest: "digest", AdjudicatorVersion: evidence.AdjudicatorVersion, AdjudicatedAt: t0}, Supporting: []string{"ev1"}},
 			{Key: "h2", Status: evidence.HypRefuted}}}
 	e := &Evaluator{Ledger: f, ToolCalls: func(context.Context, string, string) (int, error) { return 7, nil },
 		MemoryMatch: func(context.Context, work.Work) (int, int, error) { return 1, 2, nil }}
@@ -92,7 +92,7 @@ func TestScoreGates(t *testing.T) {
 	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
 	d1, d2 := t0.Add(time.Minute), t0.Add(3*time.Minute)
 	f := &fake{works: map[string]work.Work{
-		"w": {ID: "w", TenantID: "t", Kind: work.KindIncident, Status: work.StatusSucceeded, CreatedAt: t0, UpdatedAt: t0.Add(time.Hour),
+		"w": {ID: "w", TenantID: "t", Generation: 1, Kind: work.KindIncident, Status: work.StatusSucceeded, CreatedAt: t0, UpdatedAt: t0.Add(time.Hour),
 			Goal: work.GoalSpec{SubjectRefs: []string{"deployment://prod/checkout"}}},
 		"secondary": {ID: "secondary", TenantID: "t", Kind: work.KindIncident, CreatedAt: t0.Add(10 * time.Minute),
 			Goal: work.GoalSpec{SubjectRefs: []string{"deployment://prod/checkout"}}}},
@@ -127,3 +127,70 @@ func TestScoreGates(t *testing.T) {
 }
 
 func fp2(b bool) *bool { return &b }
+
+func TestStaleEvidenceCannotGroundConclusion(t *testing.T) {
+	f := &fake{works: map[string]work.Work{"w": {ID: "w", TenantID: "t"}},
+		evs:  []evidence.Record{{ID: "stale", TrustTier: "T2", Quality: evidence.QualityStale}},
+		hyps: []evidence.Hypothesis{{Key: "h", Status: evidence.HypSupported, Supporting: []string{"stale"}}}}
+	sc, err := (&Evaluator{Ledger: f}).Score(context.Background(), "t", "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.GroundedConclusions != 0 || sc.Pass {
+		t.Fatalf("stale evidence counted as grounded: %+v", sc)
+	}
+}
+
+func TestFirstActionProposalTimeIndependentOfWorkEnd(t *testing.T) {
+	created := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	end := created.Add(time.Minute)
+	for _, closed := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			at   time.Time
+			want float64
+		}{
+			{"equal", end, 60},
+			{"later", end.Add(time.Minute), 120},
+		} {
+			name := "updated/" + tc.name
+			if closed {
+				name = "closed/" + tc.name
+			}
+			t.Run(name, func(t *testing.T) {
+				w := work.Work{CreatedAt: created, UpdatedAt: end}
+				if closed {
+					w.ClosedAt = &end
+				}
+				acts := []action.Record{
+					{Plan: action.Plan{CreatedAt: tc.at.Add(time.Minute)}},
+					{}, // Missing timestamps do not count as a proposal time.
+					{Plan: action.Plan{CreatedAt: tc.at}},
+				}
+				var sc Scorecard
+				if err := (&Evaluator{}).cost(context.Background(), &sc, w, nil, acts); err != nil {
+					t.Fatal(err)
+				}
+				if sc.TimeToFirstActionProposalSeconds == nil || *sc.TimeToFirstActionProposalSeconds != tc.want {
+					t.Fatalf("first proposal time = %v, want %v seconds", sc.TimeToFirstActionProposalSeconds, tc.want)
+				}
+				if sc.DiagnosisSeconds != 60 || sc.DurationSeconds != 60 {
+					t.Fatalf("legacy time fields changed: %+v", sc)
+				}
+			})
+		}
+	}
+}
+
+func TestFirstActionProposalTimeAbsentWithoutTimestamp(t *testing.T) {
+	created := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	for _, acts := range [][]action.Record{nil, {{}}} {
+		var sc Scorecard
+		if err := (&Evaluator{}).cost(context.Background(), &sc, work.Work{CreatedAt: created, UpdatedAt: created.Add(time.Minute)}, nil, acts); err != nil {
+			t.Fatal(err)
+		}
+		if sc.TimeToFirstActionProposalSeconds != nil {
+			t.Fatalf("no timestamped proposal: %+v", sc)
+		}
+	}
+}

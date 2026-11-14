@@ -395,6 +395,12 @@ func (d *driver) apply(ctx context.Context, m work.Mutation) error {
 	}
 	sp.SetAttributes(attribute.String("work.status", string(w.Status)), attribute.Int64("work.version", w.Version))
 	sp.End()
+	for _, f := range m.Findings {
+		d.o.Metrics.finding(f.Verdict)
+		for range f.Rejected {
+			d.o.Metrics.finding("rejected")
+		}
+	}
 	if w.Status.Terminal() || w.Stage != d.w.Stage || w.Generation != d.w.Generation {
 		// Left the stage (terminated, replanned, advanced): whatever the
 		// stage still reserved is returned. Runs of a stage that was left
@@ -928,15 +934,18 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		}
 	}
 	rep := evidence.Merge(envs)
-	if err := d.recordHypotheses(ctx, rep); err != nil {
-		return step{}, err
-	}
 	payload := map[string]any{"summary": summarize(rep), "verdict": rep.Verdict, "conflicts": rep.Conflicts,
 		"gaps": rep.Gaps, "cost_usd": rep.CostUSD, "proposed": proposed}
 	if len(rep.NextChecks) > 0 {
 		payload["next_checks"] = rep.NextChecks
 	}
-	syn, err := d.synthesize(ctx, envs)
+	syn, hypotheses, err := d.synthesize(ctx, envs)
+	if errors.Is(err, evidence.ErrDecisionLimit) {
+		s := d.block(err.Error())
+		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
+		d.o.Metrics.limit("adjudication")
+		return s, nil
+	}
 	if err != nil {
 		return step{}, err
 	}
@@ -947,6 +956,7 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 	if max := w.Goal.Constraints.MaxCostUSD; max > 0 && float64(w.CostMicros+cost)/1e6 > max {
 		s := d.block(fmt.Sprintf("cost budget exceeded (%.2f USD > %.2f USD)", float64(w.CostMicros+cost)/1e6, max))
 		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
+		s.m.Findings, s.m.Hypotheses = syn.Findings, hypotheses
 		return s, nil
 	}
 	if rep.Verdict == "FAILED" {
@@ -956,41 +966,65 @@ func (d *driver) runStage(ctx context.Context, stage work.Stage, st stageState) 
 		}
 		s := d.fail(stage, stage.OnFailure, reason)
 		s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
+		s.m.Findings, s.m.Hypotheses = syn.Findings, hypotheses
 		return s, nil
 	}
 	s := d.advance(stage, payload)
 	s.m.LinkStatus, s.m.LinkResults, s.m.AddCost = linkStatus, linkResults, cost
+	s.m.Findings, s.m.Hypotheses = syn.Findings, hypotheses
 	return s, nil
 }
 
-// synthesize validates the agents' hypotheses against the Work's evidence
-// ledger and records the findings (design §11.2). Recording is idempotent,
-// so a retried step stores nothing twice.
-func (d *driver) synthesize(ctx context.Context, envs []evidence.ResultEnvelope) (Synthesis, error) {
+// synthesize prepares the batch; ApplyWork commits it with the stage transition.
+func (d *driver) synthesize(ctx context.Context, envs []evidence.ResultEnvelope) (Synthesis, []evidence.Hypothesis, error) {
 	has := false
 	for _, e := range envs {
 		has = has || len(e.Hypotheses) > 0 || e.Status != "COMPLETED"
 	}
 	if !has {
-		return Synthesis{}, nil
+		return Synthesis{}, nil, nil
 	}
 	ledger, err := d.o.Store.ListEvidence(ctx, d.w.TenantID, d.w.ID, 1000)
 	if err != nil {
-		return Synthesis{}, err
+		return Synthesis{}, nil, err
 	}
-	syn := Synthesize(envs, ledger, d.o.now())
-	for i := range syn.Findings {
-		f, _, err := d.o.Store.AddFinding(ctx, d.w.TenantID, d.w.ID, syn.Findings[i])
-		if err != nil {
-			return syn, err
+	if len(ledger) >= 1000 {
+		return Synthesis{}, nil, fmt.Errorf("%w: evidence ledger reaches 1000 records", evidence.ErrDecisionLimit)
+	}
+	existing, err := d.o.Store.ListHypotheses(ctx, d.w.TenantID, d.w.ID)
+	if err != nil {
+		return Synthesis{}, nil, err
+	}
+	byKey := map[string]evidence.Hypothesis{}
+	scope := evidence.DecisionScope{TenantID: d.w.TenantID, WorkID: d.w.ID, Generation: d.w.Generation}
+	inputs := append([]evidence.ResultEnvelope(nil), envs...)
+	for _, h := range existing {
+		byKey[h.Key] = h
+		if h.Decision != nil && !h.Decision.CurrentFor(scope, h.Key) {
+			continue
 		}
-		syn.Findings[i] = f
-		d.o.Metrics.finding(f.Verdict)
+		if len(envs) == 0 {
+			continue
+		}
+		claim := ""
+		if h.Decision != nil && h.Decision.ClaimedSupport {
+			claim = "SUPPORTED"
+		}
+		inputs = append(inputs, evidence.ResultEnvelope{RunID: envs[0].RunID, AgentRole: "prior_findings", Status: "COMPLETED", Hypotheses: []evidence.ResultHypothesis{{Statement: h.Statement, Category: h.Category, Status: claim, Supports: h.Supporting, Refutes: h.Refuting}}})
 	}
-	for i := 0; i < syn.Rejected; i++ {
-		d.o.Metrics.finding("rejected")
+	syn, hypotheses, err := evidence.Adjudicate(scope, inputs, ledger, d.o.now())
+	if err != nil {
+		return syn, nil, err
 	}
-	return syn, nil
+	for i := range hypotheses {
+		h := &hypotheses[i]
+		if old, ok := byKey[h.Key]; ok {
+			h.ID, h.Version = old.ID, old.Version
+		} else {
+			h.ID = cpkit.NewID()
+		}
+	}
+	return syn, hypotheses, nil
 }
 
 // assignmentOutcome classifies how an agent assignment ended.
@@ -1026,53 +1060,6 @@ func summarize(rep evidence.MergeReport) string {
 		fmt.Fprintf(&b, "Missing investigations: %s.\n", strings.Join(rep.Gaps, ", "))
 	}
 	return cpkit.Truncate(strings.TrimSpace(b.String()), evidence.MaxSummary)
-}
-
-func (d *driver) recordHypotheses(ctx context.Context, rep evidence.MergeReport) error {
-	if len(rep.Hypotheses) == 0 {
-		return nil
-	}
-	existing, err := d.o.Store.ListHypotheses(ctx, d.w.TenantID, d.w.ID)
-	if err != nil {
-		return err
-	}
-	byKey := map[string]evidence.Hypothesis{}
-	for _, h := range existing {
-		byKey[h.Key] = h
-	}
-	for i, m := range rep.Hypotheses {
-		if i >= evidence.MaxHypotheses {
-			break
-		}
-		h, ok := byKey[m.Key]
-		if !ok {
-			h = evidence.Hypothesis{ID: cpkit.NewID(), TenantID: d.w.TenantID, WorkID: d.w.ID, Key: m.Key,
-				Statement: cpkit.Truncate(m.Statement, evidence.MaxStatement), Category: m.Category}
-		}
-		for _, e := range m.Supporting {
-			h.Supporting = appendUnique(h.Supporting, e)
-		}
-		for _, e := range m.Refuting {
-			h.Refuting = appendUnique(h.Refuting, e)
-		}
-		for _, p := range m.Proponents {
-			h.Proponents = appendUnique(h.Proponents, p)
-		}
-		h.UpdatedAt = d.o.now()
-		if _, err := d.o.Store.UpsertHypothesis(ctx, h, h.Version); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func appendUnique(s []string, v string) []string {
-	for _, x := range s {
-		if x == v {
-			return s
-		}
-	}
-	return append(s, v)
 }
 
 // summaries returns the latest completion summary per stage, for

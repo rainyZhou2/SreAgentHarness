@@ -247,6 +247,10 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		if m.LeaseOwner != "" && (w.LeaseOwner != m.LeaseOwner || w.LeaseUntil == nil || !w.LeaseUntil.After(now)) {
 			return work.ErrLeaseLost
 		}
+		decisionEvent, err := s.writeDecisionBatch(ctx, tx, w, m, now)
+		if err != nil {
+			return err
+		}
 		from, from0Gen := w.Status, w.Generation
 		if m.Status != nil {
 			cmd := ""
@@ -397,6 +401,9 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 			}
 		}
 		evs := m.Events
+		if decisionEvent != nil {
+			evs = append(append([]work.NewEvent{}, evs...), *decisionEvent)
+		}
 		if w.Status != from {
 			evs = append([]work.NewEvent{{Type: "work.status_changed", Payload: map[string]any{
 				"from": from, "to": w.Status, "reason": w.Reason, "stage": w.Stage, "generation": w.Generation}}}, evs...)

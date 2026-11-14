@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/action"
+	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/work"
 )
@@ -379,30 +380,48 @@ func (s *Store) GetEvidence(ctx context.Context, tenantID, id string) (evidence.
 // UpsertHypothesis inserts (expectedVersion 0) or CAS-updates a hypothesis
 // keyed by (tenant, work, key).
 func (s *Store) UpsertHypothesis(ctx context.Context, h evidence.Hypothesis, expectedVersion int64) (evidence.Hypothesis, error) {
+	// This compatibility API has no Work CAS or adjudication inputs. Agent
+	// references and caller-supplied decisions cannot authorize a conclusion.
+	h.Status, h.Decision = evidence.HypInconclusive, nil
+	return s.upsertHypothesis(ctx, s.db, h, expectedVersion)
+}
+
+func (s *Store) upsertHypothesis(ctx context.Context, db decisionWriter, h evidence.Hypothesis, expectedVersion int64) (evidence.Hypothesis, error) {
 	if h.Key == "" {
 		h.Key = evidence.HypothesisKey(h.Statement)
 	}
-	if h.TenantID == "" || h.WorkID == "" || h.Key == "" {
+	if h.TenantID == "" || h.WorkID == "" || h.Key == "" || expectedVersion < 0 {
 		return h, fmt.Errorf("%w: hypothesis needs tenant, work and key", evidence.ErrInvalid)
 	}
 	if h.UpdatedAt.IsZero() {
 		h.UpdatedAt = s.now()
 	}
-	h.Status = evidence.DeriveStatus(len(h.Supporting), len(h.Refuting))
 	if expectedVersion == 0 {
 		if h.ID == "" {
-			return h, fmt.Errorf("%w: hypothesis id required", evidence.ErrInvalid)
+			h.ID = cpkit.NewID()
 		}
 		h.Version = 1
-		_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO work_hypotheses (id, tenant_id, work_id, hyp_key, status, record,
+		_, err := db.ExecContext(ctx, s.q(`INSERT INTO work_hypotheses (id, tenant_id, work_id, hyp_key, status, record,
 			version, updated_at) VALUES (?,?,?,?,?,?,1,?)`), h.ID, h.TenantID, h.WorkID, h.Key, h.Status, js(h), s.t(h.UpdatedAt))
 		if isUnique(err, "") {
 			return h, evidence.ErrVersionConflict
 		}
 		return h, err
 	}
+	var id string
+	if err := db.QueryRowContext(ctx, s.q(`SELECT id FROM work_hypotheses WHERE tenant_id=? AND work_id=? AND hyp_key=? AND version=?`),
+		h.TenantID, h.WorkID, h.Key, expectedVersion).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return h, evidence.ErrVersionConflict
+		}
+		return h, err
+	}
+	if h.ID != "" && h.ID != id {
+		return h, evidence.ErrVersionConflict
+	}
+	h.ID = id
 	h.Version = expectedVersion + 1
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE work_hypotheses SET status=?, record=?, version=?, updated_at=?
+	res, err := db.ExecContext(ctx, s.q(`UPDATE work_hypotheses SET status=?, record=?, version=?, updated_at=?
 		WHERE tenant_id=? AND work_id=? AND hyp_key=? AND version=?`), h.Status, js(h), h.Version, s.t(h.UpdatedAt),
 		h.TenantID, h.WorkID, h.Key, expectedVersion)
 	if err != nil {
@@ -416,8 +435,9 @@ func (s *Store) UpsertHypothesis(ctx context.Context, h evidence.Hypothesis, exp
 
 // ListHypotheses lists a Work's hypotheses.
 func (s *Store) ListHypotheses(ctx context.Context, tenantID, workID string) ([]evidence.Hypothesis, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT record, version FROM work_hypotheses WHERE tenant_id=? AND work_id=?
-		ORDER BY hyp_key LIMIT 500`), tenantID, workID)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT h.record, h.version, w.generation FROM work_hypotheses h
+ JOIN agent_works w ON w.tenant_id=h.tenant_id AND w.id=h.work_id
+ WHERE h.tenant_id=? AND h.work_id=? ORDER BY h.hyp_key LIMIT 500`), tenantID, workID)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +446,8 @@ func (s *Store) ListHypotheses(ctx context.Context, tenantID, workID string) ([]
 	for rows.Next() {
 		var body jb
 		var v int64
-		if err := rows.Scan(&body, &v); err != nil {
+		var generation int
+		if err := rows.Scan(&body, &v, &generation); err != nil {
 			return nil, err
 		}
 		var h evidence.Hypothesis
@@ -434,6 +455,10 @@ func (s *Store) ListHypotheses(ctx context.Context, tenantID, workID string) ([]
 			return nil, err
 		}
 		h.Version = v
+		h.Status = evidence.HypInconclusive
+		if h.Decision.CurrentFor(evidence.DecisionScope{TenantID: tenantID, WorkID: workID, Generation: generation}, h.Key) {
+			h.Status = h.Decision.HypothesisStatus()
+		}
 		out = append(out, h)
 	}
 	return out, rows.Err()

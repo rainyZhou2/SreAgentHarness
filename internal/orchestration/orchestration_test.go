@@ -17,6 +17,7 @@ import (
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eventing"
+	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/store/cpsql"
@@ -297,7 +298,7 @@ func TestIncidentWorkHumanConfirmed(t *testing.T) {
 		t.Fatalf("want waiting at verify, got %s at %+v (%s)", w.Status, st.ID, w.Reason)
 	}
 	hs, _ := h.store.ListHypotheses(h.ctx, "t1", w.ID)
-	if len(hs) != 1 || hs[0].Status != "SUPPORTED" {
+	if len(hs) != 1 || hs[0].Status != evidence.HypInconclusive || hs[0].Decision == nil {
 		t.Fatalf("hypotheses: %+v", hs)
 	}
 	if w.CostMicros != 250000 {

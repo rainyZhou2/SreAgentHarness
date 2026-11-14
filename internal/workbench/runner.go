@@ -296,7 +296,8 @@ func (e *env) applyDue(fx *fixtures, now time.Time) error {
 		}
 		fx.evidence[i] = true
 		if _, _, err := e.store.AddEvidence(e.ctx, evidence.Record{TenantID: c.Tenant, WorkID: e.primary, SourceType: ev.SourceType,
-			SourceRef: ev.SourceRef, TrustTier: ev.TrustTier, Summary: ev.Summary, CapturedAt: now, ActorID: "bench"}); err != nil {
+			SourceRef: ev.SourceRef, TrustTier: ev.TrustTier, Summary: ev.Summary, CapturedAt: now, ActorID: "bench",
+			Quality: ev.Quality, Relation: ev.Relation, Kind: ev.Kind, IndependenceGroup: ev.IndependenceGroup, Supersedes: ev.Supersedes, ContentHash: ev.ContentHash}); err != nil {
 			return fmt.Errorf("evidence %s: %w", ev.SourceRef, err)
 		}
 	}

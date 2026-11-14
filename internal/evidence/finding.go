@@ -24,6 +24,7 @@ const (
 // Finding is one agent's structured statement about one hypothesis.
 type Finding struct {
 	ID           string      `json:"id,omitempty"`
+	Generation   int         `json:"generation,omitempty"`
 	TenantID     string      `json:"tenant_id,omitempty"`
 	WorkID       string      `json:"work_id,omitempty"`
 	RunID        string      `json:"run_id"`
@@ -52,8 +53,9 @@ type Finding struct {
 func (f Finding) PayloadHash() string {
 	return cpkit.MustHash(struct {
 		Run, Role, Hyp, Statement, Verdict string
+		Generation                         int
 		Supports, Refutes                  []string
-	}{f.RunID, f.Role, f.HypothesisID, f.Statement, f.Verdict, f.Supports, f.Refutes})
+	}{f.RunID, f.Role, f.HypothesisID, f.Statement, f.Verdict, f.Generation, f.Supports, f.Refutes})
 }
 
 // Synthesis is the validated result of a stage's agents.
@@ -68,12 +70,6 @@ type Synthesis struct {
 	// absence is recorded; the findings of the others stand.
 	Unavailable map[string]string `json:"unavailable,omitempty"`
 	Rejected    int               `json:"rejected_refs"`
-}
-
-// evidenceID extracts the ledger id of an "evidence:<id>" reference.
-func evidenceID(ref string) (string, bool) {
-	id, ok := strings.CutPrefix(ref, "evidence:")
-	return id, ok && cpkit.ValidID(id)
 }
 
 // Synthesize validates what the agents of a stage reported against the
@@ -91,10 +87,15 @@ func evidenceID(ref string) (string, bool) {
 //   - opposite verdicts on one hypothesis make it contested, with a
 //     distinguishing check — the number of agents on each side is ignored.
 func Synthesize(envs []ResultEnvelope, ledger []Record, at time.Time) Synthesis {
-	byID := map[string]Record{}
-	for _, r := range ledger {
-		byID[r.ID] = r
+	scope := DecisionScope{}
+	if len(ledger) > 0 {
+		scope.TenantID, scope.WorkID = ledger[0].TenantID, ledger[0].WorkID
 	}
+	return synthesize(scope, envs, ledger, at)
+}
+
+func synthesize(scope DecisionScope, envs []ResultEnvelope, ledger []Record, at time.Time) Synthesis {
+	resolver := newReferenceResolverAt(scope, ledger, at)
 	out := Synthesis{Unavailable: map[string]string{}}
 	for _, env := range envs {
 		who := firstNonEmpty(env.AgentRole, env.RunID)
@@ -104,25 +105,30 @@ func Synthesize(envs []ResultEnvelope, ledger []Record, at time.Time) Synthesis 
 			continue
 		}
 		for _, h := range env.Hypotheses {
-			f := Finding{RunID: env.RunID, Role: who, Statement: cpkit.Truncate(h.Statement, MaxStatement),
+			f := Finding{TenantID: scope.TenantID, WorkID: scope.WorkID, Generation: scope.Generation, RunID: env.RunID, Role: who, Statement: cpkit.Truncate(h.Statement, MaxStatement),
 				HypothesisID: HypothesisKey(h.Statement), Confidence: h.Confidence, Claimed: strings.ToLower(h.Status),
 				NextChecks: env.NextChecks, Gaps: env.Uncertainties, CreatedAt: at}
 			var sawCausal bool
-			accept := func(refs []string) ([]string, int) {
+			accept := func(refs []string, supporting bool) ([]string, int) {
 				groups := map[string]bool{}
 				var kept []string
 				for _, ref := range refs {
-					id, ok := evidenceID(ref)
-					rec, known := byID[id]
+					rec, err := resolver.Resolve(ref, env.RunID)
 					switch {
-					case !ok || !known:
-						f.Rejected = append(f.Rejected, ref+": not in this Work's evidence ledger")
-					case rec.CapturedAt.After(at):
+					case err != nil:
+						f.Rejected = append(f.Rejected, ref+": "+err.Error())
+					case rec.CapturedAt.IsZero() || rec.CapturedAt.After(at):
 						f.Rejected = append(f.Rejected, ref+": captured after the investigation")
-					case !rec.Usable():
+					case !rec.Usable() || rec.Kind == KindInference:
 						f.Rejected = append(f.Rejected, ref+": evidence is "+rec.Quality)
+					case rec.TrustTier != "T1" && rec.TrustTier != "T2" && rec.TrustTier != "T3":
+						f.Rejected = append(f.Rejected, ref+": untrusted evidence")
+					case supporting && rec.Relation != RelSupports && rec.Relation != RelCausedBy && rec.Relation != RelCorrelates && rec.Relation != RelPrecedes:
+						f.Rejected = append(f.Rejected, ref+": relation does not support the claim")
+					case !supporting && rec.Relation != RelRefutes:
+						f.Rejected = append(f.Rejected, ref+": relation does not refute the claim")
 					default:
-						kept = append(kept, ref)
+						kept = appendUnique(kept, "evidence:"+rec.ID)
 						groups[rec.Group()] = true
 						f.SourceTimes = append(f.SourceTimes, rec.CapturedAt)
 						if rec.Relation != RelCorrelates && rec.Relation != RelPrecedes {
@@ -132,12 +138,12 @@ func Synthesize(envs []ResultEnvelope, ledger []Record, at time.Time) Synthesis 
 				}
 				return kept, len(groups)
 			}
-			f.Supports, f.IndependentSupport = accept(h.Supports)
+			f.Supports, f.IndependentSupport = accept(h.Supports, true)
 			supportIsCausal := sawCausal
-			f.Refutes, f.IndependentRefute = accept(h.Refutes)
+			f.Refutes, f.IndependentRefute = accept(h.Refutes, false)
 			out.Rejected += len(f.Rejected)
 			switch {
-			case f.IndependentSupport > 0 && f.IndependentRefute > 0:
+			case f.IndependentSupport > 0 && supportIsCausal && f.IndependentRefute > 0:
 				f.Verdict = FindingContested
 			case f.IndependentRefute > 0:
 				f.Verdict = FindingRefuted

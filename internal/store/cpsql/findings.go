@@ -14,6 +14,10 @@ var _ evidence.FindingStore = (*Store)(nil)
 // AddFinding records an agent finding; the same content for the same Work
 // is returned instead of duplicated.
 func (s *Store) AddFinding(ctx context.Context, tenantID, workID string, f evidence.Finding) (evidence.Finding, bool, error) {
+	return s.addFinding(ctx, s.db, tenantID, workID, f)
+}
+
+func (s *Store) addFinding(ctx context.Context, db decisionWriter, tenantID, workID string, f evidence.Finding) (evidence.Finding, bool, error) {
 	if !cpkit.ValidID(workID) || !cpkit.ValidID(f.RunID) || f.Role == "" || f.Statement == "" {
 		return f, false, fmt.Errorf("finding needs a work, a run, a role and a statement")
 	}
@@ -26,7 +30,7 @@ func (s *Store) AddFinding(ctx context.Context, tenantID, workID string, f evide
 	}
 	hash := f.PayloadHash()
 	refs := append(append([]string{}, f.Supports...), f.Refutes...)
-	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO work_findings (tenant_id, work_id, finding_id, run_id, role, hypothesis_key,
+	res, err := db.ExecContext(ctx, s.q(`INSERT INTO work_findings (tenant_id, work_id, finding_id, run_id, role, hypothesis_key,
 		verdict, statement, evidence_refs, record, payload_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (tenant_id, work_id, payload_hash) DO NOTHING`), tenantID, workID, f.ID, f.RunID, f.Role,
 		nullStr(f.HypothesisID), f.Verdict, f.Statement, js(refs), js(f), hash, s.t(f.CreatedAt))
@@ -35,7 +39,7 @@ func (s *Store) AddFinding(ctx context.Context, tenantID, workID string, f evide
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		var body jb
-		if err := s.db.QueryRowContext(ctx, s.q(`SELECT record FROM work_findings WHERE tenant_id=? AND work_id=? AND payload_hash=?`),
+		if err := db.QueryRowContext(ctx, s.q(`SELECT record FROM work_findings WHERE tenant_id=? AND work_id=? AND payload_hash=?`),
 			tenantID, workID, hash).Scan(&body); err != nil {
 			return f, false, err
 		}

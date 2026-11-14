@@ -172,6 +172,7 @@ func (a *API) v2Roles() map[string]auth.Role {
 		"GET /v1/works/{id}/postmortem":     auth.Viewer,
 		"POST /v1/works/{id}/postmortem":    auth.Operator,
 		"GET /v1/works/{id}/hypotheses":     auth.Viewer,
+		"GET /v1/works/{id}/decisions":      auth.Viewer,
 		"GET /v1/works/{id}/watches":        auth.Viewer,
 		"GET /v1/works/{id}/outcomes":       auth.Viewer,
 		"GET /v1/works/{id}/evaluation":     auth.Viewer,
@@ -213,6 +214,24 @@ func (a *API) Register(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("GET /v1/works/{id}/hypotheses", a.sub(func(ctx context.Context, t, id string) (any, error) {
 		return a.Store.ListHypotheses(ctx, t, id)
+	}))
+	mux.HandleFunc("GET /v1/works/{id}/decisions", a.sub(func(ctx context.Context, t, id string) (any, error) {
+		w, err := a.Store.GetWork(ctx, t, id)
+		if err != nil {
+			return nil, err
+		}
+		hs, err := a.Store.ListHypotheses(ctx, t, id)
+		if err != nil {
+			return nil, err
+		}
+		decisions := []evidence.DecisionVerdict{}
+		scope := evidence.DecisionScope{TenantID: t, WorkID: id, Generation: w.Generation}
+		for _, h := range hs {
+			if h.Decision.CurrentFor(scope, h.Key) {
+				decisions = append(decisions, *h.Decision)
+			}
+		}
+		return decisions, nil
 	}))
 	mux.HandleFunc("GET /v1/works/{id}/watches", a.sub(func(ctx context.Context, t, id string) (any, error) {
 		return a.Store.ListWatches(ctx, t, id, false)

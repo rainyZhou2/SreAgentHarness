@@ -1,10 +1,4 @@
-// Package postmortem builds a deterministic postmortem report for a Work
-// from its ledgers (RFC §14.5): timeline, trigger, actions, verified
-// outcome, root cause (only from SUPPORTED hypotheses backed by trusted
-// evidence, otherwise unknown), gaps from the Work scorecard and derived
-// follow-ups. The report is the factual base a postmortem Work drafts prose
-// around; nothing in it comes from model claims that the ledgers do not
-// back.
+// Package postmortem builds factual reports from persisted decisions and outcome ledgers.
 package postmortem
 
 import (
@@ -95,14 +89,14 @@ type Report struct {
 	Timeline  []Entry `json:"timeline"`
 	Truncated bool    `json:"timeline_truncated,omitempty"`
 
-	// RootCause is nil when no hypothesis is SUPPORTED by trusted
-	// evidence: the root cause is unknown.
-	RootCause      *Cause       `json:"root_cause,omitempty"`
-	Contributing   []Cause      `json:"contributing_factors,omitempty"`
-	OpenHypotheses []string     `json:"open_hypotheses,omitempty"`
-	Refuted        []string     `json:"refuted_hypotheses,omitempty"`
-	Actions        []ActionLine `json:"actions,omitempty"`
-	Outcome        *Outcome     `json:"outcome,omitempty"`
+	// RootCause is present only for one explicitly confirmed root-cause decision.
+	Decisions      []evidence.DecisionVerdict `json:"decisions,omitempty"`
+	RootCause      *Cause                     `json:"root_cause,omitempty"`
+	Contributing   []Cause                    `json:"contributing_factors,omitempty"`
+	OpenHypotheses []string                   `json:"open_hypotheses,omitempty"`
+	Refuted        []string                   `json:"refuted_hypotheses,omitempty"`
+	Actions        []ActionLine               `json:"actions,omitempty"`
+	Outcome        *Outcome                   `json:"outcome,omitempty"`
 
 	Scorecard *workeval.Scorecard `json:"scorecard,omitempty"`
 	Gaps      []string            `json:"gaps,omitempty"`
@@ -143,17 +137,13 @@ func (b *Builder) Build(ctx context.Context, tenantID, workID string) (Report, e
 	if err != nil {
 		return r, err
 	}
-	evs, err := l.ListEvidence(ctx, tenantID, workID, 500)
-	if err != nil {
-		return r, err
-	}
 	hyps, err := l.ListHypotheses(ctx, tenantID, workID)
 	if err != nil {
 		return r, err
 	}
 	r.Trigger = trigger(w, events)
 	r.timeline(events, acts, evals)
-	r.causes(hyps, evs)
+	r.causes(w, hyps)
 	for _, a := range acts {
 		r.Actions = append(r.Actions, ActionLine{ID: a.ID, Name: a.ActionName, Target: a.TargetRef, Risk: string(a.Risk),
 			State: string(a.State), Reason: clip(a.Reason)})
@@ -292,59 +282,39 @@ func collapse(tl []Entry) []Entry {
 	return out
 }
 
-func trusted(tier string) bool { return tier == "T1" || tier == "T2" || tier == "T3" }
-
-// causes keeps SUPPORTED hypotheses whose support includes trusted,
-// recorded evidence. The best supported is the root cause.
-func (r *Report) causes(hyps []evidence.Hypothesis, evs []evidence.Record) {
-	tier := map[string]string{}
-	for _, e := range evs {
-		tier[e.ID] = e.TrustTier
-		if e.SourceRef != "" {
-			if _, ok := tier[e.SourceRef]; !ok {
-				tier[e.SourceRef] = e.TrustTier
-			}
-		}
-	}
-	type scored struct {
-		c Cause
-		n int
-	}
-	var sup []scored
+func (r *Report) causes(w work.Work, hyps []evidence.Hypothesis) {
+	scope := evidence.DecisionScope{TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation}
+	var roots []Cause
 	for _, h := range hyps {
-		switch h.Status {
-		case evidence.HypSupported:
-			var refs []string
-			for _, ref := range h.Supporting {
-				if trusted(tier[ref]) {
-					refs = append(refs, ref)
-				}
-			}
-			if len(refs) == 0 {
-				r.OpenHypotheses = append(r.OpenHypotheses, clip(h.Statement)+" (supported only by untrusted or missing evidence)")
-				continue
-			}
-			sort.Strings(refs)
-			sup = append(sup, scored{Cause{Statement: clip(h.Statement), Category: h.Category, EvidenceRefs: refs}, len(refs)})
-		case evidence.HypRefuted:
-			r.Refuted = append(r.Refuted, clip(h.Statement))
-		default:
-			r.OpenHypotheses = append(r.OpenHypotheses, fmt.Sprintf("%s (%s)", clip(h.Statement), h.Status))
-		}
-	}
-	sort.SliceStable(sup, func(i, j int) bool {
-		if sup[i].n != sup[j].n {
-			return sup[i].n > sup[j].n
-		}
-		return sup[i].c.Statement < sup[j].c.Statement
-	})
-	for i, s := range sup {
-		if i == 0 {
-			c := s.c
-			r.RootCause = &c
+		d := h.Decision
+		if !d.CurrentFor(scope, h.Key) {
+			r.OpenHypotheses = append(r.OpenHypotheses, clip(h.Statement)+" (unadjudicated or obsolete decision)")
 			continue
 		}
-		r.Contributing = append(r.Contributing, s.c)
+		r.Decisions = append(r.Decisions, *d)
+		switch {
+		case d.Verdict == evidence.DecisionConfirmed:
+			c := Cause{Statement: clip(h.Statement), Category: h.Category, EvidenceRefs: d.AcceptedEvidenceRefs}
+			switch h.Category {
+			case evidence.CatRootCause:
+				roots = append(roots, c)
+			case evidence.CatContributing:
+				r.Contributing = append(r.Contributing, c)
+			default:
+				r.OpenHypotheses = append(r.OpenHypotheses, clip(h.Statement)+" (confirmed finding; causal role unclassified)")
+			}
+		case d.IndependentRefuteCount > 0 && d.IndependentSupportCount == 0:
+			r.Refuted = append(r.Refuted, clip(h.Statement))
+		default:
+			r.OpenHypotheses = append(r.OpenHypotheses, fmt.Sprintf("%s (%s)", clip(h.Statement), d.Verdict))
+		}
+	}
+	if len(roots) == 1 {
+		r.RootCause = &roots[0]
+	} else if len(roots) > 1 {
+		for _, c := range roots {
+			r.OpenHypotheses = append(r.OpenHypotheses, c.Statement+" (multiple confirmed root-cause candidates; requires adjudication)")
+		}
 	}
 	sort.Strings(r.OpenHypotheses)
 	sort.Strings(r.Refuted)
@@ -363,7 +333,7 @@ func (r *Report) derive(target time.Duration, evals []outcome.Evaluation) {
 	gap := func(s string) { r.Gaps = append(r.Gaps, s) }
 
 	if r.RootCause == nil {
-		gap("root cause unknown: no hypothesis is supported by trusted evidence")
+		gap("root cause unknown: no unique confirmed root-cause decision")
 		add("high", "Close the diagnosis gap", "the root cause is unknown; add the telemetry or evidence that would confirm or refute: "+
 			joinMax(r.OpenHypotheses, 3))
 	}
@@ -389,10 +359,10 @@ func (r *Report) derive(target time.Duration, evals []outcome.Evaluation) {
 	if sc == nil {
 		return
 	}
-	if sc.DiagnosisSeconds > target.Seconds() {
-		gap(fmt.Sprintf("detection/diagnosis gap: first mitigation proposed after %s (target %s)",
-			time.Duration(sc.DiagnosisSeconds*float64(time.Second)).Round(time.Second), target))
-		add("medium", "Shorten time to diagnosis", "alerting or runbooks did not point at the cause quickly enough")
+	if sc.TimeToFirstActionProposalSeconds != nil && *sc.TimeToFirstActionProposalSeconds > target.Seconds() {
+		gap(fmt.Sprintf("response gap: first action proposed after %s (target %s)",
+			time.Duration(*sc.TimeToFirstActionProposalSeconds*float64(time.Second)).Round(time.Second), target))
+		add("medium", "Shorten time to first action proposal", "review the delay between Work creation and the first action proposal")
 	}
 	if sc.RuleViolations > 0 {
 		gap(fmt.Sprintf("%d proposed actions were refused by safety rules", sc.RuleViolations))
@@ -410,7 +380,7 @@ func (r *Report) derive(target time.Duration, evals []outcome.Evaluation) {
 		add("high", "Investigate the blast radius of the mitigation", "new incidents opened on the target after the action")
 	}
 	if len(sc.UngroundedRefs) > 0 {
-		gap("conclusions reference missing or untrusted evidence: " + joinMax(sc.UngroundedRefs, 5))
+		gap("conclusions lack a current supported decision: " + joinMax(sc.UngroundedRefs, 5))
 		add("low", "Ground conclusions in T1-T3 evidence", "supported hypotheses rely on evidence the ledger cannot back")
 	}
 	if sc.Runs > 0 && sc.ToolCalls > 40*sc.Runs {
@@ -449,7 +419,7 @@ func Markdown(r Report) string {
 
 	p("## Root cause\n\n")
 	if r.RootCause == nil {
-		p("Unknown. No hypothesis is supported by trusted evidence.\n\n")
+		p("Unknown. No unique confirmed root-cause decision.\n\n")
 	} else {
 		p("%s\n\nEvidence: %s\n\n", r.RootCause.Statement, strings.Join(r.RootCause.EvidenceRefs, ", "))
 	}
@@ -471,6 +441,23 @@ func Markdown(r Report) string {
 		p("### Ruled out\n\n")
 		for _, h := range r.Refuted {
 			p("- %s\n", h)
+		}
+		p("\n")
+	}
+
+	for _, d := range r.Decisions {
+		if d.Verdict == evidence.DecisionConfirmed {
+			continue
+		}
+		p("### Decision %s: %s\n\n", d.DecisionKey, d.Verdict)
+		if len(d.AcceptedEvidenceRefs) > 0 {
+			p("Accepted evidence: %s\n\n", strings.Join(d.AcceptedEvidenceRefs, ", "))
+		}
+		if len(d.UnresolvedConflicts) > 0 {
+			p("Unresolved conflicts: %s\n\n", strings.Join(d.UnresolvedConflicts, ", "))
+		}
+		for _, check := range d.RequiredNextChecks {
+			p("- Next check: %s\n", check)
 		}
 		p("\n")
 	}
