@@ -16,6 +16,7 @@ import (
 
 	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/capability"
+	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eventing"
@@ -783,7 +784,18 @@ func (i *inference) toolDiagnose(ctx context.Context, _ string, args json.RawMes
 
 // WorkTemplates ships the TTFT incident scenario.
 func (i *inference) WorkTemplates() []work.Template {
-	return []work.Template{InferenceLatencyTemplate()}
+	return append([]work.Template{InferenceLatencyTemplate(), InferenceContinuousTemplate()}, InferenceIncidentTemplates()...)
+}
+
+// InferenceContinuousTemplate monitors repeated inference incidents within a lifetime budget.
+func InferenceContinuousTemplate() work.Template {
+	t := InferenceLatencyTemplate()
+	t.ID, t.RepeatFrom = "inference-continuous", "observe"
+	t.Limits = work.Limits{MaxRuns: 200, MaxActions: 50, MaxReplans: 20, MaxDuration: cpkit.Duration(30 * 24 * time.Hour)}
+	t.Stages = append([]work.Stage{{ID: "observe", Type: work.StageWait, Phase: "detect",
+		Wait: &continuous.Spec{Mode: continuous.OnEvent, Purpose: "inference TTFT anomaly",
+			Predicate: &eventing.Predicate{Sources: []string{"inference"}, EventTypes: []string{"inference.ttft_breach"}}}}}, t.Stages...)
+	return t
 }
 
 // InferenceLatencyTemplate is the TTFT scenario: diagnose, mitigate with

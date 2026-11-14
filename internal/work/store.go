@@ -79,6 +79,9 @@ func (n *NewWork) Prepare() error {
 	if err := n.Template.Normalize(); err != nil {
 		return err
 	}
+	if err := n.Template.ValidateGoal(n.Goal); err != nil {
+		return err
+	}
 	if n.Priority < -100 || n.Priority > 100 {
 		return invalidf("priority must be within [-100,100]")
 	}
@@ -154,6 +157,7 @@ type Mutation struct {
 	// CancelAllWatches cancels every ACTIVE watch of the Work.
 	CancelAllWatches bool
 	Outcome          *outcome.Evaluation
+	CompleteCycle    bool
 	Subjects         []SubjectLink
 	// Findings and Hypotheses commit the adjudicated decision with the Work
 	// CAS and stage transition. Hypothesis.Version is its expected version.
@@ -256,4 +260,69 @@ type RunActivation struct {
 	StageID         string
 	ExpectedVersion int64
 	LeaseOwner      string
+}
+
+// PrepareOutcome binds omitted legacy identity fields without modifying the
+// caller's evaluation, and rejects contradictory identity or chronology.
+// It validates the evaluation contract; source authenticity remains the
+// responsibility of the deterministic evaluator and its adapters.
+func PrepareOutcome(w Work, input outcome.Evaluation, now time.Time, success bool) (outcome.Evaluation, error) {
+	e := input
+	if (e.TenantID != "" && e.TenantID != w.TenantID) || (e.WorkID != "" && e.WorkID != w.ID) {
+		return e, invalidf("outcome belongs to another tenant or Work")
+	}
+	if e.Generation != 0 && e.Generation != w.Generation {
+		return e, invalidf("outcome belongs to another generation")
+	}
+	if !e.Verdict.Valid() || !e.RawVerdict.Valid() || e.SpecHash == "" {
+		return e, invalidf("outcome needs a spec hash and valid verdicts")
+	}
+	if e.EvaluatedAt.IsZero() || e.EvaluatedAt.After(now) {
+		return e, invalidf("outcome evaluation time is missing or in the future")
+	}
+	if e.SatisfiedSince != nil && (e.SatisfiedSince.IsZero() || e.SatisfiedSince.After(e.EvaluatedAt)) {
+		return e, invalidf("outcome stabilization time is invalid")
+	}
+	if e.Verdict == outcome.Satisfied && e.RawVerdict != outcome.Satisfied {
+		return e, invalidf("SATISFIED outcome requires a SATISFIED raw verdict")
+	}
+	spec := w.Goal.Success
+	if spec == nil && len(w.Template.Stages) > 0 {
+		last := w.Template.Stages[len(w.Template.Stages)-1]
+		if last.Type == StageVerify && last.Verify != nil {
+			spec = last.Verify.Spec
+		}
+	}
+	if success && spec != nil {
+		if err := e.ValidateSpec(*spec); err != nil {
+			return e, invalidf("SUCCEEDED requires the current goal outcome: %v", err)
+		}
+		if spec.StableFor > 0 && (e.SatisfiedSince == nil || e.EvaluatedAt.Sub(*e.SatisfiedSince) < spec.StableFor.D()) {
+			return e, invalidf("SUCCEEDED requires the goal stabilization interval")
+		}
+		// An old evaluation cannot acquire freshness merely by being copied.
+		ageLimit := time.Minute
+		for _, list := range [][]outcome.Objective{spec.AllOf, spec.AnyOf} {
+			for _, o := range list {
+				if o.Optional {
+					continue
+				}
+				limit := o.Freshness.D()
+				if limit <= 0 {
+					limit = o.Window.D()
+				}
+				if limit > 0 && limit < ageLimit {
+					ageLimit = limit
+				}
+			}
+		}
+		if now.Sub(e.EvaluatedAt) > ageLimit {
+			return e, invalidf("SUCCEEDED requires a fresh goal evaluation")
+		}
+	}
+	e.TenantID, e.WorkID, e.Generation = w.TenantID, w.ID, w.Generation
+	if e.ID == "" {
+		e.ID = cpkit.NewID()
+	}
+	return e, nil
 }

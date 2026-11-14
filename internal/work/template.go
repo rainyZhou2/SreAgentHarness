@@ -198,6 +198,11 @@ type Template struct {
 	Kind    Kind    `json:"kind,omitempty"`
 	Stages  []Stage `json:"stages"`
 	Limits  Limits  `json:"limits"`
+	// RepeatFrom returns a verified cycle to this wait stage in a new generation.
+	RepeatFrom string `json:"repeat_from,omitempty"`
+	// RequireMachineSuccess forbids human fallback, including when the template
+	// is selected directly rather than spawned as a child.
+	RequireMachineSuccess bool `json:"require_machine_success,omitempty"`
 	// Queue is the default scheduling queue of Works created from this
 	// template (empty: by kind).
 	Queue Queue `json:"queue,omitempty"`
@@ -216,6 +221,24 @@ type RunbookRef struct {
 }
 
 var stageIDRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)
+
+// ValidateGoal enforces the pinned template's goal contract at creation and on
+// every amendment. Callers normalize the goal before this check.
+func (t Template) ValidateGoal(goal GoalSpec) error {
+	if t.RepeatFrom != "" || t.RequireMachineSuccess {
+		if _, err := machineSuccess(goal.Success); err != nil {
+			return invalidf("template %s requires a machine-verifiable goal: %v", t.ID, err)
+		}
+	}
+	if t.Graph != nil {
+		for _, child := range t.Graph.Children {
+			if _, err := child.InheritedSuccess(goal); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // Normalize validates the template and fills defaults.
 func (t *Template) Normalize() error {
@@ -312,6 +335,12 @@ func (t *Template) Normalize() error {
 			if !ok || j >= i || t.Stages[j].Type != StageRun {
 				return invalidf("stage %s: from_proposal must name an earlier run stage", s.ID)
 			}
+		}
+	}
+	if t.RepeatFrom != "" {
+		i, ok := index[t.RepeatFrom]
+		if !ok || t.Stages[i].Type != StageWait || i == len(t.Stages)-1 {
+			return invalidf("repeat_from must name a wait stage before the final stage")
 		}
 	}
 	return nil
@@ -586,7 +615,7 @@ func postmortemTemplate() Template {
 	return Template{ID: TemplatePostmortem, Version: 1, Kind: KindRequest, Queue: QueueBackground, Stages: []Stage{
 		{ID: "draft", Type: StageRun, Phase: "review", Run: &RunSpec{Goal: "Draft the postmortem for Work ${label.source_work} (\"${title}\") on ${subjects}.\n" +
 			"Use only the ledger report below. Sections: summary, impact, timeline, trigger, root cause, contributing factors, detection gap, recovery gap, what went well, follow-ups.\n" +
-			"State a root cause only if the report lists a SUPPORTED hypothesis with evidence; otherwise write \"root cause: unknown\" and list the open hypotheses. " +
+			"State a root cause only if the report lists a current CONFIRMED decision with causal evidence; otherwise write \"root cause: unknown\" and list the open hypotheses. " +
 			"Do not claim the incident is resolved unless the report shows a verified outcome.\n" +
 			"End with a JSON object {\"follow_ups\":[{\"title\",\"why\",\"owner_hint\",\"priority\"}]}.\n\nLedger report:\n${goal.description}"}},
 		{ID: "review", Type: StageConfirm, Phase: "review", Confirm: &ConfirmSpec{

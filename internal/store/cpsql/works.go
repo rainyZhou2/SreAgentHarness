@@ -247,6 +247,16 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 		if m.LeaseOwner != "" && (w.LeaseOwner != m.LeaseOwner || w.LeaseUntil == nil || !w.LeaseUntil.After(now)) {
 			return work.ErrLeaseLost
 		}
+		if m.Goal != nil {
+			if err := w.Template.ValidateGoal(*m.Goal); err != nil {
+				return err
+			}
+		}
+		if m.CompleteCycle {
+			if err := work.ValidateCycle(w, m, now); err != nil {
+				return err
+			}
+		}
 		decisionEvent, err := s.writeDecisionBatch(ctx, tx, w, m, now)
 		if err != nil {
 			return err
@@ -380,18 +390,24 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 				return &work.LimitError{Limit: "max_watches", Detail: fmt.Sprintf("%d active, limit %d", active, lim)}
 			}
 		}
-		if ev := m.Outcome; ev != nil {
-			if ev.ID == "" {
-				ev.ID = cpkit.NewID()
+		if m.Outcome != nil {
+			outcomeWork := w
+			// A failed observation may trigger a replan in this same transaction.
+			// Preserve the generation observed, rather than relabeling it as the
+			// newly opened generation. Success must always bind the resulting goal.
+			if w.Generation > from0Gen && m.Outcome.Generation == from0Gen &&
+				(m.Status == nil || *m.Status != work.StatusSucceeded) {
+				outcomeWork.Generation = from0Gen
 			}
-			ev.TenantID, ev.WorkID = w.TenantID, w.ID
-			if !ev.Verdict.Valid() {
-				return fmt.Errorf("%w: verdict %q", work.ErrInvalid, ev.Verdict)
+			ev, err := work.PrepareOutcome(outcomeWork, *m.Outcome, now, m.CompleteCycle || (m.Status != nil && *m.Status == work.StatusSucceeded))
+			if err != nil {
+				return err
 			}
+
 			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO work_outcomes (id, tenant_id, work_id, spec_hash, verdict,
 				raw_verdict, stage_id, generation, evaluation, evaluated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`),
 				ev.ID, w.TenantID, w.ID, ev.SpecHash, string(ev.Verdict), string(ev.RawVerdict), nullStr(ev.Stage),
-				w.Generation, js(ev), s.t(ev.EvaluatedAt)); err != nil {
+				ev.Generation, js(ev), s.t(ev.EvaluatedAt)); err != nil {
 				return err
 			}
 		}
