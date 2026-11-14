@@ -490,6 +490,10 @@ func TestActionStore(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s *Store) {
 		ctx, tn := context.Background(), tenant()
 		w := mustCreate(t, s, tn)
+		if _, err := s.ApplyWork(ctx, work.Mutation{TenantID: tn, WorkID: w.ID, ExpectedVersion: w.Version,
+			Status: st(work.StatusActive), ActorType: "system", ActorID: "test", Now: t0}); err != nil {
+			t.Fatal(err)
+		}
 		p := action.Plan{ID: cpkit.NewID(), TenantID: tn, WorkID: w.ID, Generation: 1, ActionName: "deployment.rollback",
 			ActionVersion: "1", TargetRef: "deployment://prod/checkout", Args: json.RawMessage(`{"to":"v1"}`),
 			ProposedBy: "run-1", CreatedAt: t0, ExpiresAt: t0.Add(time.Hour)}

@@ -118,7 +118,7 @@ type Runtime struct {
 	// DryRun is rollout stage G3: plans are preflighted, approved and
 	// checked for dispatch, but nothing is sent.
 	DryRun bool
-	// Allowed, when non-empty, lists the only actions that may be proposed
+	// Allowed, when non-empty, lists the only actions that may be proposed or dispatched
 	// (rollout stage G4); Scope the only resources they may target.
 	Allowed []string
 	Scope   []string
@@ -580,12 +580,25 @@ func (rt *Runtime) Expire(ctx context.Context, tenantID, actionID string) (Recor
 func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out Record, err error) {
 	ctx, sp := span(ctx, "action.execute", attribute.String("action_id", actionID))
 	defer func() { endSpan(sp, &out, &err) }()
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
 	rec, err := rt.Store.GetAction(ctx, tenantID, actionID)
 	if err != nil {
 		return Record{}, err
 	}
 	if rec.State != StateReady {
 		return rec, errState(rec, StateReady)
+	}
+	if len(rt.Allowed) > 0 && !slices.Contains(rt.Allowed, rec.ActionName) {
+		return rt.reject(ctx, rec, "policy: action is no longer enabled at this rollout stage")
+	}
+	inScope := len(rt.Scope) == 0
+	for _, scope := range rt.Scope {
+		inScope = inScope || cpkit.RefMatches(scope, rec.TargetRef)
+	}
+	if !inScope {
+		return rt.reject(ctx, rec, "policy: target is no longer inside the enabled resource scope")
 	}
 	exec, ok := rt.Registry.Lookup(rec.ActionName)
 	if !ok || exec.Descriptor().Version != rec.ActionVersion {
@@ -723,10 +736,20 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 	rec.LockRef = lockKey
 	// Ledger first: once DISPATCHED is committed the call may happen, and a
 	// crash from here on is an unknown effect, never a silent retry.
+	ready := rec
 	prev := rec.Version
 	rec.State, rec.MayHaveDispatched, rec.DispatchedAt, rec.UpdatedAt = StateDispatched, true, &now, now
 	rec, err = rt.Store.UpdateAction(ctx, rec, prev)
 	if err != nil {
+		if errors.Is(err, ErrPrecondition) {
+			// The Work authority check rolled back before dispatch. Persist a
+			// refusal so an old generation cannot spin forever as READY.
+			out, rejectErr := rt.reject(ctx, ready, "precondition failed: "+err.Error())
+			if errors.Is(rejectErr, ErrPrecondition) {
+				_ = rt.Store.UnlockTarget(ctx, tenantID, lockKey, ready.ID)
+			}
+			return out, rejectErr
+		}
 		// Do not release the lock: on a version conflict another executor
 		// owns this dispatch, and an ambiguous commit may have dispatched.
 		// The lock expires on its own.
@@ -736,9 +759,19 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-	result, xerr := exec.Execute(cctx, rec.Plan, rec.EffectKey)
-	cancel()
+	var result json.RawMessage
+	var xerr error
+	// Authorization linearizes at the durable dispatch intent above. A
+	// cancellation already observable here can still avoid the external call;
+	// cancellation after the call starts cannot promise to undo its effect.
+	callerErr := ctx.Err()
+	if callerErr != nil {
+		xerr = fmt.Errorf("%w: caller cancelled before execution: %v", ErrNotApplied, callerErr)
+	} else {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		result, xerr = exec.Execute(cctx, rec.Plan, rec.EffectKey)
+		cancel()
+	}
 	done := rt.now()
 	prev = rec.Version
 	rec.UpdatedAt = done
@@ -755,7 +788,11 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 		rt.obs().EffectUnknown("dispatch_error")
 		rt.obs().Dispatch(rec.ActionName, string(rec.Risk), "unknown")
 	}
-	out, err = rt.Store.UpdateAction(context.WithoutCancel(ctx), rec, prev)
+	// The caller may be gone after an external effect. Retain its tenant
+	// scope while giving the result commit a finite independent lifetime.
+	resultCtx, resultCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer resultCancel()
+	out, err = rt.Store.UpdateAction(resultCtx, rec, prev)
 	if err != nil {
 		// The effect may have happened but its result is not durable: the
 		// record stays DISPATCHED and the recovery sweep turns it into
@@ -763,11 +800,11 @@ func (rt *Runtime) Execute(ctx context.Context, tenantID, actionID string) (out 
 		return rec, fmt.Errorf("record action result: %w", err)
 	}
 	if out.State == StateFailed {
-		_ = rt.Store.UnlockTarget(ctx, tenantID, out.LockKey(), out.ID)
+		_ = rt.Store.UnlockTarget(resultCtx, tenantID, out.LockKey(), out.ID)
 	}
 	rt.log().Info("action dispatched", "tenant", tenantID, "work_id", out.WorkID, "action_id", out.ID,
 		"action", out.ActionName, "target", out.TargetRef, "state", out.State)
-	return out, nil
+	return out, callerErr
 }
 
 func boundJSON(b json.RawMessage) json.RawMessage {

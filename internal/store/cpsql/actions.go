@@ -186,20 +186,40 @@ func (s *Store) UpdateAction(ctx context.Context, r action.Record, expectedVersi
 	if r.UpdatedAt.IsZero() {
 		r.UpdatedAt = s.now()
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE work_actions SET state=?, record=?, version=?, dispatched_at=?, updated_at=?
-		WHERE tenant_id=? AND id=? AND version=? AND plan_hash=? AND effect_key=?`),
-		string(r.State), js(r), r.Version, s.tp(r.DispatchedAt), s.t(r.UpdatedAt), r.TenantID, r.ID, expectedVersion,
-		r.PlanHash, r.EffectKey)
-	if err != nil {
-		return r, err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		if _, gerr := s.GetAction(ctx, r.TenantID, r.ID); errors.Is(gerr, action.ErrNotFound) {
-			return r, action.ErrNotFound
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		// Read immutable ownership before locking: all dispatches acquire the
+		// Work lock first, matching Work command/mutation lock order.
+		stored, err := scanRecord(tx.QueryRowContext(ctx, s.q(`SELECT record, version FROM work_actions WHERE tenant_id=? AND id=?`), r.TenantID, r.ID))
+		if err != nil {
+			return err
 		}
-		return r, action.ErrVersionConflict
-	}
-	return r, nil
+		if stored.Version != expectedVersion || stored.PlanHash != r.PlanHash || stored.EffectKey != r.EffectKey {
+			return action.ErrVersionConflict
+		}
+		if r.State == action.StateDispatched && stored.State != action.StateDispatched {
+			if stored.State != action.StateReady {
+				return action.ErrInvalidState
+			}
+			if err := s.validateActionDispatch(ctx, tx, stored); err != nil {
+				return err
+			}
+		}
+		// Callers update lifecycle data; the sealed plan stays immutable even
+		// if a caller edits a plan field while retaining its original hash.
+		r.Plan = stored.Plan
+		res, err := tx.ExecContext(ctx, s.q(`UPDATE work_actions SET state=?, record=?, version=?, dispatched_at=?, updated_at=?
+			WHERE tenant_id=? AND id=? AND version=? AND plan_hash=? AND effect_key=?`),
+			string(r.State), js(r), r.Version, s.tp(r.DispatchedAt), s.t(r.UpdatedAt), r.TenantID, r.ID, expectedVersion,
+			r.PlanHash, r.EffectKey)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return action.ErrVersionConflict
+		}
+		return nil
+	})
+	return r, err
 }
 
 // ListStaleDispatched returns actions stuck in DISPATCHED since before the
