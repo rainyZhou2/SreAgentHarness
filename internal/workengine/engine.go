@@ -354,7 +354,7 @@ func New(o Options) (*Engine, error) {
 			DryRun:  o.Flags.ActionDryRun, Allowed: o.Flags.ActionAllowlist, Scope: o.Flags.ActionScope,
 			Preauthorized: o.Flags.Preauthorized}
 	}
-	runs := orchestration.KernelRuns{Server: o.Server}
+	runs := KernelRuns{Server: o.Server}
 	ing := &orchestration.Ingestor{Store: o.Store, Router: router, Catalog: cat, Shadow: o.Flags.Shadow, Clock: clock,
 		Log: log, Metrics: m, Sources: sources2, Changes: o.Store, Neighbors: neighbors(ws)}
 	svc := &orchestration.Service{Store: o.Store, Runs: runs, Catalog: cat, Clock: clock, Log: log,
