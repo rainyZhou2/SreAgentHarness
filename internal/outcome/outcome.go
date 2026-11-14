@@ -273,6 +273,8 @@ type ObjectiveResult struct {
 	Samples     int      `json:"samples,omitempty"`
 	Reason      string   `json:"reason,omitempty"`
 	EvidenceRef string   `json:"evidence_ref,omitempty"`
+	// ObservedFrom bounds the evidence interval used for stabilization.
+	ObservedFrom *time.Time `json:"observed_from,omitempty"`
 }
 
 // Evaluation is the verdict of a spec at one time.

@@ -133,8 +133,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, spec Spec, in Input) Evaluatio
 	}
 	if raw == Satisfied {
 		since := now
-		if p := in.Previous; p != nil && p.SpecHash == ev.SpecHash && p.RawVerdict == Satisfied &&
-			p.SatisfiedSince != nil && !p.SatisfiedSince.After(now) {
+		if p := in.Previous; p != nil && p.TenantID == ev.TenantID && p.WorkID == ev.WorkID &&
+			p.SpecHash == ev.SpecHash && p.RawVerdict == Satisfied && p.SatisfiedSince != nil && !p.SatisfiedSince.IsZero() &&
+			!p.EvaluatedAt.IsZero() && !p.EvaluatedAt.After(now) &&
+			!p.SatisfiedSince.After(p.EvaluatedAt) && observationCovers(ev.Objectives, p.EvaluatedAt) {
 			since = *p.SatisfiedSince
 		}
 		ev.SatisfiedSince = &since
@@ -146,6 +148,18 @@ func (e *Evaluator) Evaluate(ctx context.Context, spec Spec, in Input) Evaluatio
 	}
 	sort.Strings(ev.Missing)
 	return ev
+}
+
+// observationCovers prevents a previous success from bridging an interval
+// that none of the current observations cover. Any-of choices may change,
+// so every currently satisfied required objective must cover the interval.
+func observationCovers(rs []ObjectiveResult, previous time.Time) bool {
+	for _, r := range rs {
+		if !r.Optional && r.Verdict == Satisfied && (r.ObservedFrom == nil || r.ObservedFrom.After(previous)) {
+			return false
+		}
+	}
+	return true
 }
 
 func required(rs []ObjectiveResult) []ObjectiveResult {
@@ -216,6 +230,8 @@ func (e *Evaluator) objective(ctx context.Context, o Objective, in Input, now ti
 	}
 	switch o.Kind {
 	case KindHuman:
+		from := now.Add(-time.Minute)
+		r.ObservedFrom = &from
 		v, ok := in.Human[o.ID]
 		switch {
 		case !ok:
@@ -249,6 +265,18 @@ func (e *Evaluator) objective(ctx context.Context, o Objective, in Input, now ti
 			return r
 		}
 		r.Observed, r.EvidenceRef = fv.Value, fv.Ref
+		if fv.ObservedAt.IsZero() || fv.ObservedAt.After(now) {
+			r.Reason = "fact observation time is missing or in the future"
+			return r
+		}
+		// State snapshots are point observations. Bound polling continuity by
+		// the declared freshness, with a one-minute default when unspecified.
+		gap := o.Freshness.D()
+		if gap <= 0 {
+			gap = time.Minute
+		}
+		from := now.Add(-gap)
+		r.ObservedFrom = &from
 		if f := o.Freshness.D(); f > 0 && now.Sub(fv.ObservedAt) > f {
 			r.Reason = fmt.Sprintf("fact is stale (observed %s ago, freshness %s)", now.Sub(fv.ObservedAt).Truncate(time.Second), f)
 			return r
@@ -286,6 +314,8 @@ func (e *Evaluator) objective(ctx context.Context, o Objective, in Input, now ti
 			return r
 		}
 		r.Samples = n
+		from := now.Add(-o.Window.D())
+		r.ObservedFrom = &from
 		if (n > 0) != o.Event.Absent {
 			r.Verdict = Satisfied
 		} else if o.Event.Absent {
@@ -339,6 +369,19 @@ func (e *Evaluator) metric(ctx context.Context, o Objective, in Input, target st
 		r.Reason = fmt.Sprintf("%d samples, need %d", len(samples), o.MinSamples)
 		return r
 	}
+	from := samples[0].T
+	// Only the contiguous tail can carry the stabilization clock. A lone
+	// older point must not conceal an observation outage between samples.
+	gap := o.Freshness.D()
+	if gap <= 0 {
+		gap = time.Minute
+	}
+	for i := 1; i < len(samples); i++ {
+		if samples[i].T.Sub(samples[i-1].T) > gap {
+			from = samples[i].T
+		}
+	}
+	r.ObservedFrom = &from
 	newest := samples[len(samples)-1].T
 	if f := o.Freshness.D(); f > 0 && now.Sub(newest) > f {
 		r.Reason = fmt.Sprintf("newest sample is %s old, freshness %s", now.Sub(newest).Truncate(time.Second), f)
@@ -408,4 +451,47 @@ func compare(op string, v, t float64) bool {
 		return v != t
 	}
 	return false
+}
+
+// ValidateSpec checks that a recorded evaluation contains exactly the declared
+// objectives and that its raw verdict follows from their verdicts. It validates
+// structure, not the authenticity of source observations.
+func (ev Evaluation) ValidateSpec(spec Spec) error {
+	if ev.SpecHash != spec.Hash() || len(ev.Objectives) != len(spec.AllOf)+len(spec.AnyOf) {
+		return fmt.Errorf("outcome does not match the declared spec")
+	}
+	results := make(map[string]ObjectiveResult, len(ev.Objectives))
+	for _, r := range ev.Objectives {
+		if _, exists := results[r.ID]; exists || !r.Verdict.Valid() {
+			return fmt.Errorf("outcome has duplicate objectives or an invalid verdict")
+		}
+		results[r.ID] = r
+	}
+	collect := func(objectives []Objective) ([]ObjectiveResult, error) {
+		out := make([]ObjectiveResult, 0, len(objectives))
+		for _, o := range objectives {
+			r, ok := results[o.ID]
+			if !ok || r.Kind != o.Kind || r.Optional != o.Optional {
+				return nil, fmt.Errorf("outcome objective %s does not match the spec", o.ID)
+			}
+			out = append(out, r)
+		}
+		return out, nil
+	}
+	all, err := collect(spec.AllOf)
+	if err != nil {
+		return err
+	}
+	any, err := collect(spec.AnyOf)
+	if err != nil {
+		return err
+	}
+	raw := combineAll(all)
+	if len(spec.AnyOf) > 0 {
+		raw = combineAll2(raw, combineAny(any))
+	}
+	if raw != ev.RawVerdict {
+		return fmt.Errorf("outcome raw verdict contradicts its objectives")
+	}
+	return nil
 }

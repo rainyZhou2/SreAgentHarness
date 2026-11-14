@@ -735,3 +735,87 @@ func TestClaimPrefersUrgentQueues(t *testing.T) {
 		t.Fatalf("critical first: %v %+v", err, got)
 	}
 }
+
+// A goal amendment must obey the pinned template just like initial admission.
+// Refusals leave the Work, event cursor and generation history unchanged.
+func TestTemplateMachineGoalContract(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store) {
+		ctx, tn := context.Background(), tenant()
+		templates := map[string]string{
+			"repeat":    `{"id":"repeat-goal","repeat_from":"observe","stages":[{"id":"observe","type":"wait","wait":{"mode":"event","predicate":{"event_types":["anomaly"]}}},{"id":"verify","type":"verify"}]}`,
+			"inherited": `{"id":"inherit-goal","version":2,"graph":{"children":[{"key":"mitigation","template":"incident","inherit_success":true}]},"stages":[{"id":"children","type":"children"},{"id":"verify","type":"verify"}]}`,
+			"required":  `{"id":"required-goal","require_machine_success":true,"stages":[{"id":"verify","type":"verify"}]}`,
+		}
+		machine := func(value string) *outcome.Spec {
+			return &outcome.Spec{AllOf: []outcome.Objective{{ID: "ready", Kind: outcome.KindState, State: &outcome.StateExpr{Predicate: "ready", Equals: value}}}}
+		}
+		snapshot := func(id string) string {
+			t.Helper()
+			w, err := s.GetWork(ctx, tn, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			events, err := s.ListWorkEvents(ctx, tn, id, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goals, err := s.ListGoals(ctx, tn, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := json.Marshal([]any{w, events, goals})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(b)
+		}
+		for name, raw := range templates {
+			t.Run(name, func(t *testing.T) {
+				var tpl work.Template
+				if err := json.Unmarshal([]byte(raw), &tpl); err != nil {
+					t.Fatal(err)
+				}
+				for _, bad := range []string{"nil", "human", "optional"} {
+					t.Run(bad, func(t *testing.T) {
+						var spec *outcome.Spec
+						switch bad {
+						case "human":
+							spec = &outcome.Spec{AllOf: []outcome.Objective{{ID: "ack", Kind: outcome.KindHuman}}}
+						case "optional":
+							spec = machine("yes")
+							spec.AllOf[0].Optional = true
+						}
+						n := newWork(tn, cpkit.NewID())
+						n.Template = tpl
+						n.Goal.Success = spec
+						if _, _, err := s.CreateWork(ctx, n); !errors.Is(err, work.ErrInvalid) {
+							t.Errorf("creation accepted %s goal: %v", bad, err)
+						}
+						n.IdempotencyKey = cpkit.NewID()
+						n.Goal.Success = machine("yes")
+						w, _, err := s.CreateWork(ctx, n)
+						if err != nil {
+							t.Fatal(err)
+						}
+						before := snapshot(w.ID)
+						amended := w.Goal
+						amended.Success = spec
+						gen := w.Generation + 1
+						_, err = s.ApplyWork(ctx, work.Mutation{ActorType: "system", ActorID: "test", TenantID: tn, WorkID: w.ID, ExpectedVersion: w.Version, Generation: &gen, Goal: &amended, AddReplans: 1, Events: []work.NewEvent{{Type: "test.should_rollback"}}, Now: t0})
+						if !errors.Is(err, work.ErrInvalid) {
+							t.Errorf("replan accepted %s goal: %v", bad, err)
+						}
+						if after := snapshot(w.ID); after != before {
+							t.Fatal("rejected amendment changed Work, events or goal history")
+						}
+						amended.Success = machine("recovered")
+						got, err := s.ApplyWork(ctx, work.Mutation{ActorType: "system", ActorID: "test", TenantID: tn, WorkID: w.ID, ExpectedVersion: w.Version, Generation: &gen, Goal: &amended, AddReplans: 1, Now: t0})
+						if err != nil || got.Generation != gen || got.Goal.Success.AllOf[0].State.Equals != "recovered" {
+							t.Fatalf("valid machine amendment refused: %+v %v", got, err)
+						}
+					})
+				}
+			})
+		}
+	})
+}

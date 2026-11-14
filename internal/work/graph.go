@@ -2,10 +2,12 @@ package work
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/outcome"
 )
 
 // A Work graph ties long-lived goals together (design §8). It is separate
@@ -133,6 +135,9 @@ type ChildSpec struct {
 	// parent (${goal.intent}, ${subject}, ${title}, ...).
 	Intent      string `json:"intent,omitempty"`
 	Description string `json:"description,omitempty"`
+	// InheritSuccess copies the parent's machine goal into this child. Missing
+	// or human goals are errors; they never fall back to human confirmation.
+	InheritSuccess bool `json:"inherit_success,omitempty"`
 	// Constraints narrow the parent's; unset fields inherit.
 	Constraints Constraints `json:"constraints,omitempty"`
 	// After lists sibling keys this child waits for.
@@ -142,6 +147,52 @@ type ChildSpec struct {
 	// Required children must succeed for the parent's children stage.
 	Required bool  `json:"required,omitempty"`
 	Queue    Queue `json:"queue,omitempty"`
+}
+
+// InheritedSuccess returns an independent copy, so normalizing a child cannot
+// mutate its parent's goal. Children opt in explicitly (for example mitigation,
+// but not RCA). Validate both when admitting the parent and when spawning.
+func (c ChildSpec) InheritedSuccess(parent GoalSpec) (*outcome.Spec, error) {
+	if !c.InheritSuccess {
+		return nil, nil
+	}
+	spec, err := machineSuccess(parent.Success)
+	if err != nil {
+		return nil, invalidf("child %s: %v", c.Key, err)
+	}
+	return spec, nil
+}
+
+// machineSuccess validates and copies a goal that cannot be satisfied by a
+// human acknowledgement or by omitting every objective.
+func machineSuccess(input *outcome.Spec) (*outcome.Spec, error) {
+	if input == nil {
+		return nil, invalidf("a machine success goal is required")
+	}
+	b, err := json.Marshal(input)
+	if err != nil {
+		return nil, invalidf("invalid machine success goal: %v", err)
+	}
+	var spec outcome.Spec
+	if err := json.Unmarshal(b, &spec); err != nil {
+		return nil, invalidf("invalid machine success goal: %v", err)
+	}
+	if err := spec.Normalize(); err != nil {
+		return nil, invalidf("invalid machine success goal: %v", err)
+	}
+	required := false
+	for _, objectives := range [][]outcome.Objective{spec.AllOf, spec.AnyOf} {
+		for _, objective := range objectives {
+			if objective.Kind == outcome.KindHuman {
+				return nil, invalidf("machine success goals cannot contain human objectives")
+			}
+			required = required || !objective.Optional
+		}
+	}
+	if !required {
+		return nil, invalidf("a machine success goal needs a required objective")
+	}
+	return &spec, nil
 }
 
 // GraphSpec is the optional graph of a template (template_version 2): the

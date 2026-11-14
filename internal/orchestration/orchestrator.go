@@ -360,6 +360,18 @@ func (d *driver) run(ctx context.Context) error {
 		} else {
 			m.ClearWake = true
 		}
+		nextStatus := d.w.Status
+		if m.Status != nil {
+			nextStatus = *m.Status
+		}
+		if !s.again && !nextStatus.Terminal() && nextStatus != work.StatusSuspended && nextStatus != work.StatusBlocked {
+			if limit := d.w.Template.Limits.MaxDuration.D(); limit > 0 {
+				deadline := d.w.CreatedAt.Add(limit)
+				if m.WakeAt == nil || deadline.Before(*m.WakeAt) {
+					m.WakeAt, m.ClearWake = &deadline, false
+				}
+			}
+		}
 		if last {
 			m.ReleaseLease = true
 		}
@@ -470,7 +482,7 @@ func (d *driver) step(ctx context.Context) (step, error) {
 		// Commands move these on; nothing to do until then.
 		return step{}, nil
 	}
-	if lim := w.Template.Limits.MaxDuration.D(); lim > 0 && now.Sub(w.CreatedAt) > lim {
+	if lim := w.Template.Limits.MaxDuration.D(); lim > 0 && now.Sub(w.CreatedAt) >= lim {
 		return d.terminate(work.StatusFailed, "max_duration_exceeded"), nil
 	}
 	if w.Status == work.StatusNew {
@@ -1098,6 +1110,10 @@ func (d *driver) stageEvents(ctx context.Context, fn func(stageID string, payloa
 		if json.Unmarshal(e.Payload, &p) != nil {
 			continue
 		}
+		gen, hasGeneration := p["generation"].(float64)
+		if (hasGeneration && gen != float64(d.w.Generation)) || (!hasGeneration && d.w.Generation != 1) {
+			continue
+		}
 		id, _ := p["stage_id"].(string)
 		fn(id, p)
 	}
@@ -1312,8 +1328,20 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 		return d.fail(stage, stage.OnFailure, "action failed: "+rec.LastError), nil
 	case action.StateDegraded:
 		return d.fail(stage, stage.OnFailure, "action effect not achieved: "+rec.Reason), nil
-	case action.StateEffectUnknown, action.StateManualRecovery:
-		// Never replayed automatically: reconcile or resolve by a human.
+	case action.StateEffectUnknown:
+		release, ok := d.o.Pools.actionSlot(w.TenantID)
+		if !ok {
+			return d.queued("actions", "queued: action inspection pool is full", 5*time.Second)
+		}
+		res, err := rt.Reconcile(ctx, w.TenantID, rec.ID)
+		release()
+		if err != nil {
+			return step{}, err
+		}
+		return step{again: true, m: work.Mutation{Events: []work.NewEvent{{Type: "work.action_reconciled",
+			Payload: map[string]any{"action_id": res.ID, "state": res.State, "generation": w.Generation}}}}}, nil
+	case action.StateManualRecovery:
+		// Inspection did not prove the effect; execution is never retried here.
 		return d.block(fmt.Sprintf("action %s effect is unknown; reconcile or resolve it", rec.ID)), nil
 	default:
 		return d.block(fmt.Sprintf("action %s is %s", rec.ID, rec.State)), nil
@@ -1409,7 +1437,8 @@ func (d *driver) latestOutcome(ctx context.Context, match func(outcome.Evaluatio
 		return nil, err
 	}
 	for i := range evs {
-		if evs[i].Generation == d.w.Generation && match(evs[i]) {
+		if evs[i].Generation == d.w.Generation && evs[i].TenantID == d.w.TenantID &&
+			evs[i].WorkID == d.w.ID && !evs[i].EvaluatedAt.After(d.o.now()) && match(evs[i]) {
 			return &evs[i], nil
 		}
 	}
@@ -1461,7 +1490,7 @@ func (d *driver) verifyStage(ctx context.Context, stage work.Stage, st stageStat
 	}
 	st.Verdict = string(ev.Verdict)
 	if ev.Verdict == outcome.Satisfied {
-		if w.Stage+1 >= len(w.Template.Stages) {
+		if w.Stage+1 >= len(w.Template.Stages) && (w.Goal.Success == nil || ev.SpecHash == w.Goal.Success.Hash()) {
 			return d.succeed(&ev), nil
 		}
 		s := d.advance(stage, map[string]any{"verdict": ev.Verdict, "evaluation_id": ev.ID})
@@ -1476,15 +1505,10 @@ func (d *driver) verifyStage(ctx context.Context, stage work.Stage, st stageStat
 		s.m.Outcome = &ev
 		return s, nil
 	}
-	// Record only verdict changes; the stabilization clock lives in the
-	// latest evaluation, so keep it current when it started.
-	var rec *outcome.Evaluation
-	if prev == nil || prev.Verdict != ev.Verdict || prev.RawVerdict != ev.RawVerdict ||
-		!sameTime(prev.SatisfiedSince, ev.SatisfiedSince) {
-		rec = &ev
-	}
+	// Persist each observation, including unchanged verdicts: stabilization
+	// must distinguish continuous polling from a gap after a process outage.
 	wake := now.Add(recheck)
-	return step{m: work.Mutation{StageState: mustJSON(st), Outcome: rec}, wake: &wake}, nil
+	return step{m: work.Mutation{StageState: mustJSON(st), Outcome: &ev}, wake: &wake}, nil
 }
 
 func sameTime(a, b *time.Time) bool {
@@ -1498,7 +1522,7 @@ func sameTime(a, b *time.Time) bool {
 // as an outcome of this stage.
 func (d *driver) confirmStage(ctx context.Context, stage work.Stage, st stageState) (step, error) {
 	ev, err := d.latestOutcome(ctx, func(e outcome.Evaluation) bool {
-		return e.Stage == stage.ID && !e.EvaluatedAt.Before(st.StartedAt)
+		return e.SpecHash == "human" && e.Stage == stage.ID && !e.EvaluatedAt.Before(st.StartedAt)
 	})
 	if err != nil {
 		return step{}, err
@@ -1506,7 +1530,7 @@ func (d *driver) confirmStage(ctx context.Context, stage work.Stage, st stageSta
 	if ev != nil {
 		switch ev.Verdict {
 		case outcome.Satisfied:
-			if d.w.Stage+1 >= len(d.w.Template.Stages) {
+			if d.w.Stage+1 >= len(d.w.Template.Stages) && d.w.Goal.Success == nil {
 				return d.succeedFrom(ev), nil
 			}
 			return d.advance(stage, map[string]any{"verdict": ev.Verdict, "evaluation_id": ev.ID, "confirmed": true}), nil
@@ -1539,28 +1563,47 @@ func (d *driver) succeed(ev *outcome.Evaluation) step {
 	if d.w.Status != work.StatusVerifying {
 		return step{m: work.Mutation{Status: statusPtr(work.StatusVerifying)}, again: true}
 	}
+	if d.w.Template.RepeatFrom != "" {
+		return d.completeCycle(ev)
+	}
 	return step{m: work.Mutation{Status: statusPtr(work.StatusSucceeded), Reason: strPtr("goal satisfied"), Outcome: ev,
 		Stage: intPtr(len(d.w.Template.Stages)), ClearState: true, CancelAllWatches: true}}
+}
+
+func (d *driver) completeCycle(ev *outcome.Evaluation) step {
+	idx, ok := d.w.Template.Index(d.w.Template.RepeatFrom)
+	if !ok || d.w.Goal.Success == nil {
+		return d.block("repeating Work has no valid wait stage or machine goal")
+	}
+	stage := d.w.Template.Stages[idx]
+	if stage.Wait == nil {
+		return d.block("repeating Work target is not a wait stage")
+	}
+	gen := d.w.Generation + 1
+	now := d.o.now()
+	wt, err := continuous.Build(*stage.Wait, d.w.TenantID, d.w.ID, gen, d.w.Goal.SubjectRefs, now)
+	if err != nil {
+		return d.block("register next cycle: " + err.Error())
+	}
+	st := stageState{StageID: stage.ID, Generation: gen, StartedAt: now, WatchID: wt.ID}
+	return step{m: work.Mutation{Status: statusPtr(work.StatusWaiting), Stage: &idx, Generation: &gen,
+		ClearState: true, StageState: mustJSON(st), Outcome: ev, CompleteCycle: true, CancelAllWatches: true,
+		Watches: []continuous.Watch{wt}, Reason: strPtr("cycle verified; waiting for next trigger"),
+		Events: []work.NewEvent{{Type: "work.cycle_completed", Payload: map[string]any{
+			"generation": d.w.Generation, "next_generation": gen, "evaluation_id": ev.ID, "wait_stage": stage.ID}}}}}
 }
 
 // succeedFrom closes with a copy of an already recorded evaluation.
 func (d *driver) succeedFrom(prev *outcome.Evaluation) step {
 	ev := *prev
-	ev.ID, ev.Stage, ev.EvaluatedAt = cpkit.NewID(), "final", d.o.now()
+	ev.ID, ev.Stage = cpkit.NewID(), "final"
 	ev.Reasons = append(append([]string(nil), prev.Reasons...), "confirmed by evaluation "+prev.ID)
 	return d.succeed(&ev)
 }
 
-// finish runs after the last stage: success needs a satisfied outcome of
-// this generation; without one, a human confirms.
+// finish verifies the current machine goal after all stages. A stage-local
+// result or human confirmation cannot substitute for this evaluation.
 func (d *driver) finish(ctx context.Context) (step, error) {
-	ev, err := d.latestOutcome(ctx, func(outcome.Evaluation) bool { return true })
-	if err != nil {
-		return step{}, err
-	}
-	if ev != nil && ev.Verdict == outcome.Satisfied {
-		return d.succeedFrom(ev), nil
-	}
 	final := work.Stage{ID: "final", Type: work.StageConfirm, OnFailure: work.OnFailBlock}
 	var st stageState
 	if len(d.w.StageState) > 0 {
@@ -1568,6 +1611,17 @@ func (d *driver) finish(ctx context.Context) (step, error) {
 	}
 	if st.StageID != "final" || st.Generation != d.w.Generation {
 		st = stageState{StageID: "final", Generation: d.w.Generation, StartedAt: d.o.now()}
+	}
+	if d.w.Goal.Success != nil {
+		final.Type = work.StageVerify
+		return d.verifyStage(ctx, final, st)
+	}
+	ev, err := d.latestOutcome(ctx, func(e outcome.Evaluation) bool { return e.SpecHash == "human" })
+	if err != nil {
+		return step{}, err
+	}
+	if ev != nil && ev.Verdict == outcome.Satisfied {
+		return d.succeedFrom(ev), nil
 	}
 	return d.confirmStage(ctx, final, st)
 }

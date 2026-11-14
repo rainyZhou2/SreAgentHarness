@@ -230,6 +230,10 @@ func (d *driver) spawnChild(ctx context.Context, stage work.Stage, c work.ChildS
 	intent := cpkit.Truncate(work.Render(firstNonEmpty(c.Intent, "${goal.intent}"), w, nil), work.MaxIntent)
 	goal := work.GoalSpec{Intent: intent, Description: cpkit.Truncate(work.Render(c.Description, w, nil), work.MaxDescription),
 		Constraints: c.Constraints, Labels: map[string]string{"parent_work": w.ID, "child_key": c.Key}}
+	goal.Success, err = c.InheritedSuccess(w.Goal)
+	if err != nil {
+		return work.Work{}, err
+	}
 	title := cpkit.Truncate(work.Render(firstNonEmpty(c.Title, c.Key+": ${title}"), w, nil), work.MaxTitle)
 	n := work.NewChild{ParentID: w.ID, Key: c.Key, Work: work.NewWork{TenantID: w.TenantID, Kind: kind, Title: title, Goal: goal,
 		Template: tpl, Queue: c.Queue, ActorType: "system", ActorID: "work:" + w.ID, Now: d.o.now(),
