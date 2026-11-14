@@ -3,6 +3,8 @@ package localstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -15,8 +17,7 @@ import (
 // SQLite. Commands must be atomic: a rejected command may not leave partial
 // state behind, and a command that fails midway must not persist half of its
 // writes. stateBuf buffers object writes and events for a command or Kernel
-// mutation; the caller commits or rolls the buffer back together with the
-// in-memory snapshot. JSONL event emission is a separate durability boundary.
+// mutation; state, event payloads and Run cursors share one transaction.
 
 type putOp struct {
 	kind   string
@@ -39,6 +40,7 @@ type pendingEvent struct {
 }
 
 type stateBuf struct {
+	err    error
 	puts   map[string]putOp
 	dels   map[string]struct{}
 	events []pendingEvent
@@ -65,9 +67,6 @@ type stateSnapshot struct {
 	runByKey    map[string]string
 	steps       map[string]domain.Step
 	attempts    map[string]attempt
-	events      map[string][]eventIndex
-	eventCache  map[string]domain.Event
-	eventSeq    map[string]int64
 	sessions    map[string]domain.Session
 	sessionKey  map[string]string
 	branches    map[string]domain.Branch
@@ -126,7 +125,6 @@ func cloneNestedMap[K comparable, V comparable](m map[K]map[V]bool) map[K]map[V]
 func (s *Store) snapshotStateLocked() *stateSnapshot {
 	return &stateSnapshot{
 		runs: cloneMap(s.runs), runByKey: cloneMap(s.runByKey), steps: cloneMap(s.steps), attempts: cloneMap(s.attempts),
-		events: cloneSliceMap(s.events), eventCache: cloneMap(s.eventCache), eventSeq: cloneMap(s.eventSeq),
 		sessions: cloneMap(s.sessions), sessionKey: cloneMap(s.sessionKey), branches: cloneMap(s.branches),
 		turns: cloneMap(s.turns), messages: cloneSliceMap(s.messages), profiles: cloneMap(s.profiles),
 		flows: cloneFlows(s.flows), flowInputs: cloneMap(s.flowInputs), intents: cloneMap(s.intents),
@@ -142,7 +140,6 @@ func (s *Store) snapshotStateLocked() *stateSnapshot {
 
 func (s *Store) restoreStateLocked(sn *stateSnapshot) {
 	s.runs, s.runByKey, s.steps, s.attempts = sn.runs, sn.runByKey, sn.steps, sn.attempts
-	s.events, s.eventCache, s.eventSeq = sn.events, sn.eventCache, sn.eventSeq
 	s.sessions, s.sessionKey, s.branches = sn.sessions, sn.sessionKey, sn.branches
 	s.turns, s.messages, s.profiles = sn.turns, sn.messages, sn.profiles
 	s.flows, s.flowInputs, s.intents, s.intentStep = sn.flows, sn.flowInputs, sn.intents, sn.intentStep
@@ -162,22 +159,35 @@ func (s *Store) execPut(op putOp) {
 		op.kind, op.id, op.parent, op.seq, op.data)
 }
 
-// commitBufferLocked commits buffered objects in one SQLite transaction and
-// propagates failures before emitting events. JSONL events remain a separate
-// durability boundary; this transaction does not make the event log atomic
-// with the object state.
+// commitBufferLocked materializes events after mutations so stale Run copies
+// cannot overwrite their cursor. The caller restores memory if SQL fails.
 func (s *Store) commitBufferLocked(ctx context.Context, buf *stateBuf) error {
-	s.buf = nil
+	if s.buf != buf {
+		return errors.New("localstore: state transaction buffer mismatch")
+	}
+	defer func() { s.buf = nil }()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for _, e := range buf.events {
+		if err := s.bufferEventLocked(e); err != nil {
+			return err
+		}
+	}
+	if buf.err != nil {
+		return buf.err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, op := range buf.puts {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO objects(kind,id,parent,seq,data) VALUES(?,?,?,?,?)
-			ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent, seq=excluded.seq, data=excluded.data`,
-			op.kind, op.id, op.parent, op.seq, op.data); err != nil {
-			return err
+		query := `INSERT INTO objects(kind,id,parent,seq,data) VALUES(?,?,?,?,?)`
+		if op.kind != "event" {
+			query += ` ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent, seq=excluded.seq, data=excluded.data`
+		}
+		if _, err := tx.ExecContext(ctx, query, op.kind, op.id, op.parent, op.seq, op.data); err != nil {
+			return fmt.Errorf("persist %s: %w", op.kind, err)
 		}
 	}
 	for key := range buf.dels {
@@ -188,9 +198,6 @@ func (s *Store) commitBufferLocked(ctx context.Context, buf *stateBuf) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return err
-	}
-	for _, e := range buf.events {
-		s.appendEventNow(e.tenant, e.runID, e.stepID, e.attemptID, e.typ, e.actorType, e.actorID, e.payload, e.at)
 	}
 	return nil
 }
@@ -208,8 +215,14 @@ func cloneFlows(in map[string]domain.FlowSnapshot) map[string]domain.FlowSnapsho
 
 // withStateTxLocked shares the existing command buffer with Kernel writes.
 // The caller holds mu. Failed operations restore both execution objects and
-// ephemeral context snapshots; events are emitted only after object commit.
+// ephemeral context snapshots along with the event cursor.
 func (s *Store) withStateTxLocked(ctx context.Context, mutate func() error) (err error) {
+	if s.buf != nil {
+		return errors.New("localstore: nested state transaction")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	snap := s.snapshotStateLocked()
 	buf := newStateBuf()
 	s.buf = buf

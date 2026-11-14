@@ -1,8 +1,5 @@
-// Package localstore is the single-user local store used by the harness
-// runtime. State objects are persisted as JSON in SQLite; execution events are
-// appended to JSONL first, and SQLite keeps only byte-range indexes into those
-// files. JSONL is the execution source of truth and can rebuild the index.
-// The local runtime is one process, so a mutex provides row locking.
+// Package localstore persists local runtime state and execution events in SQLite.
+// A single process owns the in-memory working set and serializes mutations.
 package localstore
 
 import (
@@ -39,10 +36,6 @@ type Store struct {
 	steps           map[string]domain.Step
 	attempts        map[string]attempt
 	eventDir        string
-	events          map[string][]eventIndex
-	eventCache      map[string]domain.Event
-	eventSeq        map[string]int64
-	legacyEvents    []domain.Event
 	sessions        map[string]domain.Session
 	sessionKey      map[string]string
 	branches        map[string]domain.Branch
@@ -218,8 +211,7 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{
 		db: db, upgrade: up, eventDir: eventDir, runs: map[string]domain.Run{}, runByKey: map[string]string{}, steps: map[string]domain.Step{},
-		attempts: map[string]attempt{}, events: map[string][]eventIndex{}, eventCache: map[string]domain.Event{},
-		eventSeq: map[string]int64{}, sessions: map[string]domain.Session{},
+		attempts: map[string]attempt{}, sessions: map[string]domain.Session{},
 		sessionKey: map[string]string{}, branches: map[string]domain.Branch{}, turns: map[string]domain.Turn{},
 		messages: map[string][]domain.Message{}, profiles: map[string]profileRec{}, flows: map[string]domain.FlowSnapshot{},
 		flowInputs: map[string]flowInput{}, intents: map[string]domain.ActionIntent{}, intentStep: map[string]string{}, approvals: map[string]approvalRec{},
@@ -244,14 +236,13 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	s.bootstrapEvents()
 	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) load() error {
-	rows, err := s.db.Query(`SELECT kind, id, data FROM objects`)
+	rows, err := s.db.Query(`SELECT kind, id, data FROM objects WHERE kind != 'event'`)
 	if err != nil {
 		return err
 	}
@@ -289,12 +280,6 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 			return err
 		}
 		s.attempts[v.ID] = v
-	case "event":
-		var v domain.Event
-		if err := json.Unmarshal(data, &v); err != nil {
-			return err
-		}
-		s.legacyEvents = append(s.legacyEvents, v)
 	case "session":
 		var v domain.Session
 		if err := json.Unmarshal(data, &v); err != nil {
@@ -640,6 +625,10 @@ func (s *Store) loadObject(kind, id string, data []byte) error {
 func (s *Store) put(kind, id, parent string, seq int64, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
+		if s.buf != nil {
+			s.buf.err = errors.Join(s.buf.err, fmt.Errorf("marshal %s: %w", kind, err))
+			return
+		}
 		panic(err)
 	}
 	if s.buf != nil {
@@ -761,39 +750,34 @@ func (s *Store) saveEffect(v effectRec) {
 }
 
 func (s *Store) appendEvent(tenant, runID, stepID, attemptID, typ, actorType, actorID string, payload any) {
+	if s.buf == nil {
+		panic("localstore: event mutation requires a state transaction")
+	}
 	var p json.RawMessage
 	if payload != nil {
-		p, _ = json.Marshal(payload)
+		var err error
+		p, err = json.Marshal(payload)
+		if err != nil {
+			s.buf.err = errors.Join(s.buf.err, fmt.Errorf("marshal event %s: %w", typ, err))
+			return
+		}
 	}
-	if s.buf != nil {
-		s.buf.events = append(s.buf.events, pendingEvent{tenant: tenant, runID: runID, stepID: stepID,
-			attemptID: attemptID, typ: typ, actorType: actorType, actorID: actorID, payload: p, at: now()})
-		return
-	}
-	s.appendEventNow(tenant, runID, stepID, attemptID, typ, actorType, actorID, p, now())
+	s.buf.events = append(s.buf.events, pendingEvent{tenant: tenant, runID: runID, stepID: stepID,
+		attemptID: attemptID, typ: typ, actorType: actorType, actorID: actorID, payload: p, at: now()})
 }
 
-func (s *Store) appendEventNow(tenant, runID, stepID, attemptID, typ, actorType, actorID string, p json.RawMessage, at time.Time) {
-	r := s.runs[runID]
-	seq := s.eventSeq[runID] + 1
-	s.eventSeq[runID] = seq
-	if r.LastEventSeq < seq {
-		r.LastEventSeq = seq
+func (s *Store) bufferEventLocked(e pendingEvent) error {
+	r, ok := s.runs[e.runID]
+	if !ok || r.TenantID != e.tenant || e.typ == "" {
+		return fmt.Errorf("invalid event owner or type for run %s", e.runID)
 	}
-	s.runs[runID] = r
-	ev := domain.Event{TenantID: tenant, RunID: runID, Seq: seq, ID: newID(), Type: typ,
-		ActorType: actorType, Payload: p, OccurredAt: at, CommittedAt: now()}
-	if stepID != "" {
-		ev.StepID = &stepID
-	}
-	if attemptID != "" {
-		ev.AttemptID = &attemptID
-	}
-	if actorID != "" {
-		ev.ActorID = &actorID
-	}
-	s.appendEventLogLocked(ev)
+	r.LastEventSeq++
+	ev := domain.Event{TenantID: e.tenant, RunID: e.runID, Seq: r.LastEventSeq, ID: newID(), Type: e.typ,
+		ActorType: e.actorType, Payload: e.payload, OccurredAt: e.at, CommittedAt: now(),
+		StepID: strptr(e.stepID), AttemptID: strptr(e.attemptID), ActorID: strptr(e.actorID)}
+	s.put("event", eventCapKey(ev.RunID, ev.Seq), ev.RunID, ev.Seq, ev)
 	s.saveRun(r)
+	return nil
 }
 
 func sortedSteps(steps map[string]domain.Step, runID string) []domain.Step {

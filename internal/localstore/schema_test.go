@@ -1,6 +1,7 @@
 package localstore
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -52,7 +53,7 @@ func TestNewerSchemaIsRefused(t *testing.T) {
 }
 
 func TestSchemaUpgradeBacksUpAndMigrates(t *testing.T) {
-	// Pretend this build is v2 with one migration.
+	// Simulate the next schema version.
 	saved := schemaMigrations
 	defer func() { schemaMigrations = saved }()
 	path := filepath.Join(t.TempDir(), "harness.db")
@@ -60,9 +61,9 @@ func TestSchemaUpgradeBacksUpAndMigrates(t *testing.T) {
 	s.Close()
 
 	ran := false
-	schemaMigrations = []func(*sql.DB) error{func(db *sql.DB) error { ran = true; return nil }}
-	up, err := ensureSchemaFor(t, path, 2)
-	if err != nil || up == nil || up.From != 1 || up.To != 2 || !ran {
+	schemaMigrations = append(append([]func(context.Context, *sql.Tx, string) error(nil), saved...), func(context.Context, *sql.Tx, string) error { ran = true; return nil })
+	up, err := ensureSchemaFor(t, path, SchemaVersion+1)
+	if err != nil || up == nil || up.From != SchemaVersion || up.To != SchemaVersion+1 || !ran {
 		t.Fatalf("upgrade: %+v %v ran=%v", up, err, ran)
 	}
 	if _, err := os.Stat(up.Backup); err != nil {

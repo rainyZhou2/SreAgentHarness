@@ -126,6 +126,19 @@ func (s *Store) ResumeSession(ctx context.Context, tenantID, sessionID string) (
 func (s *Store) SubmitTurn(ctx context.Context, req domain.SubmitTurnRequest, policy domain.BranchPolicy, maxPending int) (domain.SubmittedTurn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var result domain.SubmittedTurn
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		result, err = s.submitTurnLocked(ctx, req, policy, maxPending)
+		return err
+	})
+	if err != nil {
+		return domain.SubmittedTurn{}, err
+	}
+	return result, nil
+}
+
+func (s *Store) submitTurnLocked(ctx context.Context, req domain.SubmitTurnRequest, policy domain.BranchPolicy, maxPending int) (domain.SubmittedTurn, error) {
 	sess, ok := s.sessions[req.SessionID]
 	if !ok || sess.TenantID != req.TenantID || sess.Status != "ACTIVE" {
 		return domain.SubmittedTurn{}, domain.ErrNotFound
