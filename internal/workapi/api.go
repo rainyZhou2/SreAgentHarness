@@ -213,7 +213,29 @@ func (a *API) Register(mux *http.ServeMux) {
 		return a.Store.ListEvidence(ctx, t, id, 500)
 	}))
 	mux.HandleFunc("GET /v1/works/{id}/hypotheses", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListHypotheses(ctx, t, id)
+		w, err := a.Store.GetWork(ctx, t, id)
+		if err != nil {
+			return nil, err
+		}
+		hs, err := a.Store.ListHypotheses(ctx, t, id)
+		if err != nil {
+			return nil, err
+		}
+		ledger, err := a.Store.ListEvidence(ctx, t, id, evidence.MaxDecisionEvidence)
+		if err != nil {
+			return nil, err
+		}
+		scope := evidence.DecisionScope{TenantID: t, WorkID: id, Generation: w.Generation}
+		type view struct {
+			evidence.Hypothesis
+			DecisionCurrent bool `json:"decision_current"`
+		}
+		out := make([]view, 0, len(hs))
+		at := a.Clock.Now().UTC()
+		for _, h := range hs {
+			out = append(out, view{Hypothesis: h, DecisionCurrent: h.ValidDecisionFor(scope, ledger, at)})
+		}
+		return out, nil
 	}))
 	mux.HandleFunc("GET /v1/works/{id}/decisions", a.sub(func(ctx context.Context, t, id string) (any, error) {
 		w, err := a.Store.GetWork(ctx, t, id)
@@ -224,10 +246,15 @@ func (a *API) Register(mux *http.ServeMux) {
 		if err != nil {
 			return nil, err
 		}
+		ledger, err := a.Store.ListEvidence(ctx, t, id, evidence.MaxDecisionEvidence)
+		if err != nil {
+			return nil, err
+		}
 		decisions := []evidence.DecisionVerdict{}
 		scope := evidence.DecisionScope{TenantID: t, WorkID: id, Generation: w.Generation}
+		at := a.Clock.Now().UTC()
 		for _, h := range hs {
-			if h.CurrentDecisionFor(scope) {
+			if h.ValidDecisionFor(scope, ledger, at) {
 				decisions = append(decisions, *h.Decision)
 			}
 		}
@@ -559,8 +586,7 @@ func (a *API) workEvents(w http.ResponseWriter, r *http.Request) {
 		next = evs[len(evs)-1].Seq
 	}
 	if wantsContract(r) {
-		writeJSON(w, http.StatusOK, map[string]any{"schema_version": protocol.SchemaVersion, "items": protocol.FromWorkEvents(evs),
-			"next_after_seq": next})
+		writeJSON(w, http.StatusOK, protocol.EventPage{SchemaVersion: protocol.SchemaVersion, ContractVersion: protocol.ContractVersion, MinimumReaderVersion: protocol.MinimumReaderVersion, Items: protocol.FromWorkEvents(evs), NextAfterSeq: next})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": evs, "next_after_seq": next})
@@ -601,7 +627,9 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	if contract {
-		w.Header().Set("X-Harness-Event-Schema", strconv.Itoa(protocol.SchemaVersion))
+		w.Header().Set(protocol.HeaderSchemaVersion, strconv.Itoa(protocol.SchemaVersion))
+		w.Header().Set(protocol.HeaderContractVersion, strconv.Itoa(protocol.ContractVersion))
+		w.Header().Set(protocol.HeaderMinimumReaderVersion, strconv.Itoa(protocol.MinimumReaderVersion))
 	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "retry: 3000\n\n")

@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/outcome"
+	"go-sre-harness/internal/protocol"
 	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/world"
 )
@@ -127,10 +129,29 @@ func (c *Client) do(ctx context.Context, method, path string, hdr map[string]str
 		}
 		return resp.Header, e
 	}
+	// Only protocol responses participate; unrelated domain types may expose
+	// their own Validate method with entirely different lifecycle semantics.
+	var validateContract func() error
+	switch v := out.(type) {
+	case *protocol.EventPage:
+		validateContract = func() error { return v.Validate() }
+	case *protocol.View:
+		validateContract = func() error { return v.Validate() }
+	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
+			if validateContract != nil {
+				var protocolErr *protocol.Error
+				if errors.As(err, &protocolErr) {
+					return resp.Header, err
+				}
+				return resp.Header, &protocol.Error{Code: protocol.InvalidFrame, Message: "invalid contract JSON: " + err.Error()}
+			}
 			return resp.Header, fmt.Errorf("decode %s %s: %w", method, path, err)
 		}
+	}
+	if validateContract != nil {
+		return resp.Header, validateContract()
 	}
 	return resp.Header, nil
 }

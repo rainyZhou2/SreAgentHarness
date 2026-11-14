@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,20 +23,21 @@ import (
 // v3 wire types.
 type (
 	// Event is one entry of the stable event contract.
-	Event       = protocol.Event
-	View        = protocol.View
-	Graph       = work.Graph
-	CreateChild = orchestration.ChildRequest
-	Improvement = orchestration.Improvement
-	Finding     = orchestration.Finding
-	Source      = observability.Source
-	Query       = observability.Query
-	QueryResult = observability.Result
-	SourceProbe = observability.Health
-	Attestation = governance.Attestation
-	Budget      = quota.Budget
-	Intent      = orchestration.Intent
-	DryRunPlan  = orchestration.DryRunPlan
+	Event         = protocol.Event
+	ProtocolError = protocol.Error
+	View          = protocol.View
+	Graph         = work.Graph
+	CreateChild   = orchestration.ChildRequest
+	Improvement   = orchestration.Improvement
+	Finding       = orchestration.Finding
+	Source        = observability.Source
+	Query         = observability.Query
+	QueryResult   = observability.Result
+	SourceProbe   = observability.Health
+	Attestation   = governance.Attestation
+	Budget        = quota.Budget
+	Intent        = orchestration.Intent
+	DryRunPlan    = orchestration.DryRunPlan
 )
 
 // Graph returns the Work tree a Work belongs to.
@@ -56,7 +58,13 @@ func (c *Client) CreateChild(ctx context.Context, parentID, key string, req Crea
 func (c *Client) View(ctx context.Context, workID string) (View, error) {
 	var v View
 	_, err := c.do(ctx, http.MethodGet, "/v1/works/"+esc(workID)+"/view", nil, nil, &v)
-	return v, err
+	if err != nil {
+		return View{}, err
+	}
+	if v.Work.ID != workID {
+		return View{}, &protocol.Error{Code: protocol.InvalidFrame, Message: "snapshot belongs to another Work"}
+	}
+	return v, nil
 }
 
 // Findings lists the validated agent findings of a Work.
@@ -157,19 +165,31 @@ func (c *Client) DryRun(ctx context.Context, templateID string, goal Goal) (DryR
 // ContractEvents reads a page of the Work timeline in the stable event
 // contract.
 func (c *Client) ContractEvents(ctx context.Context, workID string, afterSeq int64, limit int) ([]Event, error) {
-	var out struct {
-		Items []Event `json:"items"`
-	}
+	var out protocol.EventPage
 	_, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/works/%s/events?protocol=1&after_seq=%d&limit=%d", esc(workID), afterSeq, limit),
 		nil, nil, &out)
-	return out.Items, err
+	if err != nil {
+		return nil, err
+	}
+	last := afterSeq
+	for _, ev := range out.Items {
+		if !ev.Durable() || ev.WorkID != workID || ev.Sequence != last+1 {
+			return nil, &protocol.Error{Code: protocol.InvalidFrame, Message: "event page must contain contiguous durable events of the requested Work"}
+		}
+		last = ev.Sequence
+	}
+	if out.NextAfterSeq != last {
+		return nil, &protocol.Error{Code: protocol.InvalidFrame, Message: "event page cursor does not match its events"}
+	}
+	return out.Items, nil
 }
 
 // Subscribe streams the events of a Work in the stable contract, starting
 // after afterSeq. The stream survives disconnects: the client reconnects
 // with the last sequence it delivered, so every persisted event arrives
 // exactly once and in order. The channel is closed when ctx ends or the
-// Work reaches a terminal status; the error channel then yields the reason
+// client has delivered through a captured terminal snapshot LastSeq. Later
+// audit events require another subscription. The error channel yields the reason
 // (nil for a clean end).
 //
 //	events, errs := client.Subscribe(ctx, work.ID, work.LastSeq)
@@ -182,18 +202,53 @@ func (c *Client) Subscribe(ctx context.Context, workID string, afterSeq int64) (
 	errs := make(chan error, 1)
 	go func() {
 		defer close(out)
+		defer close(errs)
 		last := afterSeq
+		var terminalTarget *int64
 		backoff := 500 * time.Millisecond
 		for {
-			done, err := c.stream(ctx, workID, &last, out)
+			// A completed event can precede the final events of its transaction.
+			// Capture one committed terminal watermark, then keep it across
+			// disconnects; later audit events belong to a later subscription.
+			var err error
+			if terminalTarget == nil {
+				var snapshot View
+				snapshot, err = c.View(ctx, workID)
+				if err == nil && snapshot.Work.Status.Terminal() {
+					if snapshot.LastSeq < last {
+						err = &protocol.Error{Code: protocol.InvalidFrame, Message: "terminal snapshot precedes delivered cursor"}
+					} else {
+						target := snapshot.LastSeq
+						terminalTarget = &target
+					}
+				}
+			}
+			if err == nil && terminalTarget != nil {
+				err = c.drainTerminal(ctx, workID, &last, *terminalTarget, out)
+				if err == nil {
+					errs <- nil
+					return
+				}
+			} else if err == nil {
+				var completed bool
+				completed, err = c.stream(ctx, workID, &last, out)
+				if completed && ctx.Err() == nil {
+					continue // capture the terminal transaction's full watermark
+				}
+			}
 			switch {
-			case done || ctx.Err() != nil:
+			case ctx.Err() != nil:
 				errs <- nil
 				return
 			case err != nil:
+				var protocolErr *protocol.Error
+				if errors.As(err, &protocolErr) {
+					errs <- err
+					return
+				}
 				var apiErr *Error
 				if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
-					errs <- err // not found, forbidden: reconnecting cannot help
+					errs <- err
 					return
 				}
 			}
@@ -209,6 +264,33 @@ func (c *Client) Subscribe(ctx context.Context, workID string, afterSeq int64) (
 		}
 	}()
 	return out, errs
+}
+
+// drainTerminal delivers only through the captured terminal watermark. Missing
+// events fail closed; transport failures let Subscribe retry from last.
+func (c *Client) drainTerminal(ctx context.Context, workID string, last *int64, target int64, out chan<- Event) error {
+	for *last < target {
+		limit := 200
+		if remaining := target - *last; remaining < int64(limit) {
+			limit = int(remaining)
+		}
+		events, err := c.ContractEvents(ctx, workID, *last, limit)
+		if err != nil {
+			return err
+		}
+		if len(events) == 0 || len(events) > limit {
+			return &protocol.Error{Code: protocol.InvalidFrame, Message: "terminal event page does not respect the captured watermark"}
+		}
+		for _, ev := range events {
+			select {
+			case out <- ev:
+				*last = ev.Sequence
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return nil
 }
 
 // stream reads one SSE connection. It reports done when the Work
@@ -241,33 +323,111 @@ func (c *Client) stream(ctx context.Context, workID string, last *int64, out cha
 	if resp.StatusCode != http.StatusOK {
 		return false, &Error{Status: resp.StatusCode, Code: "stream", Message: resp.Status}
 	}
+	if err := streamVersions(resp.Header); err != nil {
+		return false, err
+	}
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	const maxFrame = 4 << 20
+	sc.Buffer(make([]byte, 64<<10), maxFrame)
 	var data strings.Builder
+	var eventType string
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
+		case strings.HasPrefix(line, "event:"):
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		case strings.HasPrefix(line, "data:"):
-			data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		case line == "" && data.Len() > 0:
+			part := strings.TrimPrefix(line, "data:")
+			part = strings.TrimPrefix(part, " ")
+			if data.Len()+len(part)+1 > maxFrame {
+				return false, &protocol.Error{Code: protocol.InvalidFrame, Message: "SSE frame exceeds size limit"}
+			}
+			data.WriteString(part)
+			data.WriteByte('\n')
+		case line == "":
+			if data.Len() == 0 {
+				eventType = ""
+				continue
+			}
+			if eventType == "error" {
+				return false, &Error{Status: http.StatusServiceUnavailable, Code: "stream", Message: "server could not read the event log"}
+			}
 			var ev Event
 			err := json.Unmarshal([]byte(data.String()), &ev)
 			data.Reset()
-			if err != nil || ev.Sequence <= *last {
-				continue // malformed, or a duplicate after a reconnect
+			eventType = ""
+			if err != nil {
+				var protocolErr *protocol.Error
+				if errors.As(err, &protocolErr) {
+					return false, err
+				}
+				return false, &protocol.Error{Code: protocol.InvalidFrame, Message: "invalid SSE event JSON: " + err.Error()}
+			}
+			if err := ev.Validate(); err != nil {
+				return false, err
+			}
+			if ev.WorkID != "" && ev.WorkID != workID {
+				return false, &protocol.Error{Code: protocol.InvalidFrame, Message: "event belongs to another Work"}
+			}
+			if ev.Durable() && ev.Sequence <= *last {
+				continue
+			}
+			if ev.Durable() && ev.Sequence != *last+1 {
+				return false, &protocol.Error{Code: protocol.InvalidFrame, Message: "durable event sequence has a gap"}
 			}
 			select {
 			case out <- ev:
-				*last = ev.Sequence
+				if ev.Durable() {
+					*last = ev.Sequence
+				}
 			case <-ctx.Done():
 				return false, ctx.Err()
 			}
-			if ev.Type == protocol.WorkCompleted {
+			if ev.Durable() && ev.Type == protocol.WorkCompleted {
 				return true, nil
 			}
 		}
 	}
-	return false, sc.Err()
+	if errors.Is(sc.Err(), bufio.ErrTooLong) {
+		return false, &protocol.Error{Code: protocol.InvalidFrame, Message: "SSE line exceeds size limit"}
+	}
+	if sc.Err() != nil {
+		return false, sc.Err()
+	}
+	if data.Len() > 0 {
+		return false, io.ErrUnexpectedEOF
+	}
+	return false, nil
+}
+
+// Old streams may omit headers; each event still has to declare legacy v1 or
+// the complete current tuple. New streams can be rejected before any frame.
+func streamVersions(h http.Header) error {
+	names := []string{protocol.HeaderSchemaVersion, protocol.HeaderContractVersion, protocol.HeaderMinimumReaderVersion}
+	values := [3]int{}
+	present := 0
+	for i, name := range names {
+		value := h.Get(name)
+		if value == "" {
+			continue
+		}
+		present++
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return &protocol.Error{Code: protocol.InvalidFrame, Message: "invalid protocol header " + name}
+		}
+		values[i] = n
+	}
+	if present == 0 {
+		return nil
+	}
+	if present == 1 && values[0] == 1 {
+		return nil
+	}
+	if present != 3 || values[0] <= 0 || values[1] <= 0 || values[2] <= 0 {
+		return &protocol.Error{Code: protocol.IncompatibleVersion, Message: "incomplete protocol headers"}
+	}
+	return protocol.ValidateVersions(values[0], values[1], values[2])
 }
 
 // Works is a resource-style facade over the Work calls:

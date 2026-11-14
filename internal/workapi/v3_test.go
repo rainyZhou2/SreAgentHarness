@@ -2,6 +2,7 @@ package workapi_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"go-sre-harness/internal/impact"
 	"go-sre-harness/internal/observability"
 	"go-sre-harness/internal/orchestration"
+	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/protocol"
 	"go-sre-harness/internal/runbook"
@@ -153,7 +155,7 @@ func TestV3GraphViewAndSDK(t *testing.T) {
 		t.Fatalf("graph across tenants: %v", err)
 	}
 	v, err := viewer.View(ctx, review.ID)
-	if err != nil || v.WaitingOn != "another Work" || len(v.Stages) == 0 || len(v.Controls) == 0 {
+	if err != nil || v.SchemaVersion != protocol.SchemaVersion || v.ContractVersion != protocol.ContractVersion || v.MinimumReaderVersion != protocol.MinimumReaderVersion || v.WaitingOn != "another Work" || len(v.Stages) == 0 || len(v.Controls) == 0 {
 		t.Fatalf("view: %+v %v", v, err)
 	}
 	pv, _ := viewer.View(ctx, parent.ID)
@@ -185,7 +187,7 @@ func TestSubscribeResumesWithoutGapsOrDuplicates(t *testing.T) {
 	events, _ := op.Works().Subscribe(first, w.ID, 0)
 	var seen []int64
 	for ev := range events {
-		if ev.SchemaVersion != protocol.SchemaVersion || ev.TenantID != "t1" || ev.WorkID != w.ID {
+		if ev.SchemaVersion != protocol.SchemaVersion || ev.ContractVersion != protocol.ContractVersion || ev.MinimumReaderVersion != protocol.MinimumReaderVersion || ev.TenantID != "t1" || ev.WorkID != w.ID {
 			t.Fatalf("event: %+v", ev)
 		}
 		seen = append(seen, ev.Sequence)
@@ -213,8 +215,9 @@ func TestSubscribeResumesWithoutGapsOrDuplicates(t *testing.T) {
 			t.Fatalf("sequence must be gap-free and without duplicates: %v", seen)
 		}
 	}
-	if last.Type != protocol.WorkCompleted && seen[len(seen)-1] < 10 {
-		t.Fatalf("the stream ends with the Work: last=%s seen=%v", last.Type, seen)
+	snapshot, err := op.View(ctx, w.ID)
+	if err != nil || last.Sequence != snapshot.LastSeq {
+		t.Fatalf("the stream must drain the terminal transaction: last=%d durable=%d error=%v", last.Sequence, snapshot.LastSeq, err)
 	}
 	page, err := op.ContractEvents(ctx, w.ID, 0, 3)
 	if err != nil || len(page) != 3 || page[0].Type != protocol.WorkCreated {
@@ -314,5 +317,150 @@ func TestV3SourcesQuotasIntentsDryRunRunbooks(t *testing.T) {
 	rb, err := e.store.GetRunbook(ctx, "t1", "incident.search-latency", 0)
 	if err != nil || len(rb.Problems("", time.Now())) != 1 {
 		t.Fatalf("an unrehearsed runbook reports it: %+v %v", rb.Problems("", time.Now()), err)
+	}
+}
+
+func TestViewFailsWhenSnapshotSourcesFail(t *testing.T) {
+	for _, source := range []string{"outcomes", "children"} {
+		t.Run(source, func(t *testing.T) {
+			e := newV3(t)
+			ctx := context.Background()
+			c := e.client("t1", "operator")
+			parent, err := c.CreateWork(ctx, "snapshot-parent", workclient.CreateWork{Kind: "incident", Goal: goal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source == "outcomes" {
+				_, err = e.store.DB().ExecContext(ctx, `DROP TABLE work_outcomes`)
+			} else {
+				child, xerr := c.CreateChild(ctx, parent.ID, "snapshot-child", workclient.CreateChild{Goal: workclient.Goal{Intent: "investigate"}})
+				if xerr != nil {
+					t.Fatal(xerr)
+				}
+				_, err = e.store.DB().ExecContext(ctx, `UPDATE agent_works SET goal='{' WHERE id=?`, child.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.View(ctx, parent.ID); status(err) != http.StatusInternalServerError {
+				t.Fatalf("partial snapshot reported success: %v", err)
+			}
+		})
+	}
+}
+
+func TestProtocolMetadataOnEmptyPageAndStream(t *testing.T) {
+	e := newV3(t)
+	ctx := context.Background()
+	c := e.client("t1", "operator")
+	w, err := c.CreateWork(ctx, "metadata", workclient.CreateWork{Kind: "incident", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(path string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header = c.Header.Clone()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	resp := request("/v1/works/" + w.ID + "/events?protocol=1&after_seq=9999")
+	var page protocol.EventPage
+	err = json.NewDecoder(resp.Body).Decode(&page)
+	resp.Body.Close()
+	if err != nil || page.SchemaVersion != 1 || page.ContractVersion != 1 || page.MinimumReaderVersion != 1 || len(page.Items) != 0 {
+		t.Fatalf("empty page metadata: %+v %v", page, err)
+	}
+	resp = request("/v1/works/" + w.ID + "/events/stream?protocol=1")
+	for _, header := range []string{protocol.HeaderSchemaVersion, protocol.HeaderContractVersion, protocol.HeaderMinimumReaderVersion} {
+		if resp.Header.Get(header) != "1" {
+			t.Errorf("header %s=%q", header, resp.Header.Get(header))
+		}
+	}
+	resp.Body.Close()
+	resp = request("/v1/works/" + w.ID + "/events")
+	var legacy map[string]json.RawMessage
+	err = json.NewDecoder(resp.Body).Decode(&legacy)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := legacy["schema_version"]; ok {
+		t.Fatal("legacy event page shape changed")
+	}
+}
+
+// A terminal status event is not the transaction's final durable event.
+func TestSubscribeDrainsTerminalTransaction(t *testing.T) {
+	for _, terminal := range []work.Status{work.StatusCancelled, work.StatusSucceeded} {
+		t.Run(string(terminal), func(t *testing.T) {
+			e := newV3(t)
+			ctx := context.Background()
+			c := e.client("t1", "operator")
+			w, err := c.Works().Create(ctx, "terminal-tail", workclient.CreateWork{Kind: "incident", Title: "tail", Goal: goal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			liveCtx, liveCancel := context.WithTimeout(ctx, 3*time.Second)
+			defer liveCancel()
+			liveEvents, liveErrors := c.Subscribe(liveCtx, w.ID, 0)
+			first, ok := <-liveEvents
+			if !ok || first.Sequence != 1 {
+				t.Fatalf("subscription failed to start: %+v", first)
+			}
+			if terminal == work.StatusCancelled {
+				if _, err = c.Command(ctx, w.ID, "cancel-tail", work.CmdCancel, nil, "done", 0); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				for _, st := range []work.Status{work.StatusActive, work.StatusVerifying} {
+					if _, err = e.store.ApplyWork(ctx, work.Mutation{TenantID: "t1", WorkID: w.ID, ActorType: "system", Status: &st}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				now := time.Now().UTC()
+				if _, err = e.store.ApplyWork(ctx, work.Mutation{TenantID: "t1", WorkID: w.ID, ActorType: "system", Status: &terminal, Now: now, Events: []work.NewEvent{{Type: "outcome.satisfied", Payload: map[string]any{"verdict": "SATISFIED"}}},
+					Outcome: &outcome.Evaluation{SpecHash: "human", Verdict: outcome.Satisfied, RawVerdict: outcome.Satisfied, EvaluatedAt: now}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot, err := c.View(ctx, w.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			liveLast := first.Sequence
+			for ev := range liveEvents {
+				if ev.Sequence != liveLast+1 {
+					t.Fatalf("live gap: %d -> %d", liveLast, ev.Sequence)
+				}
+				liveLast = ev.Sequence
+			}
+			if err := <-liveErrors; err != nil || liveCtx.Err() != nil || liveLast != snapshot.LastSeq {
+				t.Fatalf("live last=%d durable=%d error=%v context=%v", liveLast, snapshot.LastSeq, err, liveCtx.Err())
+			}
+			for _, after := range []int64{0, snapshot.LastSeq} {
+				subctx, cancel := context.WithTimeout(ctx, time.Second)
+				events, errs := c.Subscribe(subctx, w.ID, after)
+				last := after
+				for ev := range events {
+					if ev.Sequence != last+1 {
+						t.Errorf("gap: %d -> %d", last, ev.Sequence)
+					}
+					last = ev.Sequence
+				}
+				suberr := <-errs
+				expired := subctx.Err()
+				cancel()
+				if suberr != nil || expired != nil || last != snapshot.LastSeq {
+					t.Fatalf("after=%d last=%d durable=%d error=%v deadline=%v", after, last, snapshot.LastSeq, suberr, expired)
+				}
+			}
+		})
 	}
 }

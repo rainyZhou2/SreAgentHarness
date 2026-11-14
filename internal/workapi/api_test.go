@@ -21,6 +21,7 @@ import (
 	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
+	"go-sre-harness/internal/workeval"
 	"go-sre-harness/internal/world"
 )
 
@@ -42,7 +43,7 @@ func newEnv(t *testing.T) *env {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := &API{Store: s, Service: &orchestration.Service{Store: s, Catalog: cat, Log: quiet},
 		Ingestor: &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Log: quiet},
-		World:    &world.Service{Store: s}, Log: quiet, Postmortems: &postmortem.Builder{Ledger: s}}
+		World:    &world.Service{Store: s}, Eval: &workeval.Evaluator{Ledger: s}, Log: quiet, Postmortems: &postmortem.Builder{Ledger: s}}
 	mux := http.NewServeMux()
 	a.Register(mux)
 	// Test auth: X-Tenant / X-Roles headers become the principal (the real
@@ -407,6 +408,30 @@ func TestDecisionContractAcrossAPIViewsAndGenerations(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decision, rdecision) {
 		t.Fatalf("postmortem and decisions endpoints expose different records: %v vs %v", rdecision, decision)
+	}
+
+	_, _, err = e.store.AddEvidence(ctx, evidence.Record{TenantID: "t1", WorkID: id, SourceType: evidence.SourceTool,
+		SourceRef: "experiment://checkout/retraction", TrustTier: "T2", Quality: evidence.QualityValid,
+		Relation: evidence.RelRefutes, Kind: evidence.KindObservation, CapturedAt: time.Now().UTC(),
+		Supersedes: rec.ID, Summary: "The original measurement was invalidated by a controlled retest."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, decisions, _ = e.do("GET", base+"/decisions", "t1", "viewer", nil, nil)
+	items, _ = decisions["items"].([]any)
+	if code != http.StatusOK || len(items) != 0 {
+		t.Fatalf("superseded evidence still establishes current decision: %d %v", code, decisions)
+	}
+	code, report, _ = e.do("GET", base+"/postmortem", "t1", "viewer", nil, nil)
+	if code != http.StatusOK || report["root_cause"] != nil {
+		t.Fatalf("superseded evidence still establishes root cause: %d %v", code, report)
+	}
+	code, score, _ := e.do("GET", base+"/evaluation", "t1", "viewer", nil, nil)
+	if code != http.StatusOK || score["items"].(map[string]any)["grounded_conclusions"] != float64(0) {
+		t.Fatalf("superseded evidence still grounded: %d %v", code, score)
+	}
+	if !hyps[0].CurrentDecisionFor(evidence.DecisionScope{TenantID: "t1", WorkID: id, Generation: w.Generation}) {
+		t.Fatal("historical decision no longer replayable")
 	}
 
 	next := w.Generation + 1
