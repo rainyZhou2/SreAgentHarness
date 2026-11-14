@@ -88,6 +88,20 @@ func incident() *fake {
 			testHypothesis("cache stampede", evidence.CatContributing, evidence.DecisionConfirmed, []string{"ev-metric"}),
 		},
 	}
+	seen := map[string]bool{}
+	f.recs = nil
+	for _, h := range f.hyps {
+		if h.Decision == nil {
+			continue
+		}
+		for _, r := range h.Decision.Input.Evidence {
+			if !seen[r.ID] {
+				f.recs = append(f.recs, r)
+				seen[r.ID] = true
+			}
+		}
+	}
+
 	return f
 }
 

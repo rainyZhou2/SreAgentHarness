@@ -71,6 +71,7 @@ func TestScoreHealthyWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.evs = append(supported[0].Decision.Input.Evidence, f.evs[1:]...)
 	f.hyps = append(supported, f.hyps...)
 	e := &Evaluator{Ledger: f, ToolCalls: func(context.Context, string, string) (int, error) { return 7, nil },
 		MemoryMatch: func(context.Context, work.Work) (int, int, error) { return 1, 2, nil }}
