@@ -122,6 +122,10 @@ func (s *Store) CreateAction(ctx context.Context, r action.Record) (action.Recor
 		if !errors.Is(err, action.ErrNotFound) {
 			return err
 		}
+		w, err := s.lockWork(ctx, tx, r.TenantID, r.WorkID)
+		if err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO work_actions (id, tenant_id, work_id, run_id, stage_id, generation,
 			action_name, action_version, target_ref, plan_hash, intent_hash, effect_key, state, record, version,
 			dispatched_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`),
@@ -132,6 +136,9 @@ func (s *Store) CreateAction(ctx context.Context, r action.Record) (action.Recor
 			return errRetryCreate
 		}
 		if err != nil {
+			return err
+		}
+		if err := s.appendActionAudit(ctx, tx, &w, r, ""); err != nil {
 			return err
 		}
 		out, created = r, true
@@ -196,6 +203,10 @@ func (s *Store) UpdateAction(ctx context.Context, r action.Record, expectedVersi
 		if stored.Version != expectedVersion || stored.PlanHash != r.PlanHash || stored.EffectKey != r.EffectKey {
 			return action.ErrVersionConflict
 		}
+		w, err := s.lockWork(ctx, tx, stored.TenantID, stored.WorkID)
+		if err != nil {
+			return err
+		}
 		if r.State == action.StateDispatched && stored.State != action.StateDispatched {
 			if stored.State != action.StateReady {
 				return action.ErrInvalidState
@@ -217,9 +228,24 @@ func (s *Store) UpdateAction(ctx context.Context, r action.Record, expectedVersi
 		if n, _ := res.RowsAffected(); n != 1 {
 			return action.ErrVersionConflict
 		}
-		return nil
+		return s.appendActionAudit(ctx, tx, &w, r, stored.State)
 	})
 	return r, err
+}
+
+func (s *Store) appendActionAudit(ctx context.Context, tx *sql.Tx, w *work.Work, r action.Record, previous action.State) error {
+	if err := s.appendEvents(ctx, tx, w, "system", "action-runtime", r.UpdatedAt, []work.NewEvent{{
+		Type: "action.state_changed", Payload: map[string]any{
+			"action_id": r.ID, "action_version": r.Version, "generation": r.Generation,
+			"stage_id": r.StageID, "from": previous, "state": r.State,
+			"intent_hash": r.IntentHash, "may_have_dispatched": r.MayHaveDispatched,
+		},
+	}}); err != nil {
+		return err
+	}
+	// Audit appends advance the cursor, not the Work execution version.
+	// The Work row lock orders them with state mutations and other appends.
+	return s.saveWorkCounters(ctx, tx, *w)
 }
 
 // ListStaleDispatched returns actions stuck in DISPATCHED since before the
