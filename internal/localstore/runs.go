@@ -183,7 +183,7 @@ func (s *Store) ListEvents(ctx context.Context, tenantID, runID string, afterSeq
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
-	return s.listEventsLocked(runID, afterSeq, limit)
+	return s.listEventsLocked(ctx, runID, afterSeq, limit)
 }
 
 func (s *Store) ListApprovals(ctx context.Context, tenantID, runID string) ([]domain.ApprovalRequest, error) {
@@ -261,9 +261,11 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 	snap := s.snapshotStateLocked()
 	buf := newStateBuf()
 	s.buf = buf
+	handled := false
 	defer func() {
-		if s.buf == buf {
-			s.buf = nil // a panic must not leave the next call in buffered mode
+		s.buf = nil
+		if !handled {
+			s.restoreStateLocked(snap)
 		}
 	}()
 	s.appendEvent(tenantID, runID, "", "", "command.received", "user", req.ActorID,
@@ -283,12 +285,19 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 		c.RejectReason = &reason
 		v := s.runs[runID].Version
 		c.RunVersionAfter = &v
-		s.persistCommandKey(tenantID, runID, req.IdempotencyKey, c.ID)
-		s.saveCommand(c)
-		s.appendEvent(tenantID, runID, "", "", "command.received", "user", req.ActorID,
-			map[string]any{"command_id": c.ID, "type": req.Type, "reason": req.Reason})
-		s.appendEvent(tenantID, runID, "", "", "command.rejected", "user", req.ActorID,
-			map[string]string{"command_id": c.ID, "reason": reason})
+		handled = true // The rejection transaction now owns rollback.
+		if err := s.withStateTxLocked(ctx, func() error {
+			s.persistCommandKey(tenantID, runID, req.IdempotencyKey, c.ID)
+			s.saveCommand(c)
+			s.appendEvent(tenantID, runID, "", "", "command.received", "user", req.ActorID,
+				map[string]any{"command_id": c.ID, "type": req.Type, "reason": req.Reason})
+			s.appendEvent(tenantID, runID, "", "", "command.rejected", "user", req.ActorID,
+				map[string]string{"command_id": c.ID, "reason": reason})
+			return nil
+		}); err != nil {
+			return domain.Command{}, err
+		}
+		handled = true
 		if reason == "version_conflict" {
 			return c, fmt.Errorf("%w: %w", domain.ErrVersionConflict, &domain.RejectedError{Reason: reason, Cmd: c})
 		}
@@ -305,6 +314,7 @@ func (s *Store) ApplyCommand(ctx context.Context, tenantID, runID string, req do
 		s.restoreStateLocked(snap)
 		return domain.Command{}, err
 	}
+	handled = true
 	return c, nil
 }
 
@@ -598,21 +608,39 @@ func (s *Store) RunnableRuns() []string {
 func (s *Store) FailRun(ctx context.Context, tenantID, runID, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.runs[runID]
-	if !ok {
-		return domain.ErrNotFound
-	}
-	r.Status = domain.RunFailed
-	r.FailureReason = &reason
-	r.Version++
-	s.saveRun(r)
-	s.appendEvent(r.TenantID, r.ID, "", "", "run.failed", "system", "", map[string]string{"reason": reason})
-	return nil
+	return s.withStateTxLocked(ctx, func() error {
+		r, ok := s.runs[runID]
+		if !ok || r.TenantID != tenantID {
+			return domain.ErrNotFound
+		}
+		r.Status = domain.RunFailed
+		r.FailureReason = &reason
+		r.Version++
+		s.saveRun(r)
+		s.appendEvent(r.TenantID, r.ID, "", "", "run.failed", "system", "", map[string]string{"reason": reason})
+		return nil
+	})
 }
 
 func (s *Store) ExpireApprovals(ctx context.Context, limit int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	var n int
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		n, err = s.expireApprovalsLocked(limit)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) expireApprovalsLocked(limit int) (int, error) {
 	n := 0
 	for id, a := range s.approvals {
 		if a.Request.Status != "PENDING" || a.Request.ExpiresAt.After(now()) {
@@ -640,6 +668,22 @@ func (s *Store) ExpireApprovals(ctx context.Context, limit int) (int, error) {
 func (s *Store) RecoverExpiredLeases(ctx context.Context, limit int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	var n int
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		n, err = s.recoverExpiredLeasesLocked(limit)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) recoverExpiredLeasesLocked(limit int) (int, error) {
 	n := 0
 	for id, r := range s.runs {
 		if r.Status != domain.RunRunning || r.LeaseUntil == nil || r.LeaseUntil.After(now()) {
@@ -677,6 +721,22 @@ func (s *Store) RewakeStaleQueued(ctx context.Context, idle time.Duration, limit
 func (s *Store) ActivateStalledBranches(ctx context.Context, limit int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	var n int
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		n, err = s.activateStalledBranchesLocked(limit)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) activateStalledBranchesLocked(limit int) (int, error) {
 	n := 0
 	for id, br := range s.branches {
 		if br.ActiveTurnID != nil {

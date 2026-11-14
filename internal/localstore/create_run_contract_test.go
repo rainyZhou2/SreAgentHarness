@@ -38,7 +38,7 @@ func eventFiles(t *testing.T, s *Store) map[string]string {
 }
 
 func TestCreateRunRollsBackFailure(t *testing.T) {
-	for _, failure := range []string{"run", "runkey", "step", "cancelled context"} {
+	for _, failure := range []string{"run", "runkey", "step", "event", "cancelled context"} {
 		t.Run(failure, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "h.db")
 			s, err := Open(path)
@@ -84,7 +84,7 @@ func TestCreateRunRollsBackFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(objects, objectRows(t, s)) || len(s.runs) != 0 || len(s.steps) != 0 || len(s.runByKey) != 0 || len(s.events) != 0 {
+			if !reflect.DeepEqual(objects, objectRows(t, s)) || len(s.runs) != 0 || len(s.steps) != 0 || len(s.runByKey) != 0 {
 				t.Error("failed create survived reopen")
 			}
 			if failure != "cancelled context" {

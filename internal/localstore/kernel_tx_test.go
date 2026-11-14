@@ -148,7 +148,7 @@ func TestBufferedCheckpointPreservesEventBoundary(t *testing.T) {
 	if err := s.CommitSuccess(ctx, l, domain.StepSuccess{CheckpointRef: "manifest", Complete: true}); err != nil {
 		t.Fatal(err)
 	}
-	events, err := s.listEventsLocked(r.ID, 0, 100)
+	events, err := s.listEventsLocked(ctx, r.ID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

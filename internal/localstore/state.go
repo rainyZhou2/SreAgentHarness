@@ -117,6 +117,20 @@ func (s *Store) latestCheckpointLocked(tenantID, runID string) (pg.Checkpoint, b
 func (s *Store) ForkRun(ctx context.Context, req pg.ForkRunRequest) (domain.Run, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var run domain.Run
+	var created bool
+	err := s.withStateTxLocked(ctx, func() error {
+		var err error
+		run, created, err = s.forkRunLocked(ctx, req)
+		return err
+	})
+	if err != nil {
+		return domain.Run{}, false, err
+	}
+	return s.runs[run.ID], created, nil
+}
+
+func (s *Store) forkRunLocked(ctx context.Context, req pg.ForkRunRequest) (domain.Run, bool, error) {
 	src, ok := s.runs[req.SourceRunID]
 	if !ok || src.TenantID != req.TenantID {
 		return domain.Run{}, false, domain.ErrNotFound

@@ -109,8 +109,13 @@ func TestListEventsBoundsAndCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 1005; i++ {
-		s.appendEvent("t", run.ID, "", "", "test.event", "system", "", nil)
+	if err := s.withStateTxLocked(ctx, func() error {
+		for i := 0; i < 1005; i++ {
+			s.appendEvent("t", run.ID, "", "", "test.event", "system", "", nil)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	for _, tc := range []struct {
 		limit int

@@ -282,6 +282,7 @@ func (s *Store) RenewLease(ctx context.Context, lease domain.Lease, ttl time.Dur
 	}
 	buf := newStateBuf()
 	buf.puts[objectKey("run", r.ID)] = putOp{kind: "run", id: r.ID, data: data}
+	s.buf = buf
 	if err := s.commitBufferLocked(ctx, buf); err != nil {
 		return "", err
 	}
