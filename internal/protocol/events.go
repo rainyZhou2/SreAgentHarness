@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"go-sre-harness/internal/incident"
 	"go-sre-harness/internal/work"
 )
 
@@ -227,14 +228,15 @@ type View struct {
 	WaitingOn            string    `json:"waiting_on,omitempty"`
 	// Controls say what an operator may do now. Cancelling stops further
 	// scheduling; it never undoes an action that was already dispatched.
-	Controls   []string         `json:"controls"`
-	Stages     []StageView      `json:"stages"`
-	Runs       []work.RunLink   `json:"runs,omitempty"`
-	Actions    []ActionView     `json:"actions,omitempty"`
-	Outcome    *OutcomeView     `json:"last_outcome,omitempty"`
-	Children   []work.GraphNode `json:"children,omitempty"`
-	LastSeq    int64            `json:"last_sequence"`
-	CancelNote string           `json:"cancel_note,omitempty"`
+	Controls   []string             `json:"controls"`
+	Stages     []StageView          `json:"stages"`
+	Runs       []work.RunLink       `json:"runs,omitempty"`
+	Actions    []ActionView         `json:"actions,omitempty"`
+	Outcome    *OutcomeView         `json:"last_outcome,omitempty"`
+	Children   []work.GraphNode     `json:"children,omitempty"`
+	Incident   *incident.Projection `json:"incident,omitempty"`
+	LastSeq    int64                `json:"last_sequence"`
+	CancelNote string               `json:"cancel_note,omitempty"`
 }
 
 // StageView is one template stage and where the Work is relative to it.

@@ -40,7 +40,7 @@ func Transition(from, to Status) error {
 	return nil
 }
 
-// Operator command types (POST /v1/works/{id}/commands).
+// Operator command types (POST /api/works/{id}/commands).
 const (
 	CmdPause   = "pause"   // → SUSPENDED
 	CmdResume  = "resume"  // SUSPENDED → ACTIVE

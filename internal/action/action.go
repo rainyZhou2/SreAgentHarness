@@ -10,7 +10,7 @@
 //
 // Invariants:
 //   - the plan is built by the server; a model or client never submits an
-//     intent, and every approval binds the plan's intent hash (v2), so any
+//     intent, and every approval binds the plan's current intent hash, so any
 //     change of target, target version, args, policy, risk, snapshot or
 //     generation invalidates it;
 //   - the risk class comes from the operator-owned descriptor and the

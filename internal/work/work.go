@@ -281,6 +281,18 @@ type SubjectLink struct {
 	ID   string `json:"id"`
 }
 
+const (
+	SubjectCausedByWork   = "caused_by_work"
+	SubjectCausedByAction = "caused_by_action"
+)
+
+// SecondaryIncident pairs a linked Incident with its causal Action ledger IDs.
+type SecondaryIncident struct {
+	Work             Work
+	ActionID         string
+	MitigationWorkID string
+}
+
 // Event is one committed entry of the Work timeline.
 type Event struct {
 	TenantID    string          `json:"tenant_id"`
@@ -307,6 +319,7 @@ var (
 	ErrNotFound            = errors.New("work not found")                               // 404
 	ErrVersionConflict     = errors.New("work version conflict")                        // 409
 	ErrIdempotencyConflict = errors.New("idempotency key reused with other parameters") // 409
+	ErrCauseConflict       = errors.New("incident cause already linked")                // 409
 	ErrInvalidTransition   = errors.New("invalid work state transition")                // 422
 	ErrOwnerConflict       = errors.New("run already has an owner work")                // 409
 	ErrLeaseLost           = errors.New("work lease lost")

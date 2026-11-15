@@ -249,7 +249,7 @@ func (s *Store) ReleaseByKey(ctx context.Context, tenantID, dedupKey string) err
 	return nil
 }
 
-// Budgets lists a tenant's budgets (GET /v1/quotas).
+// Budgets lists a tenant's budgets (GET /api/quotas).
 func (s *Store) Budgets(ctx context.Context, tenantID string) ([]quota.Budget, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`SELECT queue, resource, capacity, reserved, version FROM admission_budgets
 		WHERE tenant_id=? ORDER BY resource, queue`), tenantID)

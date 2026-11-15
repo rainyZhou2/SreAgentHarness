@@ -3,6 +3,8 @@ package work
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 	"time"
 
 	"go-sre-harness/internal/continuous"
@@ -31,8 +33,45 @@ type NewWork struct {
 	Now            time.Time
 }
 
+// CausalLinks returns the single explicit Incident cause in a stable order.
+func CausalLinks(subjects []SubjectLink) ([]SubjectLink, error) {
+	var out []SubjectLink
+	seen := map[string]int{}
+	for _, link := range subjects {
+		if link.Kind != SubjectCausedByWork && link.Kind != SubjectCausedByAction {
+			continue
+		}
+		if strings.TrimSpace(link.ID) == "" {
+			return nil, invalidf("caused-by link id is required")
+		}
+		out = append(out, link)
+		seen[link.Kind]++
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if len(out) != 2 || seen[SubjectCausedByWork] != 1 || seen[SubjectCausedByAction] != 1 {
+		return nil, invalidf("caused-by work and action links must appear exactly once together")
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind > out[j].Kind })
+	return out, nil
+}
+
 // RequestHash binds an idempotency key to the request content.
 func (n *NewWork) RequestHash() string {
+	causal, _ := CausalLinks(n.Subjects)
+	if len(causal) == 2 {
+		return cpkit.MustHash(struct {
+			Kind     Kind
+			Title    string
+			Goal     GoalSpec
+			Template string
+			Version  int
+			Priority int
+			Queue    Queue
+			Cause    []SubjectLink
+		}{n.Kind, n.Title, n.Goal, n.Template.ID, n.Template.Version, n.Priority, n.Queue, causal})
+	}
 	if n.Queue != "" {
 		return cpkit.MustHash(struct {
 			Kind     Kind
@@ -63,6 +102,13 @@ func (n *NewWork) Prepare() error {
 	}
 	if !ValidKind(n.Kind) {
 		return invalidf("unknown kind %q", n.Kind)
+	}
+	causal, err := CausalLinks(n.Subjects)
+	if err != nil {
+		return err
+	}
+	if len(causal) > 0 && n.Kind != KindIncident {
+		return invalidf("only an Incident can have a caused-by link")
 	}
 	if n.Title == "" {
 		n.Title = n.Goal.Intent
@@ -170,6 +216,13 @@ type Mutation struct {
 func CheckMutation(m *Mutation) error {
 	if m.TenantID == "" || m.WorkID == "" {
 		return invalidf("tenant and work id are required")
+	}
+	causal, err := CausalLinks(m.Subjects)
+	if err != nil {
+		return err
+	}
+	if len(causal) > 0 && m.ExpectedVersion <= 0 {
+		return invalidf("causal links require an expected Work version")
 	}
 	if (len(m.Findings) > 0 || len(m.Hypotheses) > 0) && m.ExpectedVersion <= 0 {
 		return invalidf("a decision batch requires an expected Work version")

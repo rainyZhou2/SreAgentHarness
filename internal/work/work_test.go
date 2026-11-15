@@ -151,3 +151,56 @@ func TestNewWorkRequestHashStable(t *testing.T) {
 		t.Fatal("hash ignores priority")
 	}
 }
+
+func TestCausalMutationRequiresPairAndVersion(t *testing.T) {
+	if !errors.Is(ErrCauseConflict, ErrCauseConflict) {
+		t.Fatal("cause conflict must be comparable")
+	}
+	m := Mutation{TenantID: "t", WorkID: "w", ActorType: "user"}
+	for _, subjects := range [][]SubjectLink{
+		{{Kind: SubjectCausedByWork, ID: "source"}},
+		{{Kind: SubjectCausedByWork, ID: "source"}, {Kind: SubjectCausedByWork, ID: "other"}, {Kind: SubjectCausedByAction, ID: "action"}},
+		{{Kind: SubjectCausedByWork, ID: " "}, {Kind: SubjectCausedByAction, ID: "action"}},
+		{{Kind: SubjectCausedByWork, ID: "source"}, {Kind: SubjectCausedByAction, ID: "action"}},
+	} {
+		m.Subjects = subjects
+		if err := CheckMutation(&m); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid causal mutation accepted: %+v: %v", subjects, err)
+		}
+	}
+	m.ExpectedVersion = 1
+	if err := CheckMutation(&m); err != nil {
+		t.Fatalf("valid causal mutation rejected: %v", err)
+	}
+}
+
+func TestCausalLinksAndCreateHash(t *testing.T) {
+	base := NewWork{Kind: KindIncident, Title: "secondary"}
+	legacy := base.RequestHash()
+	links := []SubjectLink{{Kind: SubjectCausedByAction, ID: "act"}, {Kind: SubjectCausedByWork, ID: "src"}}
+	got, err := CausalLinks(links)
+	if err != nil || len(got) != 2 || got[0].Kind != SubjectCausedByWork {
+		t.Fatalf("causal links=%+v err=%v", got, err)
+	}
+	base.Subjects = links
+	withCause := base.RequestHash()
+	if withCause == legacy {
+		t.Fatal("cause is absent from create hash")
+	}
+	base.Subjects = []SubjectLink{{Kind: SubjectCausedByWork, ID: "other"}, {Kind: SubjectCausedByAction, ID: "act"}}
+	if base.RequestHash() == withCause {
+		t.Fatal("different source reused create hash")
+	}
+	base.Subjects = nil
+	if base.RequestHash() != legacy {
+		t.Fatal("legacy hash changed")
+	}
+	for _, bad := range [][]SubjectLink{
+		{{Kind: SubjectCausedByWork, ID: "src"}},
+		{{Kind: SubjectCausedByWork, ID: "a"}, {Kind: SubjectCausedByWork, ID: "b"}, {Kind: SubjectCausedByAction, ID: "act"}},
+	} {
+		if _, err := CausalLinks(bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid causal links accepted: %+v: %v", bad, err)
+		}
+	}
+}

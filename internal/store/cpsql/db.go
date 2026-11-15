@@ -1,4 +1,4 @@
-// Package cpsql persists the v2 agent control plane (works, event inbox,
+// Package cpsql persists the agent control plane (works, event inbox,
 // watches, world state, actions, outcomes, evidence) on PostgreSQL (team
 // mode) and SQLite (local mode) with one implementation over database/sql.
 //

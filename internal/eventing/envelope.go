@@ -17,8 +17,8 @@ import (
 	"go-sre-harness/internal/cpkit"
 )
 
-// SchemaVersion is the current envelope schema.
-const SchemaVersion = 1
+// StoredSchemaVersion is the normalized Envelope schema persisted by the inbox.
+const StoredSchemaVersion = 1
 
 // Envelope is a normalized event.
 type Envelope struct {
@@ -81,9 +81,9 @@ func (e *Envelope) Normalize(now time.Time) error {
 		return invalid("event_id is required (max %d chars)", MaxIDLen)
 	}
 	if e.SchemaVersion == 0 {
-		e.SchemaVersion = SchemaVersion
+		e.SchemaVersion = StoredSchemaVersion
 	}
-	if e.SchemaVersion != SchemaVersion {
+	if e.SchemaVersion != StoredSchemaVersion {
 		return invalid("unsupported schema_version %d", e.SchemaVersion)
 	}
 	if e.TenantID == "" {

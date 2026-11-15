@@ -353,9 +353,14 @@ func (s *Store) createWorkTx(ctx context.Context, tx *sql.Tx, n work.NewWork) (w
 			return w, err
 		}
 	}
+	payload := map[string]any{"kind": w.Kind, "title": w.Title, "goal_hash": w.GoalHash,
+		"template": fmt.Sprintf("%s@%d", w.Template.ID, w.Template.Version), "subjects": w.Goal.SubjectRefs}
+	causal, _ := work.CausalLinks(n.Subjects)
+	if len(causal) == 2 {
+		payload["caused_by"] = map[string]any{"incident_id": causal[0].ID, "action_id": causal[1].ID}
+	}
 	if err := s.appendEvents(ctx, tx, &w, n.ActorType, n.ActorID, now, []work.NewEvent{{Type: "work.created",
-		CausationID: n.SourceEvent, Payload: map[string]any{"kind": w.Kind, "title": w.Title, "goal_hash": w.GoalHash,
-			"template": fmt.Sprintf("%s@%d", w.Template.ID, w.Template.Version), "subjects": w.Goal.SubjectRefs}}}); err != nil {
+		CausationID: n.SourceEvent, Payload: payload}}); err != nil {
 		return w, err
 	}
 	return w, s.saveWorkCounters(ctx, tx, w)

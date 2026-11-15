@@ -1,4 +1,4 @@
-// Package cpkit holds small primitives shared by the v2 agent control plane
+// Package cpkit holds small primitives shared by the agent control plane
 // (work, eventing, world, continuous, action, outcome, evidence): config
 // durations, canonical hashing, resource references and a clock. It has no
 // dependencies on storage, HTTP or the kernel.

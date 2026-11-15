@@ -206,6 +206,33 @@ func (s *Store) ListWorks(ctx context.Context, f work.Filter) ([]work.Work, erro
 	return out, rows.Err()
 }
 
+// PostmortemsFor returns the Works associated with a source Work, newest first.
+// The extra row lets the projector reject a truncated history.
+func (s *Store) PostmortemsFor(ctx context.Context, tenantID, sourceWorkID string) ([]work.Work, error) {
+	if sourceWorkID == "" {
+		return nil, fmt.Errorf("%w: source Work is required", work.ErrInvalid)
+	}
+	sourceExpr := "json_extract(goal, '$.labels.source_work')"
+	if s.d == Postgres {
+		sourceExpr = "(goal::jsonb->'labels'->>'source_work')"
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+workCols+` FROM agent_works
+		WHERE tenant_id=? AND `+sourceExpr+`=? ORDER BY created_at DESC, id DESC LIMIT 201`), tenantID, sourceWorkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []work.Work
+	for rows.Next() {
+		w, err := scanWork(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // ApplyWork applies one mutation atomically (see work.Mutation).
 func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, error) {
 	if err := work.CheckMutation(&m); err != nil {

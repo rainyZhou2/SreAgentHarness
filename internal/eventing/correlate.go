@@ -26,6 +26,7 @@ const (
 	KeyCorrelationID = "correlation_id"
 	KeyDedupKey      = "dedup_key"
 	KeySubject       = "subject"
+	KeySymptom       = "symptom"
 	// KeyLabelPrefix + name groups by a label value ("label:service").
 	KeyLabelPrefix = "label:"
 )
@@ -91,7 +92,7 @@ func (r *Rule) Normalize() error {
 	switch {
 	case r.Key == "":
 		r.Key = KeyDedupKey
-	case r.Key == KeyCorrelationID || r.Key == KeyDedupKey || r.Key == KeySubject:
+	case r.Key == KeyCorrelationID || r.Key == KeyDedupKey || r.Key == KeySubject || r.Key == KeySymptom:
 	case strings.HasPrefix(r.Key, KeyLabelPrefix) && labelRe.MatchString(strings.TrimPrefix(r.Key, KeyLabelPrefix)):
 	default:
 		return fmt.Errorf("%w: %s: unknown key %q", ErrRule, r.Name, r.Key)
