@@ -85,6 +85,7 @@ func (a *App) ConnectLocal() (map[string]any, error) {
 	}
 	a.mu.Lock()
 	a.client = c
+	a.locked = false
 	a.settings.Mode = "local"
 	a.settings.ServerURL = ep.URL
 	a.settings.Creds = harness.Credentials{Mode: "bearer", Tenant: "local", Actor: "desktop",

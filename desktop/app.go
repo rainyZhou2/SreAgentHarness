@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"go-sre-harness/desktop/harness"
 	"go-sre-harness/desktop/localruntime"
+	oidcflow "go-sre-harness/desktop/oidc"
 	"go-sre-harness/pkg/eventcursor"
 )
 
@@ -37,7 +39,9 @@ type Settings struct {
 	Language string `json:"language,omitempty"`
 	Preferences
 	// SignedOut keeps a dev-mode connection from reconnecting at startup.
-	SignedOut bool `json:"signed_out,omitempty"`
+	SignedOut bool            `json:"signed_out,omitempty"`
+	OIDC      *OIDCSettings   `json:"oidc,omitempty"`
+	Network   NetworkSettings `json:"network,omitempty"`
 }
 
 // Preferences are the app's own settings (Settings → Appearance and
@@ -71,6 +75,13 @@ type App struct {
 	// local supervises the bundled harness core in local mode.
 	local   LocalRuntime
 	secrets localruntime.SecretStore
+	// oidcClient/oidcRefresh are in-memory; refresh tokens live in the OS keychain.
+	oidcClient  *oidcflow.Client
+	oidcRefresh string
+	oidcAccess  string
+	oidcExpiry  time.Time
+	oidcLoop    bool
+	locked      bool
 }
 
 func NewApp() *App {
@@ -97,6 +108,9 @@ func (a *App) startup(ctx context.Context) {
 	a.settings.Creds.Token = ""
 	if a.settings.Mode != "local" && a.settings.Creds.Mode == "dev" && !a.settings.SignedOut {
 		a.client, _ = harness.New(a.settings.ServerURL, a.settings.Creds)
+	}
+	if a.settings.Mode == "remote" && a.settings.OIDC != nil && !a.settings.SignedOut {
+		a.restoreOIDC()
 	}
 	go a.watchApprovals()
 }
@@ -155,9 +169,22 @@ func (a *App) Connect(s Settings) (map[string]any, error) {
 	if s.ModelProvider == "" {
 		s.ModelProvider, s.ModelBaseURL, s.ModelName = a.settings.ModelProvider, a.settings.ModelBaseURL, a.settings.ModelName
 	}
+	if s.Network == (NetworkSettings{}) {
+		s.Network = a.settings.Network
+	}
+	if err := a.applyNetwork(c, s.Network); err != nil {
+		return nil, err
+	}
+	if old := a.settings.OIDC; old != nil {
+		_ = a.secrets.Delete(oidcKeyService, oidcSecretUser(old.Issuer, old.Subject))
+	}
 	s.Mode = "remote"
+	s.OIDC = nil
 	s.Preferences, s.SignedOut = a.settings.Preferences, false
 	a.client, a.settings = c, s
+	a.locked = false
+	a.oidcClient, a.oidcRefresh = nil, ""
+	a.oidcAccess, a.oidcExpiry = "", time.Time{}
 	a.mu.Unlock()
 	a.saveSettings()
 	a.logEvent("info", "signed in to %s as %v (%s)", s.ServerURL, who["subject"], s.Creds.Mode)

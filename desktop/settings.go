@@ -46,10 +46,18 @@ func (a *App) Disconnect() error {
 	a.UnwatchRun()
 	a.stopLocal()
 	a.mu.Lock()
+	old := a.settings.OIDC
 	a.client = nil
+	a.locked = false
 	a.settings.Creds.Token = ""
 	a.settings.SignedOut = true
+	a.settings.OIDC = nil
+	a.oidcClient, a.oidcRefresh = nil, ""
+	a.oidcAccess, a.oidcExpiry = "", time.Time{}
 	a.mu.Unlock()
+	if old != nil {
+		_ = a.secrets.Delete(oidcKeyService, oidcSecretUser(old.Issuer, old.Subject))
+	}
 	a.logEvent("info", "signed out")
 	a.emit("approvals:update", []any{})
 	return a.saveSettings()

@@ -37,6 +37,10 @@ type Client struct {
 	Creds   Credentials
 	HTTP    *http.Client // request/response calls (with timeout)
 	Stream  *http.Client // SSE (no timeout)
+	// TokenSource, when set, supplies the current bearer token. It lets a
+	// long-lived client follow a refreshed OIDC access token without
+	// rewriting Creds from another goroutine.
+	TokenSource func() string
 }
 
 // New returns a client for baseURL (e.g. http://127.0.0.1:8080).
@@ -93,7 +97,13 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	}
 	req.Header.Set("User-Agent", "sre-harness-desktop")
 	if c.Creds.Mode == "bearer" {
-		req.Header.Set("Authorization", "Bearer "+c.Creds.Token)
+		token := c.Creds.Token
+		if c.TokenSource != nil {
+			if current := c.TokenSource(); current != "" {
+				token = current
+			}
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 	} else {
 		req.Header.Set("X-Tenant-ID", c.Creds.Tenant)
 		req.Header.Set("X-Actor-ID", c.Creds.Actor)

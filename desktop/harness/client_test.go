@@ -38,3 +38,24 @@ func TestDoWithHeaders(t *testing.T) {
 		t.Fatalf("override: %v %v", got, out)
 	}
 }
+
+func TestTokenSourceOverridesCredentialToken(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, Credentials{Mode: "bearer", Token: "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.TokenSource = func() string { return "fresh" }
+	if err := c.Do(context.Background(), http.MethodGet, "/x", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("Authorization") != "Bearer fresh" {
+		t.Fatalf("authorization = %q", got.Get("Authorization"))
+	}
+}
