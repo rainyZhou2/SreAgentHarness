@@ -1,8 +1,6 @@
 module go-sre-harness
 
-go 1.26.2
-
-toolchain go1.26.11
+go 1.26.11
 
 require (
 	github.com/anthropics/anthropic-sdk-go/v2 v2.5.0

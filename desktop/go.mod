@@ -1,6 +1,6 @@
 module go-sre-harness/desktop
 
-go 1.26.2
+go 1.26.11
 
 require (
 	github.com/wailsapp/wails/v2 v2.17.1
