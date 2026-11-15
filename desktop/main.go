@@ -3,7 +3,7 @@
 package main
 
 import (
-	"embed"
+	_ "embed"
 	"log"
 	"os"
 
@@ -13,9 +13,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
-
-//go:embed all:frontend/dist
-var assets embed.FS
 
 // appIcon is the application icon (About panel, Linux window). The macOS
 // bundle icon is built from the same file by build.sh.
@@ -34,7 +31,7 @@ func main() {
 		Height:      860,
 		MinWidth:    960,
 		MinHeight:   600,
-		AssetServer: &assetserver.Options{Assets: assets},
+		AssetServer: &assetserver.Options{Assets: frontendAssets},
 		// Transparent so the macOS vibrancy behind the glass sidebar shows through.
 		BackgroundColour: &options.RGBA{R: 250, G: 250, B: 250, A: 0},
 		OnStartup:        app.startup,

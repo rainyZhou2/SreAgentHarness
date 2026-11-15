@@ -55,7 +55,7 @@ func servePreview(addr string, app *App) error {
 	}
 	app.startup(context.Background())
 
-	dist, _ := fs.Sub(assets, "frontend/dist")
+	dist, _ := fs.Sub(frontendAssets, frontendRoot)
 	files := http.FileServer(http.FS(dist))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +64,7 @@ func servePreview(addr string, app *App) error {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		html := strings.Replace(string(b), `<script src="app.js">`, `<script src="/__preview.js"></script><script src="app.js">`, 1)
+		html := strings.Replace(string(b), "</head>", `<script src="/__preview.js"></script></head>`, 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(html))
 	})

@@ -44,6 +44,7 @@ func (a *App) WorkView(id string) (map[string]any, error) {
 	out := map[string]any{"work": w}
 	errs := map[string]string{}
 	for key, path := range map[string]string{
+		"view":       base + "/view",
 		"events":     base + "/events?limit=500",
 		"actions":    base + "/actions",
 		"outcomes":   base + "/outcomes",
@@ -56,6 +57,10 @@ func (a *App) WorkView(id string) (map[string]any, error) {
 		v, err := a.get(path)
 		if err != nil {
 			errs[key] = err.Error()
+			continue
+		}
+		if key == "view" {
+			out[key] = v
 			continue
 		}
 		out[key] = v["items"]

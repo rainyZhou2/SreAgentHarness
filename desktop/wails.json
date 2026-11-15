@@ -1,0 +1,10 @@
+{
+  "name": "sre-harness-desktop",
+  "frontend:install": "npm --prefix frontend ci --no-audit --no-fund",
+  "frontend:build": "npm --prefix frontend run build",
+  "frontend:dev:watcher": "npm --prefix frontend run dev",
+  "frontend:dev:serverUrl": "http://localhost:5173",
+  "author": {
+    "name": "SRE Harness"
+  }
+}
