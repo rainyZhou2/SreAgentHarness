@@ -32,12 +32,14 @@ var routeRoles = map[string]auth.Role{
 	"POST /api/admin/role-bindings":            auth.Admin,
 	"DELETE /api/admin/role-bindings":          auth.Admin,
 	"GET /api/admin/audit":                     auth.Admin,
+	"GET /api/admin/role-bindings":             auth.Admin,
+	"GET /api/admin/security/revocations":      auth.Admin,
 	"GET /api/admin/plugins":                   auth.Admin,
 	"POST /api/graph/relations":                auth.Admin,
 	"DELETE /api/graph/relations":              auth.Admin,
 }
 
-var publicRoutes = map[string]bool{"GET /healthz": true, "GET /metrics": true}
+var publicRoutes = map[string]bool{"GET /healthz": true, "GET /metrics": true, "GET /api/auth/config": true}
 
 // RequiredRole returns the role a core route needs ("" = public).
 func RequiredRole(pattern string) (auth.Role, bool) { return (&Server{}).requiredRole(pattern) }

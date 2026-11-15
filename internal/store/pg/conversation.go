@@ -589,6 +589,7 @@ type SessionSummary struct {
 	LastActivityAt time.Time `json:"last_activity_at"`
 	Turns          int64     `json:"turns"`
 	ActiveTurns    int64     `json:"active_turns"`
+	LatestRunID    string    `json:"latest_run_id,omitempty"`
 }
 
 // SessionFilter selects sessions for ListSessions.
@@ -612,10 +613,12 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, f SessionFilt
 	like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.Query) + "%"
 	rows, err := s.pool.Query(ctx, `SELECT s.id, s.tenant_id, s.created_by, s.title, s.profile_id, s.profile_version, s.status,
 			COALESCE(s.default_branch_id::text, ''), s.incident_id::text, s.created_at,
-			COALESCE(t.last_at, s.created_at), COALESCE(t.n, 0), COALESCE(t.active, 0)
+			COALESCE(t.last_at, s.created_at), COALESCE(t.n, 0), COALESCE(t.active, 0), COALESCE(t.run_id::text, '')
 		FROM conversation_sessions s
 		LEFT JOIN LATERAL (SELECT max(created_at) AS last_at, count(*) AS n,
-				count(*) FILTER (WHERE status IN ('ACCEPTED','QUEUED','RUNNING')) AS active
+				count(*) FILTER (WHERE status IN ('ACCEPTED','QUEUED','RUNNING')) AS active,
+				(SELECT run_id FROM conversation_turns WHERE tenant_id=s.tenant_id AND session_id=s.id
+					AND run_id IS NOT NULL ORDER BY seq DESC LIMIT 1) AS run_id
 			FROM conversation_turns WHERE tenant_id=s.tenant_id AND session_id=s.id) t ON true
 		WHERE s.tenant_id=$1 AND s.status=$3 AND ($4 = '%%' OR COALESCE(s.title, '') ILIKE $4)
 		  AND ($5 = '' OR s.created_by = $5)
@@ -628,7 +631,7 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, f SessionFilt
 	for rows.Next() {
 		var x SessionSummary
 		if err := rows.Scan(&x.ID, &x.TenantID, &x.CreatedBy, &x.Title, &x.ProfileID, &x.ProfileVersion, &x.Status, &x.DefaultBranchID,
-			&x.IncidentID, &x.CreatedAt, &x.LastActivityAt, &x.Turns, &x.ActiveTurns); err != nil {
+			&x.IncidentID, &x.CreatedAt, &x.LastActivityAt, &x.Turns, &x.ActiveTurns, &x.LatestRunID); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

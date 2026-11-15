@@ -117,6 +117,8 @@ type Server struct {
 	Metrics *obs.Metrics
 	// Admin enables /api/admin routes (role bindings, audit log).
 	Admin AdminStore
+	// AuthConfig is public login metadata (issuer/client id); nil means token auth.
+	AuthConfig *AuthConfig
 
 	// Plugins, when set, backs GET /api/admin/plugins.
 	Plugins func() any
@@ -139,6 +141,8 @@ type AdminStore interface {
 	BindRole(ctx context.Context, tenantID, principalID string, role auth.Role, actor string) error
 	UnbindRole(ctx context.Context, tenantID, principalID string, role auth.Role) error
 	ListAudit(ctx context.Context, tenantID string, limit int) ([]pg.AuditEntry, error)
+	ListRoleBindings(ctx context.Context, tenantID string) ([]pg.RoleBinding, error)
+	ListRevocations(ctx context.Context, tenantID string, limit int) ([]pg.RevocationEvent, error)
 }
 
 // Extend adds an API extension (memory, evaluation, plugins, ...).
@@ -157,10 +161,12 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /api/service", s.service)
+	mux.HandleFunc("GET /api/auth/config", s.authConfig)
 	mux.HandleFunc("POST /api/runs", s.createRun)
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{run_id}", s.getRun)
 	mux.HandleFunc("GET /api/runs/{run_id}/steps", s.listSteps)
+	mux.HandleFunc("GET /api/runs/{run_id}/projection", s.getRunProjection)
 	mux.HandleFunc("GET /api/runs/{run_id}/flow", s.getFlow)
 	mux.HandleFunc("GET /api/runs/{run_id}/attachments/{index}", s.getAttachment)
 	mux.HandleFunc("GET /api/profiles", s.listProfiles)
@@ -198,6 +204,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/admin/role-bindings", s.bindRole)
 		mux.HandleFunc("DELETE /api/admin/role-bindings", s.unbindRole)
 		mux.HandleFunc("GET /api/admin/audit", s.listAudit)
+		mux.HandleFunc("GET /api/admin/role-bindings", s.listRoleBindings)
+		mux.HandleFunc("GET /api/admin/security/revocations", s.listRevocations)
 	}
 	mux.HandleFunc("GET /api/whoami", s.whoami)
 	if s.Plugins != nil {

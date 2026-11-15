@@ -206,10 +206,11 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type submitTurnBody struct {
-	Text            string `json:"text"`
-	ClientRequestID string `json:"client_request_id"`
-	BranchID        string `json:"branch_id"`
-	ExpectedVersion *int64 `json:"expected_branch_version"`
+	Text            string          `json:"text"`
+	ClientRequestID string          `json:"client_request_id"`
+	BranchID        string          `json:"branch_id"`
+	ExpectedVersion *int64          `json:"expected_branch_version"`
+	Context         *runContextBody `json:"context,omitempty"`
 }
 
 func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
@@ -230,8 +231,14 @@ func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("session_id")
+	goalContext, contextErr := body.Context.goalContext("session")
+	if contextErr != "" {
+		writeErr(w, http.StatusBadRequest, "invalid_context", contextErr)
+		return
+	}
 	// The turn input pins the time the turn arrived: prompts use it as "now".
-	data, _ := json.Marshal(goalDoc{Goal: body.Text, Context: &domain.GoalContext{ReceivedAt: time.Now().UTC(), Source: "session"}})
+	goalContext.ReceivedAt = time.Now().UTC()
+	data, _ := json.Marshal(goalDoc{Goal: body.Text, Context: &goalContext})
 	ref, hash, err := s.Artifacts.Put(r.Context(), id.tenant, "turn-input", data)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "artifact_store_unavailable", "retry later")

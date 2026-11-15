@@ -122,3 +122,63 @@ func ConfigureRLS(cfg *pgxpool.Config) {
 		return err == nil
 	}
 }
+
+// RoleBinding is one principal-role grant.
+type RoleBinding struct {
+	PrincipalID string    `json:"principal_id"`
+	Role        auth.Role `json:"role"`
+	CreatedBy   string    `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ListRoleBindings returns the tenant's grants, stable by principal and role.
+func (s *Store) ListRoleBindings(ctx context.Context, tenantID string) ([]RoleBinding, error) {
+	rows, err := s.pool.Query(ctx, `SELECT principal_id, role, created_by, created_at
+		FROM role_bindings WHERE tenant_id=$1 ORDER BY principal_id, role`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RoleBinding
+	for rows.Next() {
+		var b RoleBinding
+		if err := rows.Scan(&b.PrincipalID, &b.Role, &b.CreatedBy, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// RevocationEvent is one append-only revocation record.
+type RevocationEvent struct {
+	ID        string    `json:"id"`
+	Scope     string    `json:"scope"`
+	ScopeID   string    `json:"scope_id"`
+	Version   int64     `json:"version"`
+	ActorID   string    `json:"actor_id"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListRevocations returns the newest revocation events for a tenant.
+func (s *Store) ListRevocations(ctx context.Context, tenantID string, limit int) ([]RevocationEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text, scope_type, scope_id, scope_version, actor_id, reason, created_at
+		FROM security_revocation_event WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RevocationEvent
+	for rows.Next() {
+		var e RevocationEvent
+		if err := rows.Scan(&e.ID, &e.Scope, &e.ScopeID, &e.Version, &e.ActorID, &e.Reason, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

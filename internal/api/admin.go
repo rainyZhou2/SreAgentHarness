@@ -72,3 +72,36 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": es})
 }
+
+func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	bindings, err := s.Admin.ListRoleBindings(r.Context(), id.tenant)
+	if err != nil {
+		s.storeErr(w, err)
+		return
+	}
+	if bindings == nil {
+		bindings = []pg.RoleBinding{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
+}
+
+func (s *Server) listRevocations(w http.ResponseWriter, r *http.Request) {
+	id, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	events, err := s.Admin.ListRevocations(r.Context(), id.tenant, limit)
+	if err != nil {
+		s.storeErr(w, err)
+		return
+	}
+	if events == nil {
+		events = []pg.RevocationEvent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revocations": events})
+}

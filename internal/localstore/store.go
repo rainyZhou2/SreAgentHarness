@@ -824,6 +824,8 @@ func (s *Store) sortedProfiles(tenant string) []profileRec {
 func (s *Store) sessionSummary(sess domain.Session) pg.SessionSummary {
 	var last = sess.CreatedAt
 	var turns, active int64
+	var latestRun string
+	var latestSeq int64 = -1
 	for _, t := range s.turns {
 		if t.SessionID == sess.ID {
 			turns++
@@ -833,9 +835,13 @@ func (s *Store) sessionSummary(sess domain.Session) pg.SessionSummary {
 			if t.Status == domain.TurnQueued || t.Status == domain.TurnRunning {
 				active++
 			}
+			if t.RunID != nil && t.Seq > latestSeq {
+				latestSeq = t.Seq
+				latestRun = *t.RunID
+			}
 		}
 	}
-	return pg.SessionSummary{Session: sess, LastActivityAt: last, Turns: turns, ActiveTurns: active}
+	return pg.SessionSummary{Session: sess, LastActivityAt: last, Turns: turns, ActiveTurns: active, LatestRunID: latestRun}
 }
 
 func (s *Store) commandKey(tenant, runID, key string) string {

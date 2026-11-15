@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -718,7 +719,8 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			Events: h.Events, StreamMode: streamMode, StreamTick: e.dur("HARNESS_SSE_TICK", 30*time.Second),
 			PollInterval:   e.dur("HARNESS_SSE_POLL", 500*time.Millisecond),
 			ResolveProfile: h.Eval.ResolveProfile, Rules: rules.Rules, Auth: &auth.Chain{Authenticators: authns, Roles: store},
-			Audit: store, Admin: store, Metrics: metrics, Plugins: func() any { return a.PluginReport() }}
+			AuthConfig: authConfigFor(e),
+			Audit:      store, Admin: store, Metrics: metrics, Plugins: func() any { return a.PluginReport() }}
 		h.Server = srv
 		exts, err := plugin.BuildAll(ctx, plugin.API, h, specs["api"])
 		if err != nil {
@@ -937,6 +939,29 @@ func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server
 }
 
 // buildRevision is the VCS revision and Go version embedded by the toolchain.
+func authConfigFor(e Env) *api.AuthConfig {
+	mode := "token"
+	for _, item := range strings.Split(e.str("HARNESS_AUTH_MODE", "dev"), ",") {
+		if strings.TrimSpace(item) == "oidc" {
+			mode = "oidc"
+		}
+	}
+	if mode != "oidc" {
+		return &api.AuthConfig{Mode: mode}
+	}
+	scopes := []string{"openid", "profile", "email", "offline_access"}
+	if raw := e.str("HARNESS_OIDC_SCOPES", ""); raw != "" {
+		scopes = strings.Fields(strings.ReplaceAll(raw, ",", " "))
+	}
+	return &api.AuthConfig{
+		Mode:     "oidc",
+		Issuer:   e.str("HARNESS_OIDC_ISSUER", ""),
+		ClientID: e.str("HARNESS_OIDC_CLIENT_ID", ""),
+		Audience: e.str("HARNESS_OIDC_AUDIENCE", ""),
+		Scopes:   scopes,
+	}
+}
+
 func buildRevision() string {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
