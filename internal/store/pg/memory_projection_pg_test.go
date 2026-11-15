@@ -13,12 +13,13 @@ func TestPinnedMemoryGovernancePostgres(t *testing.T) {
 	s, _, _ := pgTestStores(t)
 	ctx := context.Background()
 	tenant := "projection-" + uuid.NewString()
+	environment := "production"
 	tctx := memory.WithAccessContext(ctx, memory.AccessContext{TenantID: tenant, Subjects: []string{"role:admin"}})
+	tctx = memory.WithEnv(tctx, memory.Env{Environment: environment, Services: []string{"checkout"}})
 	runID, stepID := seedRun(t, s, tenant)
 	if _, err := s.pool.Exec(ctx, `UPDATE agent_steps SET kind='retrieve_memory' WHERE id=$1`, stepID); err != nil {
 		t.Fatal(err)
 	}
-	environment := "production"
 	descriptor := memory.EmbeddingDescriptor{Model: "text-embedding", Version: "v3", Dimensions: 2}
 	m, _, err := s.CreateMemory(ctx, memory.NewMemory{TenantID: tenant, Scope: "organization", Type: "semantic",
 		Status: memory.Verified, Subject: "projection", Title: "governed", Content: "content", ContentHash: uuid.NewString(),

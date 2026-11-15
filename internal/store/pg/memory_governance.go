@@ -31,8 +31,8 @@ func insertMemoryACL(ctx context.Context, tx pgx.Tx, m memory.NewMemory, id stri
 		if !ok || value == "" {
 			return nil
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, created_by)
-			VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, m.TenantID, id, kind, value, m.CreatedBy)
+		_, err := tx.Exec(ctx, `INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, permission, created_by)
+			VALUES ($1,$2,$3,$4,'read',$5) ON CONFLICT DO NOTHING`, m.TenantID, id, kind, value, m.CreatedBy)
 		return err
 	}
 	if m.Scope == "user" {

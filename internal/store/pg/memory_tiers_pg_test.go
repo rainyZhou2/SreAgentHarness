@@ -72,7 +72,7 @@ func TestMemoryTiersPG(t *testing.T) {
 	if err != nil || !ok || cur.ID != a.ID {
 		t.Fatalf("by subject: %v %v", ok, err)
 	}
-	p, _ := w.PrepareRevision(ctx, cur, "", "Pool exhaustion; raise max_open_conns to 50.", nil, "user:ops")
+	p, _ := w.PrepareRevision(ctx, cur, "", "Pool exhaustion; raise max_open_conns to 50.", []string{"evidence:revision"}, "user:ops")
 	up, err := admin.UpdateMemory(ctx, memory.Revision{TenantID: tenant, ID: a.ID, ExpectedVersion: 1, Prepared: p, Actor: "ops"})
 	if err != nil || up.Version != 2 || up.Content != "Pool exhaustion; raise max_open_conns to 50." {
 		t.Fatalf("update: %v %+v", err, up)
@@ -86,10 +86,20 @@ func TestMemoryTiersPG(t *testing.T) {
 	if versions != 2 || embs != 1 {
 		t.Fatalf("versions=%d embeddings(v2)=%d", versions, embs)
 	}
-	got, _ := admin.MemoryCandidates(ctx, memory.CandidateQuery{TenantID: tenant, Services: []string{"api"}, Text: "max_open_conns",
-		EmbeddingDescriptor: (memory.HashingEmbedder{Dims: 256}).Descriptor(), MaxSensitivity: "internal"})
-	if len(got) != 1 || got[0].FTSRank <= 0 || len(got[0].Embedding) != 256 || got[0].Reinforcements != 1 {
-		t.Fatalf("search sees the new version: %+v", got)
+	query := memory.CandidateQuery{TenantID: tenant, Services: []string{"api"}, Text: "max_open_conns",
+		EmbeddingDescriptor: (memory.HashingEmbedder{Dims: 256}).Descriptor(), MaxSensitivity: "internal"}
+	got, err := admin.MemoryCandidates(ctx, query)
+	if err != nil || len(got) != 0 || up.Status != memory.StatusCandidate {
+		t.Fatalf("unverified revision was recalled: %+v %v", got, err)
+	}
+	verification := memory.VerificationInputFor(up, "decision:revision", "outcome:revision")
+	_, up, err = admin.VerifyMemory(ctx, verification, "service:verifier", uuid.NewString())
+	if err != nil || up.Status != memory.Verified {
+		t.Fatalf("verify revision: %+v %v", up, err)
+	}
+	got, err = admin.MemoryCandidates(ctx, query)
+	if err != nil || len(got) != 1 || got[0].FTSRank <= 0 || len(got[0].Embedding) != 256 || got[0].Reinforcements != 1 {
+		t.Fatalf("search sees the verified revision: %+v %v", got, err)
 	}
 	runID, _ := seedRun(t, admin, tenant)
 	if u, err := admin.RunInitiator(ctx, tenant, runID); err != nil || u != "" {

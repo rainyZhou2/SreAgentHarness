@@ -28,18 +28,19 @@ CREATE TABLE agent_memory_acl (
   PRIMARY KEY (tenant_id, memory_id, subject_type, subject_id, permission),
   FOREIGN KEY (tenant_id, memory_id) REFERENCES agent_memories(tenant_id, id) ON DELETE CASCADE
 );
-INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, created_by)
+INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, permission, created_by)
 SELECT tenant_id, id,
   CASE WHEN scope = 'user' THEN 'user' ELSE 'role' END,
   CASE WHEN scope = 'user' THEN scope_id ELSE 'viewer' END,
+  'read',
   'migration_0037'
 FROM agent_memories
 ON CONFLICT DO NOTHING;
-INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, created_by)
-SELECT tenant_id, id, 'role', 'service', 'migration_0037' FROM agent_memories
+INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, permission, created_by)
+SELECT tenant_id, id, 'role', 'service', 'read', 'migration_0037' FROM agent_memories
 WHERE scope <> 'user' ON CONFLICT DO NOTHING;
-INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, created_by)
-SELECT tenant_id, id, 'user', created_by, 'migration_0037' FROM agent_memories
+INSERT INTO agent_memory_acl (tenant_id, memory_id, subject_type, subject_id, permission, created_by)
+SELECT tenant_id, id, 'user', created_by, 'read', 'migration_0037' FROM agent_memories
 WHERE created_by <> '' ON CONFLICT DO NOTHING;
 CREATE INDEX idx_memory_acl_subject ON agent_memory_acl (tenant_id, subject_type, subject_id, memory_id);
 ALTER TABLE agent_memory_acl ENABLE ROW LEVEL SECURITY;
@@ -96,7 +97,7 @@ UPDATE memory_embeddings SET embedding_version = CASE
 ALTER TABLE memory_embeddings ALTER COLUMN embedding_version SET NOT NULL;
 ALTER TABLE memory_embeddings DROP CONSTRAINT IF EXISTS memory_embeddings_pkey;
 ALTER TABLE memory_embeddings ADD PRIMARY KEY
-  (tenant_id,memory_id,memory_version,embedding_model,embedding_version);
+  (tenant_id,memory_id,memory_version,embedding_model,embedding_version,dims);
 ALTER TABLE agent_memories ADD CONSTRAINT agent_memories_supersedes_tenant_fk
   FOREIGN KEY (tenant_id, superseded_by) REFERENCES agent_memories(tenant_id, id);
 DROP INDEX IF EXISTS uq_memory_content;
@@ -195,15 +196,16 @@ BEGIN
   IF EXISTS (SELECT 1 FROM memory_embeddings WHERE embedding_version IS NULL OR embedding_version='') THEN
     RAISE EXCEPTION 'unversioned embedding';
   END IF;
-  WITH RECURSIVE walk AS (
-    SELECT tenant_id,id,superseded_by,ARRAY[id] AS path,false AS cycle FROM agent_memories
-    UNION ALL
-    SELECT w.tenant_id,w.id,m.superseded_by,w.path||m.id,m.id=ANY(w.path)
-    FROM walk w JOIN agent_memories m ON m.tenant_id=w.tenant_id AND m.id=w.superseded_by
-    WHERE NOT w.cycle
-  )
-  SELECT 1 FROM walk WHERE cycle LIMIT 1;
-  IF FOUND THEN
+  IF EXISTS (
+    WITH RECURSIVE walk AS (
+      SELECT tenant_id,id,superseded_by,ARRAY[id] AS path,false AS cycle FROM agent_memories
+      UNION ALL
+      SELECT w.tenant_id,w.id,m.superseded_by,w.path||m.id,m.id=ANY(w.path)
+      FROM walk w JOIN agent_memories m ON m.tenant_id=w.tenant_id AND m.id=w.superseded_by
+      WHERE NOT w.cycle
+    )
+    SELECT 1 FROM walk WHERE cycle
+  ) THEN
     RAISE EXCEPTION 'supersedes cycle after migration';
   END IF;
   IF EXISTS (SELECT 1 FROM artifact_references r WHERE NOT EXISTS

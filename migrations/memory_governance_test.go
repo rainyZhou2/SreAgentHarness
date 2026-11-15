@@ -91,7 +91,7 @@ func TestMemoryGovernanceMigration(t *testing.T) {
 		AND contype='p'`).Scan(&primaryKey); err != nil {
 		t.Fatal(err)
 	}
-	for _, column := range []string{"tenant_id", "memory_id", "memory_version", "embedding_model", "embedding_version"} {
+	for _, column := range []string{"tenant_id", "memory_id", "memory_version", "embedding_model", "embedding_version", "dims"} {
 		if !contains(primaryKey, column) {
 			t.Fatalf("embedding primary key %q misses %s", primaryKey, column)
 		}
