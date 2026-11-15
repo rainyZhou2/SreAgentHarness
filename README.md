@@ -38,7 +38,7 @@ A cognitive agent runtime for SRE: every reasoning step and tool call runs as a 
 
 ## Desktop client
 
-[`desktop/`](desktop/README.md) is a native Wails client. It starts in **Local runtime** mode: the app launches a bundled SQLite-backed harness core, commits execution events and runtime state together in SQLite. No Docker, PostgreSQL, NATS or terminal is needed. Switch to **Team server** to use a shared harness. Sessions, streamed reasoning, tool-call cards, inline approvals, an approval inbox, a Works view for continuous v2 Works, and model / MCP / HTTP tool / skill management are the same in both modes; local mode implements the same `/v1/extensions`, command, checkpoint/fork, memory, graph and evaluation APIs. Commands are version-guarded and idempotent across restarts, cancelling a flow cascades to child runs, and compaction summaries, memory hits, checkpoints and step output revisions are persisted in the local store.
+[`desktop/`](desktop/README.md) is a native Wails client. It starts in **Local runtime** mode: the app launches a bundled SQLite-backed harness core, commits execution events and runtime state together in SQLite. No Docker, PostgreSQL, NATS or terminal is needed. Switch to **Team server** to use a shared harness. Sessions, streamed reasoning, tool-call cards, inline approvals, an approval inbox, a Works view for continuous Works, and model / MCP / HTTP tool / skill management are the same in both modes; local mode implements the same `/api/extensions`, command, checkpoint/fork, memory, graph and evaluation APIs. Commands are version-guarded and idempotent across restarts, cancelling a flow cascades to child runs, and compaction summaries, memory hits, checkpoints and step output revisions are persisted in the local store.
 
 ```bash
 desktop/build.sh run
@@ -66,7 +66,7 @@ The final answer is shown as a card, not plain text, in both modes:
 - **Markdown**: headings, lists, code blocks, GFM tables, math (KaTeX) and mermaid diagrams. Raw HTML is never rendered (it shows as text). Links open in the system browser through `OpenURL`, which accepts only `http`, `https` and `mailto`. `javascript:`, `file:` and other schemes are not linked or opened, and links to files (`.pdf`, `.csv`, `.json`, …) get a type badge.
 - **Structured attachments**: `submit_conclusion` takes an optional `attachments` list of `{type: table|image|link|file, title, caption, url | ref, mime_type, columns, rows}`. The kernel validates the list before it reaches the run result (`result.attachments`). URLs must be absolute `http(s)` with no credentials. A `ref` must name an offloaded tool output of the same tenant (`obs:step<N>` resolves to its handle). Text and tables are capped (12 attachments, 20 columns × 200 rows), and anything else is dropped. Conclusions without attachments are unchanged.
 - **Client rendering**: a table becomes a scrollable card with *Copy CSV*. An image from a URL loads lazily with no referrer, and a stored image (PNG, JPEG, GIF or WebP only, never SVG) is fetched by the Go side and shown inline. A link becomes a tile with its host, and a file becomes a tile with name, type and size plus *Open* (URL) or *Download* (stored output, saved through a save dialog). The WebView never holds the API token. Exported chats include the attachments.
-- **API consumers**: attachments arrive in `GET /v1/runs/{id}` (`result.attachments`) and in session messages (the assistant message's content is the result artifact). `GET /v1/runs/{id}/attachments/{index}` (viewer) serves a stored attachment of that run's result. It serves only refs the kernel accepted, at most 32 MiB, with `nosniff` and a sandbox CSP, and always as a download except for an inline raster image.
+- **API consumers**: attachments arrive in `GET /api/runs/{id}` (`result.attachments`) and in session messages (the assistant message's content is the result artifact). `GET /api/runs/{id}/attachments/{index}` (viewer) serves a stored attachment of that run's result. It serves only refs the kernel accepted, at most 32 MiB, with `nosniff` and a sandbox CSP, and always as a download except for an inline raster image.
 
 ## Quick start
 
@@ -144,7 +144,7 @@ The Work control plane owns long-lived goals; the same kernel owns their Runs, S
 
 Templates may set `repeat_from` to a wait stage. After the machine goal passes its observation window, the control plane atomically records the completed generation's Outcome, increments the generation and installs the next wait. Lifetime Run, Action and cost budgets remain cumulative. `inference-continuous` supplies this pattern for inference TTFT events; each new generation needs its own approval. Unknown effects use read-only inspection and fall back to manual recovery rather than redispatch. The automated WorkBench scenario is in `internal/workbench/testdata/sglang-continuous.json`; it uses scripted metrics and an isolated executor, not a live serving cluster.
 
-The opt-in `inference-incident-v2` template runs a required mitigation child and an optional, read-only RCA child concurrently. It requires a caller-supplied machine recovery goal; mitigation inherits it explicitly through `inherit_success`, while the parent independently verifies the same goal. An inconclusive RCA can remain open after recovery. The existing incident route is unchanged. Cross-child report aggregation and a complete orthogonal Incident status projection are not yet implemented.
+The opt-in `inference-incident` template runs a required mitigation child and an optional, read-only RCA child concurrently. It requires a caller-supplied machine recovery goal; mitigation inherits it explicitly through `inherit_success`, while the parent independently verifies the same goal. An inconclusive RCA can remain open after recovery. The existing incident route is unchanged. Cross-child report aggregation and a complete orthogonal Incident status projection are not yet implemented.
 
 Decision adjudicator v3 canonicalizes inputs and revalidates current ledger evidence before API, scorecard and postmortem consumption. Historical v2 decisions remain replayable but require re-adjudication to become current. Pause scheduling and decision writes, drain older workers, upgrade consumers and workers together, then resume; a v2 binary cannot interpret newly written v3 decisions. A binary rollback therefore requires stopping v3 writers and retaining v3 readers for their records, not merely reverting the executable. No SQL migration is required for these additive fields. Pause repeating Works before rolling back to a binary that does not understand `repeat_from`.
 
@@ -171,7 +171,7 @@ flow:
       output: "${nodes.triage.output}"
 ```
 
-Node types: `agent` / `tool` / `subflow` / `parallel` / `join` / `approval` / `input` / `loop` / `end`. `GET /v1/runs/{id}/flow` returns node and child-run state; the `provide_input` command answers an `input` node. Built-in examples: `sre-diagnosis@8` (parallel diagnosis + approval) and `@9` (human input + subflow).
+Node types: `agent` / `tool` / `subflow` / `parallel` / `join` / `approval` / `input` / `loop` / `end`. `GET /api/runs/{id}/flow` returns node and child-run state; the `provide_input` command answers an `input` node. Built-in examples: `sre-diagnosis@8` (parallel diagnosis + approval) and `@9` (human input + subflow).
 
 ### Generated plans
 
@@ -224,28 +224,28 @@ What the agent remembers, for how long, and how memories are kept current.
 | Working | one run | the agent's notes: established facts, constraints, what is left to check; plus the hypothesis ledger | `notes` with scope `run` |
 | Short-term | one conversation (branch) | the last `HARNESS_SHORT_TERM_MESSAGES` messages verbatim, a digest of older turns, and session notes | `notes` with scope `session` |
 | Long-term | the tenant | incidents, remediations, reasoning patterns, plan exemplars, proposed facts (organization / service / incident scopes) | the consolidator, operators, `notes` with scope `long_term` (as CANDIDATE) |
-| Personal | one user | stable preferences of the user who started the run (language, format, defaults) | `notes` with scope `user`, or the user via `/v1/me/memories` |
+| Personal | one user | stable preferences of the user who started the run (language, format, defaults) | `notes` with scope `user`, or the user via `/api/me/memories` |
 
 - **Notes**: the agent writes memory in its `THOUGHT` line or its conclusion as `"notes":[{"key","value","scope"}]`; writing a key again updates it, an empty value deletes it. The kernel rebuilds notes from the stored decisions, so they survive retries and compaction, and renders them in a `[working memory]` section inside a data boundary. A tier holds at most 24 notes of 500 characters.
 - **Short-term**: the session notes after a run are stored in its result (`memory.session`); the next turn on the same branch starts from the latest completed turn's notes, so a forked branch sees only its own history.
-- **Personal**: when a user-started run completes, its `user` notes create, reinforce, revise (new version) or archive that user's memory for each key (`pref:<key>`, ACTIVE, `restricted`). Personal memory is pinned with the run's retrieved memories and rendered in an `[about the user]` section for that user's runs only; shared retrieval, `harness.memory_search` and other users never see it (admins can list it). Instruction-like text is rejected, and a preference never authorizes an action. Users manage theirs with `GET /v1/me/memories`, `PUT|DELETE /v1/me/memories/{key}`.
+- **Personal**: when a user-started run completes, its `user` notes create, reinforce, revise (new version) or archive that user's memory for each key (`pref:<key>`, ACTIVE, `restricted`). Personal memory is pinned with the run's retrieved memories and rendered in an `[about the user]` section for that user's runs only; shared retrieval, `harness.memory_search` and other users never see it (admins can list it). Instruction-like text is rejected, and a preference never authorizes an action. Users manage theirs with `GET /api/me/memories`, `PUT|DELETE /api/me/memories/{key}`.
 - **Long-term from the agent**: `long_term` notes of a completed, undisputed run become CANDIDATE memories (VALIDATING when feedback verified the run) with subject `note:<key>`, reviewed like any other.
 
 ### Updating memory
 
 - **Reinforcement instead of duplicates**: writing the same content again in the same scope, or a near-identical memory with the same subject (embedding cosine ≥ 0.95, or token overlap ≥ 0.85 without a comparable embedding) that is at least as validated, counts a reinforcement on the existing memory (`reinforcements`, `last_reinforced_at`, merged `source_refs`) when it comes from a new source. Reinforced memories rank slightly higher (up to ×1.3).
-- **Revisions**: `PATCH /v1/memories/{id}` (approver; `expected_version`, `title` and/or `content`, `reason`) writes a new version: redacted and poison-checked like a new memory, re-embedded and re-indexed, audited, the status unchanged. Earlier versions stay in `agent_memory_versions`, so citations pinned to them still resolve; a revision that would duplicate another memory's content is rejected.
+- **Revisions**: `PATCH /api/memories/{id}` (approver; `expected_version`, `title` and/or `content`, `reason`) writes a new version: redacted and poison-checked like a new memory, re-embedded and re-indexed, audited, the status unchanged. Earlier versions stay in `agent_memory_versions`, so citations pinned to them still resolve; a revision that would duplicate another memory's content is rejected.
 - **Supersession** (activating a memory retires ACTIVE ones with the same subject and scope), **lifecycle transitions**, feedback and retention work as before. Consolidation is idempotent: a re-run after feedback does not reinforce or revise twice.
 
 ### Memory curation
 
 Long-term memory rots: duplicates pile up, facts change, lessons get refuted, entries go unused. The curator (`internal/curate`) is an offline pass in the spirit of "dreaming", built to be safe in operations:
 
-- **It only proposes.** A suggestion says which memories to set aside and why; an approver applies or dismisses it (`POST /v1/memory/curation/{id}/decide`, approver role). Nothing changes before that. Applying sets the memories STALE (out of retrieval) and is reversible; if a memory in a suggestion was edited after it was made, applying fails with `proposal_outdated` and changes nothing.
+- **It only proposes.** A suggestion says which memories to set aside and why; an approver applies or dismisses it (`POST /api/memory/curation/{id}/decide`, approver role). Nothing changes before that. Applying sets the memories STALE (out of retrieval) and is reversible; if a memory in a suggestion was edited after it was made, applying fails with `proposal_outdated` and changes nothing.
 - **It writes no text.** It never drafts, merges or rewrites a memory, so a poisoned run cannot get its words into memory through this path.
 - **Evidence is the run record.** Signals, strongest first: `refuted_by_history` (at least 2 later runs about the same service whose independent verification was SUPPORTED refuted the lesson, none confirmed it; runs without a SUPPORTED verdict do not count), `superseded_fact` (same scope and wording, different figures, a newer memory), `duplicate` (token similarity ≥ 85% in one scope; the better-validated, more recent one stays), `unused` (not created, changed, reinforced or retrieved for 90 days). A memory appears in its strongest finding only. Personal memory is never examined.
 - **Idempotent.** A finding is keyed by signal and exact memory versions: it is proposed once, and a dismissed one returns only when a memory in it changes. One pass is capped at 50 proposals.
-- **Triggering.** `POST /v1/memory/curation/run` (operator), `harness memory curate`, the desktop **Memory → Learned by the agent → Check memories now**, and, in local mode, a pass one minute after start and then every `HARNESS_CURATE_INTERVAL` (default 24h; `off` disables). The team server has no tenant scheduler, so it runs on demand. Proposals live in `memory_curation_proposals` (migration 0032, row-level security; JSON objects in the local store).
+- **Triggering.** `POST /api/memory/curation/run` (operator), `harness memory curate`, the desktop **Memory → Learned by the agent → Check memories now**, and, in local mode, a pass one minute after start and then every `HARNESS_CURATE_INTERVAL` (default 24h; `off` disables). The team server has no tenant scheduler, so it runs on demand. Proposals live in `memory_curation_proposals` (migration 0032, row-level security; JSON objects in the local store).
 
 ### Memory search
 
@@ -270,15 +270,15 @@ The agent's explicit decision trace (plan, hypotheses with confidence, verificat
 - **Reuse**: completed, undisputed runs with a VERIFIED conclusion are distilled into *reasoning patterns*: procedural memories listing the hypotheses checked in order, their verdicts and the tools used until the first verdict. They follow the normal memory lifecycle (CANDIDATE → approval → ACTIVE), so an operator activates every pattern. Each memory's success rate and Wilson lower bound are measured from the runs that retrieved it.
 - **Pattern effectiveness**: a pattern is judged against the baseline success rate of the same service (runs that did not see it), not an absolute rate. Explicit citations (`memory:<id>` in evidence or hypothesis refs) decide once there are enough of them. Patterns significantly and materially worse than the baseline are excluded. Excluded patterns are still shown to a small, deterministic share of runs (`reasoning.pattern_probe_rate`, at most 0.2) and are reinstated when those runs reach the baseline. Stale entries are pruned, and the list keeps the strongest cases when it hits its 500-entry limit. Operators can propose an exclusion or reinstatement by hand.
 - **Trace structure**: hypotheses carry a stable `id` used for deduplication across rewording. Confidence coverage and the structured share are measured, gated and diagnosed; a settled hypothesis without a confidence counts as a 0.5 forecast.
-- **Improve**: the `reasoning_improver` job (or `POST /v1/reasoning/improve`) diagnoses weak dimensions and underperforming ACTIVE patterns. It proposes a profile candidate that changes only `reasoning.playbook` (fixed, domain-free guidance; at most 2,000 characters, poison-checked, rendered before the trust rules) and `reasoning.patterns_excluded`. Runs behind holdout cases are excluded from the diagnosis. The candidate goes through the existing pipeline: holdout gate, approval by a human other than the proposer, canary with automatic rollback. The canary monitor also rolls back when the canary's reasoning regresses against the control group (default on, at least 20 scored runs per side). The loop never approves, canaries or promotes, and proposes one change at a time.
+- **Improve**: the `reasoning_improver` job (or `POST /api/reasoning/improve`) diagnoses weak dimensions and underperforming ACTIVE patterns. It proposes a profile candidate that changes only `reasoning.playbook` (fixed, domain-free guidance; at most 2,000 characters, poison-checked, rendered before the trust rules) and `reasoning.patterns_excluded`. Runs behind holdout cases are excluded from the diagnosis. The candidate goes through the existing pipeline: holdout gate, approval by a human other than the proposer, canary with automatic rollback. The canary monitor also rolls back when the canary's reasoning regresses against the control group (default on, at least 20 scored runs per side). The loop never approves, canaries or promotes, and proposes one change at a time.
 - **Retention**: reasoning scores are kept for `reasoning_retention` (default 90 days) by the `retention` job.
-- **APIs**: `GET /v1/reasoning/summary`, `GET /v1/reasoning/runs/{run_id}`, `GET /v1/reasoning/patterns`, `POST /v1/reasoning/patterns/{memory_id}/exclude|reinstate` (operator), `POST /v1/reasoning/improve` (admin). The desktop runtime scores and distills the same way and improves only on demand.
+- **APIs**: `GET /api/reasoning/summary`, `GET /api/reasoning/runs/{run_id}`, `GET /api/reasoning/patterns`, `POST /api/reasoning/patterns/{memory_id}/exclude|reinstate` (operator), `POST /api/reasoning/improve` (admin). The desktop runtime scores and distills the same way and improves only on demand.
 
 ## Triggers, policy rules and the action loop
 
-- **Triggers** (`triggers:`): `POST /v1/triggers/{name}` turns webhooks (Alertmanager, Grafana, PagerDuty, CI, …) into runs. Items fan out, `filter` drops noise, `resolve` events only attach evidence. Duplicates within the dedup window are injected into the open run as evidence instead of starting a new one; deduplication is shared through the database, so replicas agree. Optional HMAC signatures (`X-Harness-Signature: sha256=…`) and per-trigger rate limits. `schedule:` triggers create one run per interval across scheduler replicas.
+- **Triggers** (`triggers:`): `POST /api/triggers/{name}` turns webhooks (Alertmanager, Grafana, PagerDuty, CI, …) into runs. Items fan out, `filter` drops noise, `resolve` events only attach evidence. Duplicates within the dedup window are injected into the open run as evidence instead of starting a new one; deduplication is shared through the database, so replicas agree. Optional HMAC signatures (`X-Harness-Signature: sha256=…`) and per-trigger rate limits. `schedule:` triggers create one run per interval across scheduler replicas.
 - **Rule-based policy** (`policy: {name: rules}`): matchers over tool, source, labels, risk, environment, target, arguments, time windows, rate and blast radius. The strictest matching rule decides; the framework floor always applies. The environment is resolved per call and bound into the action intent.
-- **Time and environment context**: runs carry a pinned `now`, incident window, services and labels (`context` on `POST /v1/runs`, or rendered by a trigger). `context_provider` plugins add topology, ownership and recent changes once per run; facts are pinned for replay and rendered as untrusted data. Tools with `time_args` get the window filled in when the model leaves it out.
+- **Time and environment context**: runs carry a pinned `now`, incident window, services and labels (`context` on `POST /api/runs`, or rendered by a trigger). `context_provider` plugins add topology, ownership and recent changes once per run; facts are pinned for replay and rendered as untrusted data. Tools with `time_args` get the window filled in when the model leaves it out.
 - **Verify and compensate** (`tool_overlays.<tool>.lifecycle`): after a side effect the kernel polls the verify tool until `expect` holds. A refuted action proposes the compensation, which always waits for approval.
 - **Large outputs**: oversized tool results become a `tool-output` artifact plus a structured summary (log levels, time range, frequent templates; JSON shape and numeric stats). The model queries the rest with `harness.artifact_query` (head, tail, lines, grep, JSON path, time range).
 - **Untrusted output**: every tool result, operator evidence block and compacted summary is enclosed in a content-derived `<<<DATA id=…>>>` boundary that the content cannot close; chat-template control tokens are neutralized and instruction-like text (the memory poisoning patterns) is flagged `injection_suspected` in the prompt, the observation and the prompt manifest. Content is never dropped, only marked. Compaction keeps offload handles, verification verdicts and these flags outside the excerpt limit.
@@ -286,22 +286,21 @@ The agent's explicit decision trace (plan, hypotheses with confidence, verificat
 
 The desktop runtime reads the same sections (`policy`, `triggers`, `context_providers`, `tool_overlays`) from `harness.local.json` in its data directory, or from `HARNESS_LOCAL_CONFIG`.
 
-## Continuous Works (v2 control plane)
+## Continuous Works
 
-Behind `HARNESS_WORK_ENGINE_ENABLED`, a **Work** is a durable goal that spans many runs: events are deduplicated and correlated into Works, durable watches wait for events and timers, actions are planned against a bitemporal world state, held for approval bound to an intent hash, dispatched ledger-first and never replayed blindly, and a Work only succeeds with a verified outcome (metrics, world state, events or a human). `HARNESS_EVENT_SHADOW_MODE` (default on) routes events without creating Works; `HARNESS_ACTION_V2_ENABLED` turns on actions. Templates and correlation rules live under `work:` in the config file (`harness.local.json` on the desktop); `work_extension` plugins add action executors and metric sources. Run `scripts/v2/demo.sh` for an offline end-to-end incident on the built-in simulator, or `scripts/v2/demo-pg.sh` for the same on `harness all` + PostgreSQL with change/alert correlation, idempotent replay, `kill -9` crash recovery and pod topology checks.
+The Work Engine and Action Runtime are enabled by default, and event Shadow mode is off by default. A **Work** is a durable goal that spans many runs: events are deduplicated and correlated into Works, durable watches wait for events and timers, actions are planned against a bitemporal world state, held for approval bound to an intent hash, dispatched ledger-first and never replayed blindly, and a Work only succeeds with a verified outcome (metrics, world state, events or a human). `HARNESS_WORK_ENGINE_ENABLED=false` is the engine rollback control; `HARNESS_EVENT_SHADOW_MODE=true` records routing without creating Works. `HARNESS_ACTIONS_ENABLED` controls Action Runtime availability. Production dispatch still requires the governance gate, policy, approvals, target checks, allowlist and scope. Templates and correlation rules live under `work:` in the config file (`harness.local.json` on the desktop); `work_extension` plugins add action executors and metric sources. Run `scripts/work/demo.sh` for an offline end-to-end incident on the built-in simulator, or `scripts/work/demo-pg.sh` for the same on `harness all` + PostgreSQL with change/alert correlation, idempotent replay, `kill -9` crash recovery and pod topology checks.
 
 - **Queues and resource pools**: five scheduling queues (`critical-mitigation`, `incident-investigate`, `routine-work`, `batch-evaluation`, `background-improvement`), each with its own claim loop and concurrency, plus pools for model runs (per tenant, across replicas), production actions and world snapshots. A full pool defers a step instead of failing it; queues never relax approval or risk rules.
 - **Bounds** (RFC §20.3): besides runs, replans, duration, agents and actions, a template caps the total model spend of a Work (`max_cost_usd`), its active watches (`max_watches`, default 8), its evidence (`max_evidence` 500 / `max_evidence_bytes` 4 MiB) and the correlated events per minute that reach it (`max_event_rate`, default 120: past it, events stay linked in the inbox but neither grow the timeline nor wake the Work). A step refused by a bound blocks the Work with the reason; hits are counted in `harness_work_limit_total{limit}`. Per-run tokens, cost and parallel read-only tools are bounded by the run profile; snapshot depth and size by the world service.
 - **Evidence planning** (RFC §12.4): before a run or agents stage starts and the Work already has competing hypotheses, the framework ranks read-only checks by how well they separate them (discrimination × output trust × freshness, minus latency, cost and load) and puts the top checks in each run's goal; parallel agents get different checks. Only tools the run's profile shows, that are R0 after risk overrides, that the policy allows without approval and that fit the remaining budget can be planned; a run's `next_checks` suggestions only re-rank those. Plans are on the timeline (`work.evidence_planned`) and counted in `harness_evidence_plan_total`. Operators describe checks with tool labels `evidence.topics`, `evidence.latency`, `evidence.cost`, `evidence.load` and `evidence.exclude`; stages tune it with `evidence_plan: {max_checks, disabled}`; `HARNESS_EVIDENCE_PLANNING=false` turns it off.
 - **Security**: roles `viewer`, `operator`, `approver`, `admin`, `service` (events only) and `break_glass` (never implied); per-principal scopes limit event sources/types, resources and the approvable risk. R3 is never allowed, R2 always needs an approval bound to the intent hash; denials, approvals and break-glass are audited.
 - **Who sees what (team server)**: roles say what a caller may *do*; a second rule says whose data they may *see*. A user's chats and the runs behind them are theirs: other members of the tenant, operators included, get `404` (the same as a missing id) for their sessions, runs, events, streams, attachments and reasoning records, and the session and run lists contain only their own. Runs no user started (triggers, schedules, Works and their stages, system fan-out) are shared operational work and are stored with initiator `system`; a run of unrecognized origin is admin-only. Admins see everything. An approver can open a run that has an approval request and read the session of a pending approval, and sees every pending approval in the inbox, so they can judge what they approve; on that run they may issue only approval decisions (`approve_tool`, `reject_tool`, `resolve_unknown`, `override_result`) — cancel, pause, retry, fork, feedback and the rest stay with its owner (`403 approver_scope`). Other users see only the approvals on their own runs. In the provenance graph, run, step and thought nodes carry who started their run (migration 0033) and are shown only for shared runs and the caller's own; a node with no recognizable owner is hidden, as are other users' personal-memory titles and their shard. Works and the world/event APIs are shared by design (role-gated, tenant-wide) and have no route that links an existing private chat run into a Work. Create-idempotency keys are private to the caller. The local single-user runtime is unaffected (its token is an admin).
-- **Domain plugins**: `sre` (Prometheus/Alertmanager, Kubernetes, OTel, GitOps/Argo CD, Istio traffic, CMDB, Jira, AI infra) and `sre-sim`; source-native webhooks at `POST /v1/sources/{source}/events`; external plugins use `pkg/sdk`.
+- **Domain plugins**: `sre` (Prometheus/Alertmanager, Kubernetes, OTel, GitOps/Argo CD, Istio traffic, CMDB, Jira, AI infra) and `sre-sim`; source-native webhooks at `POST /api/sources/{source}/events`; external plugins use `pkg/sdk`.
 - **Evaluation and learning**: per-Work scorecard and safety gates (`/evaluation`), ledger-based postmortems (`/postmortem`, Markdown or a review Work), `postmortem` and `follow-up` templates, playbook proposals (`/playbook`) and memories with applicability and verified-outcome promotion.
 - **Work bench**: `harness work-bench run bench/cases` replays incidents deterministically with expectations and a baseline gate; `record`/`replay` turn a real Work into a case.
 - **Observability**: Work, action, event, watch and world metrics, with a Grafana dashboard and alert rules in `deploy/observability/`.
 - **Desktop**: a Works view with outcomes, scorecard, action approvals, hypotheses, timeline and postmortems.
 
-Details: [docs/v2-control-plane.md](docs/v2-control-plane.md).
 
 ## Deployment
 
@@ -366,13 +365,13 @@ docker compose -f deploy/docker-compose.yml up --build
 
 Generated plans emit `plan.generated`, `plan.validation_failed`, `plan.repaired`, `plan.fallback`, `plan.approval_requested`, `plan.approved`, `plan.rejected`, `plan.executed`, `plan.injection_suspected`, `plan.replan_requested` and `plan.replanned` events. Planner metrics are exposed on `/metrics`: `harness_plan_total`, `harness_plan_duration_seconds`, `harness_plan_repairs_total`, `harness_plan_validation_failures_total` and `harness_plan_fallback_total`.
 
-Plan datasets record the plan artifact, analysis, flow state, approvals, outcome, duration and cost. `POST /v1/eval/datasets/{id}/plan-cases` adds a terminal run, `POST /v1/eval/plan-runs` replays the frozen split offline, and the report groups success, safety, replay completion, steps, duration and cost by variant (`react`, `fallback_flow`, `generated_flow`, `profile_flow`).
+Plan datasets record the plan artifact, analysis, flow state, approvals, outcome, duration and cost. `POST /api/eval/datasets/{id}/plan-cases` adds a terminal run, `POST /api/eval/plan-runs` replays the frozen split offline, and the report groups success, safety, replay completion, steps, duration and cost by variant (`react`, `fallback_flow`, `generated_flow`, `profile_flow`).
 
 See `deploy/harness.example.yaml` for the rest.
 
 ## API
 
-`POST /v1/runs`, `GET /v1/runs/{id}/events/stream` (SSE), `POST /v1/runs/{id}/commands` (approve / pause / cancel), `/v1/sessions…`, `/v1/memories…`, `/v1/eval…`, `/v1/evolution…`, `/v1/extensions…`, `/v1/triggers…`, `/v1/reasoning…`, `GET /v1/runs/{id}/attachments/{index}`, `/healthz`, `/metrics`. With the work engine: `/v1/works…`, `/v1/work-templates`, `/v1/events…`, `/v1/world…`, `/v1/actions…` (see [docs/v2-control-plane.md](docs/v2-control-plane.md)).
+All business endpoints share the unversioned `/api` root; clients configure only the server Base URL. `GET /api/service` identifies the whole-service release and build revision. `POST /api/runs`, `GET /api/runs/{id}/events/stream` (SSE), `POST /api/runs/{id}/commands` (approve / pause / cancel), `/api/sessions…`, `/api/memories…`, `/api/eval…`, `/api/evolution…`, `/api/extensions…`, `/api/triggers…`, `/api/reasoning…`, `GET /api/runs/{id}/attachments/{index}`, `/healthz`, `/metrics`. With the work engine: `/api/works…`, `/api/work-templates`, `/api/events…`, `/api/world…`, `/api/actions…`.
 
 ## Tests
 
@@ -397,7 +396,7 @@ HARNESS_DATABASE_URL=postgres://localhost/scratch harness work-bench load -store
 
 Point `-store postgres` at a migrated scratch database: the run writes Works, events and facts under tenant `load`.
 
-PostgreSQL tests (including the v2 control-plane contract tests, which always run on SQLite too) read `HARNESS_PG_TEST_URL` and are skipped when it is unset; use a UTF-8 database, since full-text search on `SQL_ASCII` drops CJK text. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
+PostgreSQL tests (including the control-plane contract tests, which always run on SQLite too) read `HARNESS_PG_TEST_URL` and are skipped when it is unset; use a UTF-8 database, since full-text search on `SQL_ASCII` drops CJK text. The live planner probe exercises the real provider tool-call path (and exits non-zero if the model does not call `submit_flow` with a valid plan):
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout after approval"
@@ -414,10 +413,10 @@ ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout afte
 
 ## Production control plane
 
-The Work engine (`HARNESS_WORK_ENGINE_ENABLED`) runs long-lived goals on top
-of the durable run kernel. With it off, nothing below runs and the run API is
-unchanged. This section lists what the control plane provides for production
-use.
+The Work engine runs long-lived goals on top of the durable run kernel and
+is enabled by default. Setting `HARNESS_WORK_ENGINE_ENABLED=false` disables the
+capabilities below and leaves the run API unchanged. This section lists what
+the control plane provides for production use.
 
 - **Deployment gate.** `HARNESS_DEPLOYMENT_TIER=local|staging|production`.
   `harness validate-config --tier production` evaluates the flags against the
@@ -428,7 +427,8 @@ use.
   allow-list and scope, healthy required sources) is refused or runs in
   *investigation mode* with actions withheld. `harness doctor` checks a
   running deployment; `harness release-gate` compares two attestations;
-  `GET /v1/governance/attestation` serves the current one.
+  `GET /api/governance/attestation` serves the current one, including the
+  same whole-service `release_version` reported by `GET /api/service`.
 - **Cluster-wide admission.** Model-run budgets are transactional
   reservations, so replicas cannot oversubscribe; reservations are fenced,
   idempotent per stage and reaped (renewed when the run is really in flight).
@@ -461,15 +461,15 @@ use.
 - **Events and protocol.** A versioned event envelope, signed sources,
   late-event handling, recorded correlation decisions and topology-assisted
   leads. A stable event contract (`?protocol=1`), a unified
-  `/v1/works/{id}/view`, and a Go SDK with a resumable `Subscribe`.
+  `/api/works/{id}/view`, and a Go SDK with a resumable `Subscribe`.
   Events, pages and snapshots declare schema, contract and minimum reader
   versions. The SDK reads legacy v1 data, but stops on incompatible versions,
   malformed frames or sequence gaps without advancing the last valid cursor.
   A terminal subscription drains through the captured snapshot's `LastSeq`
   before closing; audit events appended after that boundary need a new
   subscription.
-  Existing client binaries still require v1 server semantics; incompatible
-  changes need a new versioned endpoint. The Run relay checkpoints each
+  The service is released and upgraded as one unit; clients do not select
+  capability generations through URLs. The Run relay checkpoints each
   published prefix; cursor writes recheck lease expiry after acquiring the
   row lock and cannot move backwards. Sinks renew before retrying; external
   delivery remains at least once.

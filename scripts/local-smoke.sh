@@ -18,9 +18,9 @@ for _ in $(seq 1 50); do curl -sf "http://$addr/healthz" >/dev/null 2>&1 && brea
 curl -sf "http://$addr/healthz" >/dev/null || { cat "$work/server.log"; echo "server did not start"; exit 1; }
 
 token="$(cat "$data/token")"
-code="$(curl -s -o /dev/null -w '%{http_code}' "http://$addr/v1/whoami")"
+code="$(curl -s -o /dev/null -w '%{http_code}' "http://$addr/api/whoami")"
 [ "$code" = 401 ] || { echo "unauthenticated request got $code, want 401"; exit 1; }
-curl -sf -H "Authorization: Bearer $token" "http://$addr/v1/whoami" | grep -q local-user
+curl -sf -H "Authorization: Bearer $token" "http://$addr/api/whoami" | grep -q local-user
 
 out="$(printf 'diagnose high latency service=checkout\n' | "$bin" chat -server "http://$addr" -data "$data")"
 echo "$out" | grep -q 'COMPLETED' || { echo "$out"; echo "chat run did not complete"; exit 1; }

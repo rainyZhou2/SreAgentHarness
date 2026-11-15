@@ -122,7 +122,7 @@ plugins:
   # event_sink:
   #   - {name: webhook, instance: slack-approvals, config: {url: "${SLACK_WEBHOOK_URL}", format: slack, types: ["approval.requested", "run.failed"]}}
 
-# Inbound triggers: POST /v1/triggers/{name} (operator role) and schedules.
+# Inbound triggers: POST /api/triggers/{name} (operator role) and schedules.
 # Expressions use the flow DSL over payload, item, headers, trigger and now.
 triggers: []
 # triggers:
@@ -161,10 +161,10 @@ tool_overlays: {}
 #     time_args: {start: start, end: end, format: rfc3339, lookback: 1h}
 #     max_inline_bytes: 32768
 
-# ---- production control plane (HARNESS_WORK_ENGINE_ENABLED=true) ----
+# ---- production control plane (Work Engine and Actions enabled by default) ----
 # Rollout is governed by HARNESS_DEPLOYMENT_TIER (local|staging|production)
 # and the flags HARNESS_EVENT_SHADOW_MODE, HARNESS_ACTION_DRY_RUN,
-# HARNESS_ACTION_V2_ENABLED, HARNESS_ACTION_ALLOWLIST / _SCOPE and
+# HARNESS_ACTIONS_ENABLED, HARNESS_ACTION_ALLOWLIST / _SCOPE and
 # HARNESS_ACTION_PREAUTHORIZED. `harness validate-config --tier production`
 # judges them without connecting to anything; a production deployment that
 # lacks a safeguard runs in investigation mode (actions withheld).

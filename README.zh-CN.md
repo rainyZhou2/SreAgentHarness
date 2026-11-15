@@ -38,7 +38,7 @@
 
 ## 桌面客户端
 
-[`desktop/`](desktop/README.zh-CN.md) 是 Wails 原生客户端。默认进入 **本地运行** 模式：应用会启动自带的 SQLite harness core，执行事件与运行状态在同一个 SQLite 事务中提交，不需要 Docker、PostgreSQL、NATS 或命令行。切换到 **团队服务** 即可连接共享 harness。会话、流式推理、工具调用卡片、对话内审批、审批收件箱，以及模型 / MCP / HTTP 工具 / 技能管理在两种模式下一致；本地模式实现了同一套 `/v1/extensions`、命令、checkpoint/fork、memory、graph 和评测 API。命令带版本校验并支持跨重启幂等，取消 flow 会级联到子 Run，压缩摘要、记忆命中、checkpoint 和步骤输出修订都持久化在本地存储中。
+[`desktop/`](desktop/README.zh-CN.md) 是 Wails 原生客户端。默认进入 **本地运行** 模式：应用会启动自带的 SQLite harness core，执行事件与运行状态在同一个 SQLite 事务中提交，不需要 Docker、PostgreSQL、NATS 或命令行。切换到 **团队服务** 即可连接共享 harness。会话、流式推理、工具调用卡片、对话内审批、审批收件箱，以及模型 / MCP / HTTP 工具 / 技能管理在两种模式下一致；本地模式实现了同一套 `/api/extensions`、命令、checkpoint/fork、memory、graph 和评测 API。命令带版本校验并支持跨重启幂等，取消 flow 会级联到子 Run，压缩摘要、记忆命中、checkpoint 和步骤输出修订都持久化在本地存储中。
 
 ```bash
 desktop/build.sh run
@@ -66,7 +66,7 @@ desktop/build.sh run
 - **Markdown**：支持标题、列表、代码块、GFM 表格、数学公式（KaTeX）和 mermaid 图。原始 HTML 不会被渲染，而是按文本显示。链接通过 `OpenURL` 在系统浏览器中打开，只接受 `http`、`https` 和 `mailto`；`javascript:`、`file:` 等其他协议不会生成链接，也不会被打开。指向文件（`.pdf`、`.csv`、`.json` 等）的链接带类型标记。
 - **结构化附件**：`submit_conclusion` 新增可选的 `attachments` 列表，每项为 `{type: table|image|link|file, title, caption, url | ref, mime_type, columns, rows}`。内核先校验，再把它写入 run 结果（`result.attachments`）：URL 必须是不带凭据的绝对 `http(s)` 地址；`ref` 必须指向同一租户已外存的工具输出（`obs:step<N>` 会解析成对应的 handle）；文本和表格有上限（最多 12 个附件，表格最多 20 列 × 200 行），不符合要求的一律丢弃。不带附件的结论和以前完全一样。
 - **客户端渲染**：表格显示为可滚动的卡片，带“复制为 CSV”按钮。URL 图片懒加载，不发送 Referer；存储的图片只支持 PNG、JPEG、GIF、WebP（不支持 SVG），由 Go 端拉取后内联显示。链接显示为带主机名的卡片；文件显示为带文件名、类型和大小的卡片，URL 文件可以“打开”，存储的输出可以“下载”（通过保存对话框）。WebView 不会接触 API token。导出的对话也包含附件。
-- **API 使用方**：附件可以从 `GET /v1/runs/{id}`（`result.attachments`）和会话消息中拿到（助手消息的内容就是结果 artifact）。`GET /v1/runs/{id}/attachments/{index}`（viewer）提供该 run 结果里存储的附件：只提供内核接受过的 ref，大小不超过 32 MiB，带 `nosniff` 和 sandbox CSP；除可内联显示的位图外，一律作为下载返回。
+- **API 使用方**：附件可以从 `GET /api/runs/{id}`（`result.attachments`）和会话消息中拿到（助手消息的内容就是结果 artifact）。`GET /api/runs/{id}/attachments/{index}`（viewer）提供该 run 结果里存储的附件：只提供内核接受过的 ref，大小不超过 32 MiB，带 `nosniff` 和 sandbox CSP；除可内联显示的位图外，一律作为下载返回。
 
 ## 快速开始
 
@@ -144,7 +144,7 @@ Work 控制面拥有长期目标，同一个 Kernel 拥有其 Run、Step 和 Att
 
 模板可将 `repeat_from` 指向等待阶段。机器目标通过稳定观察窗口后，控制面在同一事务记录本代 Outcome、递增 generation 并注册下一次等待；Run、Action、费用预算按整个生命周期累计。`inference-continuous` 为推理 TTFT 事件提供这一模式，每代动作需要独立审批。未知副作用先通过只读 Inspect 检查，无法确认则进入人工恢复，不重新派发。自动 WorkBench 场景位于 `internal/workbench/testdata/sglang-continuous.json`，使用脚本化指标和隔离执行器，并非真实 Serving 集群验收。
 
-可选的 `inference-incident-v2` 模板并行运行必需的 Mitigation 子 Work 与可选的只读 RCA 子 Work。调用者必须提供机器恢复目标；Mitigation 通过 `inherit_success` 显式继承，父 Work 独立验证同一目标。恢复后，未得出确定结论的 RCA 可以继续运行。现有事故路由保持兼容；跨子 Work 报告聚合和完整的 Incident 正交状态投影尚未实现。
+可选的 `inference-incident` 模板并行运行必需的 Mitigation 子 Work 与可选的只读 RCA 子 Work。调用者必须提供机器恢复目标；Mitigation 通过 `inherit_success` 显式继承，父 Work 独立验证同一目标。恢复后，未得出确定结论的 RCA 可以继续运行。现有事故路由保持兼容；跨子 Work 报告聚合和完整的 Incident 正交状态投影尚未实现。
 
 Decision adjudicator v3 规范化裁决输入，并在 API、评分和复盘读取时重新验证当前 Ledger。历史 v2 裁决仍可重放，但需重新裁决才能成为当前有效结论。升级时应暂停调度和裁决写入、排空旧 Worker，将消费者和 Worker 一并升级后再恢复；v2 二进制不能解释新写入的 v3 裁决。回滚需要停止 v3 写入并保留读取已有 v3 记录的能力，不能只替换回旧二进制。这些新增字段无需 SQL migration。回滚到不理解 `repeat_from` 的旧二进制前，须暂停循环 Work。
 
@@ -171,7 +171,7 @@ flow:
       output: "${nodes.triage.output}"
 ```
 
-节点类型：`agent` / `tool` / `subflow` / `parallel` / `join` / `approval` / `input` / `loop` / `end`。`GET /v1/runs/{id}/flow` 返回节点和子 Run 状态；`provide_input` 命令用于回答 `input` 节点。内置示例：`sre-diagnosis@8`（并行诊断 + 审批）与 `@9`（人工输入 + 子流程）。
+节点类型：`agent` / `tool` / `subflow` / `parallel` / `join` / `approval` / `input` / `loop` / `end`。`GET /api/runs/{id}/flow` 返回节点和子 Run 状态；`provide_input` 命令用于回答 `input` 节点。内置示例：`sre-diagnosis@8`（并行诊断 + 审批）与 `@9`（人工输入 + 子流程）。
 
 ### 自动生成计划
 
@@ -224,28 +224,28 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 | 工作记忆 | 单个 Run | agent 的笔记：已确认的事实、约束、待查项；以及假设账本 | scope 为 `run` 的 `notes` |
 | 短期记忆 | 单个会话（分支） | 最近 `HARNESS_SHORT_TERM_MESSAGES` 条消息原文、更早轮次的摘要、会话笔记 | scope 为 `session` 的 `notes` |
 | 长期记忆 | 租户 | 事件、修复方案、推理模式、计划范例、agent 提议的事实（organization / service / incident） | consolidator、运维人员、scope 为 `long_term` 的 `notes`（作为 CANDIDATE） |
-| 个性化记忆 | 单个用户 | 发起 Run 的用户的稳定偏好（语言、格式、默认值） | scope 为 `user` 的 `notes`，或用户通过 `/v1/me/memories` 管理 |
+| 个性化记忆 | 单个用户 | 发起 Run 的用户的稳定偏好（语言、格式、默认值） | scope 为 `user` 的 `notes`，或用户通过 `/api/me/memories` 管理 |
 
 - **笔记**：agent 在 `THOUGHT` 行或结论中写 `"notes":[{"key","value","scope"}]`；重复写同一个 key 即更新，值为空即删除。kernel 从已存储的决策重建笔记，因此重试和压缩后依然存在，并在数据边界内以 `[working memory]` 小节呈现。每层最多 24 条、每条 500 字符。
 - **短期记忆**：Run 结束时的会话笔记写入其结果（`memory.session`）；同一分支的下一轮从最近一个完成轮次的笔记开始，因此分叉出的分支只看到自己的历史。
-- **个性化记忆**：用户发起的 Run 完成后，其 `user` 笔记按 key（`pref:<key>`，ACTIVE，`restricted`）为该用户新建、强化、修订（新版本）或归档记忆。个性化记忆与本 Run 检索到的记忆一起固定，只在该用户自己的 Run 中以 `[about the user]` 小节呈现；共享检索、`harness.memory_search` 和其他用户都看不到（管理员可列出）。指令性文本会被拒绝，偏好永远不能授权任何操作。用户通过 `GET /v1/me/memories`、`PUT|DELETE /v1/me/memories/{key}` 管理自己的偏好。
+- **个性化记忆**：用户发起的 Run 完成后，其 `user` 笔记按 key（`pref:<key>`，ACTIVE，`restricted`）为该用户新建、强化、修订（新版本）或归档记忆。个性化记忆与本 Run 检索到的记忆一起固定，只在该用户自己的 Run 中以 `[about the user]` 小节呈现；共享检索、`harness.memory_search` 和其他用户都看不到（管理员可列出）。指令性文本会被拒绝，偏好永远不能授权任何操作。用户通过 `GET /api/me/memories`、`PUT|DELETE /api/me/memories/{key}` 管理自己的偏好。
 - **agent 提议的长期记忆**：已完成且未被否定的 Run 中的 `long_term` 笔记成为 CANDIDATE 记忆（反馈确认后为 VALIDATING），subject 为 `note:<key>`，与其他记忆一样走审核。
 
 ### 记忆更新机制
 
 - **强化而非重复**：在同一 scope 中再次写入相同内容，或写入同 subject、近似重复（embedding 余弦 ≥ 0.95；无可比 embedding 时词元重叠 ≥ 0.85）且验证程度不高于已有记忆的内容时，若来源是新的，则记为对已有记忆的一次强化（`reinforcements`、`last_reinforced_at`，合并 `source_refs`）。被强化的记忆排序略微提升（最多 ×1.3）。
-- **修订**：`PATCH /v1/memories/{id}`（approver；`expected_version`、`title` 和/或 `content`、`reason`）写入新版本：与新记忆一样脱敏和投毒检查，重新生成向量和检索词，记审计，状态不变。旧版本保留在 `agent_memory_versions` 中，引用旧版本的 ref 仍可解析；修订后与其他记忆内容重复时会被拒绝。
+- **修订**：`PATCH /api/memories/{id}`（approver；`expected_version`、`title` 和/或 `content`、`reason`）写入新版本：与新记忆一样脱敏和投毒检查，重新生成向量和检索词，记审计，状态不变。旧版本保留在 `agent_memory_versions` 中，引用旧版本的 ref 仍可解析；修订后与其他记忆内容重复时会被拒绝。
 - **取代**（激活一条记忆会让同 subject、同 scope 的 ACTIVE 记忆变为 SUPERSEDED）、**生命周期迁移**、反馈和保留策略保持不变。整理过程是幂等的：反馈触发的重新整理不会重复强化或修订。
 
 ### 记忆整理
 
 长期记忆会“腐烂”：重复堆积、事实变化、经验被推翻、条目无人使用。整理器（`internal/curate`）是一次离线的“做梦”式整理，按运维场景的要求设计：
 
-- **只提建议。** 建议说明要搁置哪些记忆、为什么；由审批者应用或驳回（`POST /v1/memory/curation/{id}/decide`，审批者角色）。在此之前不会有任何改动。应用后记忆变为 STALE（不再参与检索），可恢复；如果建议提出后其中某条记忆被修改，应用会返回 `proposal_outdated` 且不做任何改动。
+- **只提建议。** 建议说明要搁置哪些记忆、为什么；由审批者应用或驳回（`POST /api/memory/curation/{id}/decide`，审批者角色）。在此之前不会有任何改动。应用后记忆变为 STALE（不再参与检索），可恢复；如果建议提出后其中某条记忆被修改，应用会返回 `proposal_outdated` 且不做任何改动。
 - **不写任何文字。** 它从不起草、合并或改写记忆，所以被污染的运行无法通过这条路径把内容写进记忆。
 - **证据来自运行记录。** 信号按强度排序：`refuted_by_history`（至少 2 次之后的、同一服务的、独立验证为 SUPPORTED 的运行推翻了这条经验，且没有运行支持它；没有 SUPPORTED 结论的运行不算数）、`superseded_fact`（同一范围、措辞相同、数字不同，且有更新的记忆）、`duplicate`（同一范围内词元相似度 ≥ 85%，保留验证更充分、更新的那条）、`unused`（90 天内未创建、修改、强化或被检索）。一条记忆只出现在它最强的发现里；个人记忆从不检查。
 - **幂等。** 一个发现由信号和确切的记忆版本标识：只提出一次，被驳回的发现只有在其中某条记忆变化后才会再出现。单次最多 50 条。
-- **触发方式。** `POST /v1/memory/curation/run`（operator）、`harness memory curate`、桌面端**记忆 → 智能体学到的 → 立即检查记忆**；本地模式下，启动 1 分钟后检查一次，之后每隔 `HARNESS_CURATE_INTERVAL`（默认 24h，`off` 关闭）。团队服务端没有按租户的调度器，按需运行。建议存放在 `memory_curation_proposals`（迁移 0032，行级安全；本地存储里是 JSON 对象）。
+- **触发方式。** `POST /api/memory/curation/run`（operator）、`harness memory curate`、桌面端**记忆 → 智能体学到的 → 立即检查记忆**；本地模式下，启动 1 分钟后检查一次，之后每隔 `HARNESS_CURATE_INTERVAL`（默认 24h，`off` 关闭）。团队服务端没有按租户的调度器，按需运行。建议存放在 `memory_curation_proposals`（迁移 0032，行级安全；本地存储里是 JSON 对象）。
 
 ### 记忆检索
 
@@ -270,15 +270,15 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 - **复用**：已完成、未被反馈否定且校验结论为 VERIFIED 的 run，会被提炼为*推理模式*，即一条 procedural 记忆。内容是按顺序检验过的假设及各自结论，以及得出首个结论前用到的工具。它走正常的记忆生命周期（CANDIDATE → 审批 → ACTIVE），每条模式都要人工激活。每条记忆的成功率和 Wilson 下界，按检索过它的 run 统计。
 - **模式效果**：按同一服务中没用到该模式的 run 的成功率作为基线来比较，而不是用绝对成功率。模型显式引用（evidence 或假设 refs 里的 `memory:<id>`）的样本足够时，以引用为准。比基线显著且明显更差的模式会被排除。被排除的模式仍按 `reasoning.pattern_probe_rate`（上限 0.2）确定性地放给一小部分 run，这些 run 达到基线就恢复。已失效的条目会被清掉；列表到 500 条上限时，只保留证据最强的。运维人员也可以手动提议排除或恢复。
 - **轨迹结构**：假设带稳定 `id`，换个说法也按同一个算。置信度覆盖率和结构化比例纳入度量、门禁和诊断；已定论但没给置信度的假设按 0.5 预测计。
-- **改进**：`reasoning_improver` 定时任务（或 `POST /v1/reasoning/improve`）会诊断薄弱维度和表现差的 ACTIVE 模式，并提出一个 profile 候选版本，只改 `reasoning.playbook` 和 `reasoning.patterns_excluded`。playbook 是固定的、与领域无关的指导，≤2000 字符，经过投毒检查，并放在信任规则之前渲染。诊断时会排除 holdout 用例对应的 run。候选版本走现有流程：holdout 门禁 → 由非提议者的人工审批 → 灰度与自动回滚。灰度监控还会比较灰度组和对照组的推理质量，退化超过阈值就自动回滚；该检查默认开启，两组各至少 20 个已打分 run 才会判定。该循环从不审批、不发起灰度、不晋升，且同一时间只提一个变更。
+- **改进**：`reasoning_improver` 定时任务（或 `POST /api/reasoning/improve`）会诊断薄弱维度和表现差的 ACTIVE 模式，并提出一个 profile 候选版本，只改 `reasoning.playbook` 和 `reasoning.patterns_excluded`。playbook 是固定的、与领域无关的指导，≤2000 字符，经过投毒检查，并放在信任规则之前渲染。诊断时会排除 holdout 用例对应的 run。候选版本走现有流程：holdout 门禁 → 由非提议者的人工审批 → 灰度与自动回滚。灰度监控还会比较灰度组和对照组的推理质量，退化超过阈值就自动回滚；该检查默认开启，两组各至少 20 个已打分 run 才会判定。该循环从不审批、不发起灰度、不晋升，且同一时间只提一个变更。
 - **保留期**：`retention` 任务按 `reasoning_retention`（默认 90 天）清理推理分数。
-- **API**：`GET /v1/reasoning/summary`、`GET /v1/reasoning/runs/{run_id}`、`GET /v1/reasoning/patterns`、`POST /v1/reasoning/patterns/{memory_id}/exclude|reinstate`（operator）、`POST /v1/reasoning/improve`（admin）。桌面端同样打分和提炼，但只在手动触发时改进。
+- **API**：`GET /api/reasoning/summary`、`GET /api/reasoning/runs/{run_id}`、`GET /api/reasoning/patterns`、`POST /api/reasoning/patterns/{memory_id}/exclude|reinstate`（operator）、`POST /api/reasoning/improve`（admin）。桌面端同样打分和提炼，但只在手动触发时改进。
 
 ## 触发器、策略规则与动作闭环
 
-- **触发器**（`triggers:`）：`POST /v1/triggers/{name}` 把 Alertmanager、Grafana、PagerDuty、CI 等 webhook 转成运行。`items` 拆分事件，`filter` 过滤噪声，`resolve` 事件只追加证据。去重窗口内的重复事件以证据形式注入已有运行而不是新建；去重通过数据库共享，多副本结果一致。支持 HMAC 签名（`X-Harness-Signature: sha256=…`）和按触发器限流。`schedule:` 触发器在多个 scheduler 副本间每个周期只创建一次运行。
+- **触发器**（`triggers:`）：`POST /api/triggers/{name}` 把 Alertmanager、Grafana、PagerDuty、CI 等 webhook 转成运行。`items` 拆分事件，`filter` 过滤噪声，`resolve` 事件只追加证据。去重窗口内的重复事件以证据形式注入已有运行而不是新建；去重通过数据库共享，多副本结果一致。支持 HMAC 签名（`X-Harness-Signature: sha256=…`）和按触发器限流。`schedule:` 触发器在多个 scheduler 副本间每个周期只创建一次运行。
 - **规则化策略**（`policy: {name: rules}`）：按工具、来源、标签、风险、环境、目标、参数、时间窗、频率和影响面匹配，最严格的命中规则生效，框架底线始终生效。环境按每次调用解析并绑定进 action intent。
-- **时间与环境上下文**：运行固定 `now`、故障时间窗、服务和标签（`POST /v1/runs` 的 `context`，或由触发器渲染）。`context_provider` 插件在每个运行开始时补充拓扑、归属和近期变更，结果固定用于回放，并作为不可信数据渲染。配置了 `time_args` 的工具在模型未给出时间时自动补齐时间窗。
+- **时间与环境上下文**：运行固定 `now`、故障时间窗、服务和标签（`POST /api/runs` 的 `context`，或由触发器渲染）。`context_provider` 插件在每个运行开始时补充拓扑、归属和近期变更，结果固定用于回放，并作为不可信数据渲染。配置了 `time_args` 的工具在模型未给出时间时自动补齐时间窗。
 - **校验与补偿**（`tool_overlays.<tool>.lifecycle`）：副作用执行后内核轮询校验工具直到 `expect` 成立；校验失败时提出补偿动作，补偿始终需要审批。
 - **大输出**：超大的工具结果存为 `tool-output` 制品并生成结构化摘要（日志级别、时间范围、高频模板；JSON 结构与数值统计），模型通过 `harness.artifact_query` 查询其余部分（head、tail、lines、grep、JSON path、时间范围）。
 - **不可信输出**：所有工具结果、人工证据和压缩摘要都包在由内容哈希生成 id 的 `<<<DATA id=…>>>` 边界里，内容本身无法提前闭合；聊天模板控制符会被转义，像指令的文本（复用记忆投毒规则）在 prompt、observation 和 prompt manifest 中标记为 `injection_suspected`。内容只标记不删除。上下文压缩会在截断之外保留落盘 handle、校验结论和这些标记。
@@ -361,13 +361,13 @@ docker compose -f deploy/docker-compose.yml up --build
 
 生成计划会发出 `plan.generated`、`plan.validation_failed`、`plan.repaired`、`plan.fallback`、`plan.approval_requested`、`plan.approved`、`plan.rejected`、`plan.executed`、`plan.injection_suspected`、`plan.replan_requested`、`plan.replanned` 事件。Planner 指标在 `/metrics`：`harness_plan_total`、`harness_plan_duration_seconds`、`harness_plan_repairs_total`、`harness_plan_validation_failures_total`、`harness_plan_fallback_total`。
 
-计划数据集会记录 plan artifact、分析结果、flow 状态、审批、结果、耗时与成本。`POST /v1/eval/datasets/{id}/plan-cases` 录入已结束的 Run，`POST /v1/eval/plan-runs` 离线回放冻结的数据集，并按变体（`react`、`fallback_flow`、`generated_flow`、`profile_flow`）汇总成功率、安全性、回放完成率、步数、耗时与成本。
+计划数据集会记录 plan artifact、分析结果、flow 状态、审批、结果、耗时与成本。`POST /api/eval/datasets/{id}/plan-cases` 录入已结束的 Run，`POST /api/eval/plan-runs` 离线回放冻结的数据集，并按变体（`react`、`fallback_flow`、`generated_flow`、`profile_flow`）汇总成功率、安全性、回放完成率、步数、耗时与成本。
 
 其余配置见 `deploy/harness.example.yaml`。
 
 ## API
 
-`POST /v1/runs`、`GET /v1/runs/{id}/events/stream`（SSE）、`POST /v1/runs/{id}/commands`（审批 / 暂停 / 取消）、`/v1/sessions…`、`/v1/memories…`、`/v1/eval…`、`/v1/evolution…`、`/v1/extensions…`、`/v1/triggers…`、`/v1/reasoning…`、`GET /v1/runs/{id}/attachments/{index}`、`/healthz`、`/metrics`。
+所有业务接口统一使用无代次的 `/api` 根路径，客户端只配置服务 Base URL；`GET /api/service` 返回整包 Release Version 与 Build Revision。`POST /api/runs`、`GET /api/runs/{id}/events/stream`（SSE）、`POST /api/runs/{id}/commands`（审批 / 暂停 / 取消）、`/api/sessions…`、`/api/memories…`、`/api/eval…`、`/api/evolution…`、`/api/extensions…`、`/api/triggers…`、`/api/reasoning…`、`GET /api/runs/{id}/attachments/{index}`、`/healthz`、`/metrics`。
 
 ## 测试
 
@@ -409,15 +409,15 @@ ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "审批后重启 check
 
 ## 生产控制平面
 
-Work 引擎（`HARNESS_WORK_ENGINE_ENABLED`）在可恢复的 run 内核之上运行长生命周期目标。关闭时下面的能力都不会运行，run API 保持不变。本节列出生产使用所提供的能力。
+Work 引擎与 Action Runtime 默认启用，事件 Shadow 模式默认关闭。Work 引擎在可恢复的 run 内核之上运行长生命周期目标；`HARNESS_WORK_ENGINE_ENABLED=false` 可用于回滚，关闭时下面的能力都不会运行，run API 保持不变。`HARNESS_EVENT_SHADOW_MODE=true` 可显式切回只记录路由、不创建 Work 的灰度路径。`HARNESS_ACTIONS_ENABLED` 控制 Action Runtime。生产真实派发仍必须通过治理门、策略、审批、目标校验、白名单与范围检查。本节列出生产使用所提供的能力。
 
-- **部署门禁。** `HARNESS_DEPLOYMENT_TIER=local|staging|production`。`harness validate-config --tier production` 不连接任何外部系统，只按层级评估各开关，并推导出发布阶段（G0 旧路径、G1 影子、G2 只读、G3 演练、G4 受限生产、G5 范围内自动化）。生产部署缺少任一保护（自定义策略、审计汇、已知目标与不同审批人检查、动作白名单与范围、健康的必需数据源）时会被拒绝启动，或以*调查模式*运行（动作被保留）。`harness doctor` 检查运行中的部署；`harness release-gate` 对比两份证明；`GET /v1/governance/attestation` 返回当前证明。
+- **部署门禁。** `HARNESS_DEPLOYMENT_TIER=local|staging|production`。`harness validate-config --tier production` 不连接任何外部系统，只按层级评估各开关，并推导出发布阶段（G0 旧路径、G1 影子、G2 只读、G3 演练、G4 受限生产、G5 范围内自动化）。生产部署缺少任一保护（自定义策略、审计汇、已知目标与不同审批人检查、动作白名单与范围、健康的必需数据源）时会被拒绝启动，或以*调查模式*运行（动作被保留）。`harness doctor` 检查运行中的部署；`harness release-gate` 对比两份证明；`GET /api/governance/attestation` 返回当前证明，其中的整包 `release_version` 与 `GET /api/service` 一致。
 - **集群级准入。** 模型 run 预算是事务化预约，多个副本不会超配；预约带 fence、按阶段幂等，并会被回收（run 仍在进行时续期而不是释放）。支持租户加权公平、优先级老化、为紧急止损保留容量、准入期限，以及对 batch 队列的过载拒绝。run 终态事件会立即唤醒所属 Work；轮询和 reconciler 仍是兜底。
 - **可观测查询代理（Query Broker）。** 按租户隔离的数据源目录（地址与凭据只是运维配置的引用）；Prometheus/VictoriaMetrics/Mimir、Loki、Tempo、Jaeger 与变更账本 provider；范围与预算检查、熔断、缓存、脱敏、提示注入标记、制品存储和审计。结果状态为 `ok|partial|empty|stale|unavailable|unauthorized|denied`，只有完整的证据包才能支撑“健康”的结论。语义工具：`sre.service_health`、`sre.latency_diagnose`、`sre.error_diagnose`、`sre.dependency_health`、`sre.gpu_health`、`sre.inference_health`、`sre.change_correlation`。
 - **动作安全。** 资源身份（别名共享同一把锁，重建的资源使旧审批失效）、descriptor 契约哈希、未知效果会阻断对同一目标的后续写入、演练 / 白名单 / 范围 / 严格预授权、带事件号并需第二人复核的 break-glass，以及用于执行器契约的 `actiontest.Certify`。
 - **World 质量。** 采集器健康、来源权威度与冲突检测对生产动作失败关闭；过期事实被保留，不会被删除。
 - **Work 图。** 受父 Work 权限上限约束的子 Work、带原子环检测的依赖边、`children` 阶段、取消级联；按证据账本校验的结构化 agent Finding（看独立证据，不按多数票）；Runbook 注册表、由复盘生成的 Improvement Work 和意图路由。
-- **事件与协议。** 带版本的事件信封、签名来源、迟到事件处理、可追溯的关联决策与基于拓扑的线索。稳定的事件契约（`?protocol=1`）、统一的 `/v1/works/{id}/view`，以及支持断线续传 `Subscribe` 的 Go SDK。事件、分页和快照声明 schema、contract 与 minimum reader 版本；新 SDK 兼容旧 v1 格式，但遇到不兼容版本、损坏帧或序号缺口会停止读取并保留最后有效 Cursor。终态订阅会读取至所捕获快照的 `LastSeq` 后才结束；此边界之后新增的审计事件需要再次订阅。旧客户端二进制仍需维持 v1 服务端语义，不兼容变更须使用新版本端点。Run 事件中继逐条持久化成功前缀，Cursor 在行锁后复核租约且不可倒退；接收器每次重试前续租，外部投递仍为至少一次语义。
+- **事件与协议。** 带版本的事件信封、签名来源、迟到事件处理、可追溯的关联决策与基于拓扑的线索。稳定的事件契约（`?protocol=1`）、统一的 `/api/works/{id}/view`，以及支持断线续传 `Subscribe` 的 Go SDK。事件、分页和快照声明 schema、contract 与 minimum reader 版本；新 SDK 兼容旧 v1 格式，但遇到不兼容版本、损坏帧或序号缺口会停止读取并保留最后有效 Cursor。终态订阅会读取至所捕获快照的 `LastSeq` 后才结束；此边界之后新增的审计事件需要再次订阅。服务按整包发布和升级，调用方不通过 URL 选择能力代次。Run 事件中继逐条持久化成功前缀，Cursor 在行锁后复核租约且不可倒退；接收器每次重试前续租，外部投递仍为至少一次语义。
 - **AI 基础设施。** 基于 UUID 的 GPU 身份（换卡与 MIG 变化）、ECC/NVLink/PCIe 信号、TPOT/E2E/缓存/prefill/decode 信号、prefill/decode 诊断、带守卫的 `serving.scale_prefill|decode`、成本模型，以及 S3/MinIO 制品存储。
 - **规则即代码。** `monitoring.rule_validate`、`monitoring.rule_propose`（R0）和 `monitoring.apply_via_gitops`（R2，仅通过 pull request）。
 

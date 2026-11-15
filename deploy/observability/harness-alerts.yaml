@@ -1,4 +1,4 @@
-# Prometheus alerting rules for the v2 control plane (RFC §21.3).
+# Prometheus alerting rules for the control plane (RFC §21.3).
 # Load as a rule file (rule_files: [harness-alerts.yaml]) or wrap the
 # `groups:` block in a PrometheusRule (spec.groups) for the operator.
 groups:
@@ -11,8 +11,8 @@ groups:
           summary: "An action effect is unknown ({{ $labels.cause }})"
           description: >-
             A Work action may or may not have changed its target. It is never
-            replayed automatically: inspect it (POST /v1/actions/{id}/reconcile)
-            or resolve it (POST /v1/actions/{id}/resolve).
+            replayed automatically: inspect it (POST /api/actions/{id}/reconcile)
+            or resolve it (POST /api/actions/{id}/resolve).
       - alert: HarnessActionEffectUnknownBacklog
         expr: harness_action_backlog{state=~"EFFECT_UNKNOWN|MANUAL_RECOVERY"} > 0 and harness_action_backlog_oldest_seconds{state=~"EFFECT_UNKNOWN|MANUAL_RECOVERY"} > 1800
         labels: {severity: page}
@@ -23,7 +23,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "An action that required approval was dispatched without approval or break-glass"
-          description: "Approval protection failed. Freeze action dispatch (HARNESS_ACTION_V2_ENABLED=false) and audit work_actions."
+          description: "Approval protection failed. Freeze action dispatch (HARNESS_ACTIONS_ENABLED=false) and audit work_actions."
       - alert: HarnessBreakGlassUsed
         expr: increase(harness_action_break_glass_total[5m]) > 0
         labels: {severity: ticket}
