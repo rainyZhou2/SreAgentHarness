@@ -68,7 +68,7 @@ func (e *fakeEvolution) EvaluateCandidate(context.Context, string, string, strin
 }
 
 func TestReasoningPatternEndpoints(t *testing.T) {
-	pat := memory.Memory{ID: "m1", Type: "procedural", Subject: "api:" + reasoning.PatternSubject, Status: "ACTIVE"}
+	pat := memory.Memory{ID: "m1", Type: "procedural", Subject: "api:" + reasoning.PatternSubject, Status: memory.Approved}
 	st := &fakeReasoningStore{spec: `{"reasoning":{"patterns_excluded":["m1"],"pattern_probe_rate":0.05}}`,
 		mems: map[string]memory.Memory{"m1": pat}}
 	evo := &fakeEvolution{}

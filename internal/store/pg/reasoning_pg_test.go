@@ -86,7 +86,7 @@ func TestReasoningScoresPostgres(t *testing.T) {
 	tenant := "t-" + uuid.NewString()[:8]
 	runID, stepID := seedRun(t, admin, tenant)
 	m, _, err := admin.CreateMemory(ctx, memory.NewMemory{TenantID: tenant, Scope: "service", ScopeID: "api", Type: "procedural",
-		Status: "ACTIVE", Subject: "api:" + reasoning.PatternSubject, Title: "p", Content: "c", ContentHash: uuid.NewString(),
+		Status: "APPROVED", Subject: "api:" + reasoning.PatternSubject, Title: "p", Content: "c", ContentHash: uuid.NewString(),
 		Trust: "T3", Sensitivity: "internal", CreatedBy: "test"})
 	if err != nil {
 		t.Fatalf("create memory: %v", err)

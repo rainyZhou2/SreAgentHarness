@@ -9,12 +9,10 @@ import (
 )
 
 // applyRunMemory turns a finished run's memory writes into stored memory:
-//   - user notes become (or revise, or archive) the initiator's personal
-//     memories, one per key, ACTIVE at once: they affect only that user's
-//     own runs, and the user can list, edit and delete them;
-//   - long_term notes become CANDIDATE memories (VALIDATING when feedback
-//     verified the run) that an approver activates; a disputed run
-//     proposes nothing.
+//   - user notes become, revise or revoke the initiator's approved personal
+//     memories, one per key, affecting only that user's own runs;
+//   - long_term notes become CANDIDATE memories for independent machine
+//     verification and approval; a disputed run proposes nothing.
 //
 // It is idempotent: consolidation runs again when feedback arrives.
 func (c *Consolidator) applyRunMemory(ctx context.Context, rec RunRecord, rm *domain.RunMemory, service, quality string,
@@ -45,10 +43,7 @@ func (c *Consolidator) applyRunMemory(ctx context.Context, rec RunRecord, rm *do
 	if service != "" {
 		scope, scopeID = "service", service
 	}
-	status := "CANDIDATE"
-	if quality == "VERIFIED" {
-		status = "VALIDATING"
-	}
+	status := StatusCandidate
 	for _, n := range rm.LongTerm {
 		if n.Deleted {
 			l.MemoryNotes = append(l.MemoryNotes, "agent asked to retire team memory note "+n.Key+" (left to reviewers)")
@@ -89,11 +84,7 @@ func (c *Consolidator) applyPersonal(ctx context.Context, tenantID, user string,
 		if !found {
 			return "", nil
 		}
-		from, to := cur.Status, "ARCHIVED"
-		if from != "ACTIVE" {
-			to = "REJECTED"
-		}
-		if _, err := up.TransitionMemory(ctx, tenantID, cur.ID, from, to, actor, "the user asked to forget it"); err != nil &&
+		if _, err := up.TransitionMemory(ctx, tenantID, cur.ID, cur.Status, Revoked, actor, "the user asked to forget it"); err != nil &&
 			!errors.Is(err, domain.ErrVersionConflict) {
 			return "", err
 		}
@@ -114,9 +105,8 @@ func (c *Consolidator) applyPersonal(ctx context.Context, tenantID, user string,
 		}
 		return fmt.Sprintf("personal memory %s revised to v%d", n.Key, cur.Version+1), nil
 	}
-	// New, or the same value again (reinforced by CreateMemory's dedup).
 	prepared, err := c.Writer.Prepare(ctx, NewMemory{TenantID: tenantID, Scope: "user", ScopeID: user, Type: "semantic",
-		Status: "ACTIVE", Subject: subject, Title: n.Key, Content: n.Value, SourceRefs: []string{source}, Trust: "T3",
+		Status: Approved, Subject: subject, Title: n.Key, Content: n.Value, SourceRefs: []string{source}, Trust: "T3",
 		Sensitivity: "restricted", CreatedBy: actor})
 	if errors.Is(err, ErrPoisoned) {
 		return "personal memory not stored: " + err.Error(), nil

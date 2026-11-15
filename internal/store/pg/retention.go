@@ -12,43 +12,11 @@ func (s *Store) DeletePublishedOutbox(ctx context.Context, cutoff time.Time, lim
 	return tag.RowsAffected(), err
 }
 
-type ExpiredSegment struct {
-	TenantID       string
-	ModelRequestID string
-	SegmentNo      int
-	Ref            string
-}
-
-func (s *Store) ExpiredSegments(ctx context.Context, now time.Time, limit int) ([]ExpiredSegment, error) {
-	rows, err := s.pool.Query(ctx, `SELECT tenant_id, model_request_id, segment_no, segment_ref FROM model_stream_segments
-		WHERE expires_at < $1 ORDER BY expires_at LIMIT $2`, now, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []ExpiredSegment
-	for rows.Next() {
-		var e ExpiredSegment
-		if err := rows.Scan(&e.TenantID, &e.ModelRequestID, &e.SegmentNo, &e.Ref); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) DeleteSegment(ctx context.Context, e ExpiredSegment) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM model_stream_segments WHERE model_request_id=$1 AND segment_no=$2`,
-		e.ModelRequestID, e.SegmentNo)
-	return err
-}
-
-// ExpireMemories marks ACTIVE/CANDIDATE memories past expires_at as STALE
-// (never deleted: §8 requires an auditable tombstone) and audits each change.
+// ExpireMemories marks published memories past expires_at as STALE and audits each change.
 func (s *Store) ExpireMemories(ctx context.Context, now time.Time, limit int) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `WITH expired AS (
 			UPDATE agent_memories SET status='STALE', updated_at=now()
-			WHERE id IN (SELECT id FROM agent_memories WHERE status IN ('ACTIVE','CANDIDATE','VALIDATING')
+			WHERE id IN (SELECT id FROM agent_memories WHERE status IN ('VERIFIED','APPROVED')
 				AND expires_at IS NOT NULL AND expires_at < $1 LIMIT $2)
 			RETURNING id, tenant_id)
 		INSERT INTO security_audit_log (id, tenant_id, actor_type, actor_id, action, resource_type, resource_id, outcome, details)

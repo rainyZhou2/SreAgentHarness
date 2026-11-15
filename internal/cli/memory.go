@@ -30,7 +30,7 @@ func MemoryList(ctx context.Context, c *Client, out io.Writer) error {
 	}
 	n := 0
 	for _, m := range r.Memories {
-		if m.Status != "" && m.Status != "ACTIVE" {
+		if m.Status != "" && m.Status != "APPROVED" {
 			continue
 		}
 		// The subject key is what set/rm accept (the server normalizes keys).
@@ -89,7 +89,7 @@ func MemoryRemove(ctx context.Context, c *Client, out io.Writer, key string) err
 
 // ---- learned (long-term) memory: the review queue ----
 //
-// The agent proposes long-term memories (CANDIDATE). Only ACTIVE ones are
+// The agent proposes long-term memories (CANDIDATE). Only APPROVED ones are
 // used in later runs, so someone has to review the proposals: without this
 // the agent's learning never takes effect.
 
@@ -129,10 +129,10 @@ func ListLearned(ctx context.Context, c *Client, status string) ([]Learned, erro
 	return out, nil
 }
 
-// Pending returns proposals awaiting review (CANDIDATE and VALIDATING).
+// Pending returns candidates and machine-verified memories awaiting review.
 func Pending(ctx context.Context, c *Client) ([]Learned, error) {
 	var out []Learned
-	for _, st := range []string{"CANDIDATE", "VALIDATING"} {
+	for _, st := range []string{"CANDIDATE", "VERIFIED"} {
 		l, err := ListLearned(ctx, c, st)
 		if err != nil {
 			return nil, err
@@ -142,7 +142,7 @@ func Pending(ctx context.Context, c *Client) ([]Learned, error) {
 	return out, nil
 }
 
-// Replaces finds the ACTIVE memory a proposal would supersede (same subject
+// Replaces finds the APPROVED memory a proposal would supersede (same subject
 // and scope), so a reviewer sees what changes.
 func Replaces(m Learned, active []Learned) *Learned {
 	if m.Subject == "" {
@@ -174,7 +174,7 @@ func MemoryReview(ctx context.Context, c *Client, out io.Writer) error {
 	stale, _ := ListLearned(ctx, c, "STALE")
 	defer func() {
 		if len(stale) > 0 {
-			fmt.Fprintf(out, "\nset aside (not used in runs; `harness memory approve ID` restores):\n")
+			fmt.Fprintf(out, "\nset aside (not used in runs; new evidence and machine verification are required before approval):\n")
 			for _, m := range stale {
 				fmt.Fprintf(out, "  %s  %s/%s  %s\n", shortID(m.ID), m.Scope, m.Type, m.Title)
 			}
@@ -184,7 +184,7 @@ func MemoryReview(ctx context.Context, c *Client, out io.Writer) error {
 		fmt.Fprintln(out, "nothing to review")
 		return nil
 	}
-	active, err := ListLearned(ctx, c, "ACTIVE")
+	active, err := ListLearned(ctx, c, "APPROVED")
 	if err != nil {
 		return err
 	}
@@ -236,7 +236,7 @@ func ResolveLearned(ctx context.Context, c *Client, prefix string, statuses ...s
 
 // MemoryShow prints one memory in full.
 func MemoryShow(ctx context.Context, c *Client, out io.Writer, prefix string) error {
-	m, err := ResolveLearned(ctx, c, prefix, "CANDIDATE", "VALIDATING", "ACTIVE", "STALE")
+	m, err := ResolveLearned(ctx, c, prefix, "CANDIDATE", "VERIFIED", "APPROVED", "STALE")
 	if err != nil {
 		return err
 	}
@@ -252,8 +252,8 @@ func MemoryShow(ctx context.Context, c *Client, out io.Writer, prefix string) er
 	for _, r := range m.EvidenceRefs {
 		fmt.Fprintf(out, "evidence: %s\n", r)
 	}
-	if m.Status == "CANDIDATE" || m.Status == "VALIDATING" {
-		if active, err := ListLearned(ctx, c, "ACTIVE"); err == nil {
+	if m.Status == "CANDIDATE" || m.Status == "VERIFIED" {
+		if active, err := ListLearned(ctx, c, "APPROVED"); err == nil {
 			if old := Replaces(m, active); old != nil {
 				fmt.Fprintf(out, "\nreplaces %s:\n%s\n", shortID(old.ID), old.Content)
 			}
@@ -262,18 +262,16 @@ func MemoryShow(ctx context.Context, c *Client, out io.Writer, prefix string) er
 	return nil
 }
 
-// MemoryDecide approves or rejects a proposal, or archives an active memory.
-// action is "approve", "reject" or "archive".
+// MemoryDecide approves a machine-verified memory or revokes a reviewed memory.
 func MemoryDecide(ctx context.Context, c *Client, out io.Writer, prefix, action, reason string) error {
 	var statuses []string
-	var to string
 	switch action {
-	case "approve": // also restores a memory the curator set aside (STALE)
-		statuses, to = []string{"CANDIDATE", "VALIDATING", "STALE"}, "ACTIVE"
+	case "approve":
+		statuses = []string{"VERIFIED"}
 	case "reject":
-		statuses, to = []string{"CANDIDATE", "VALIDATING"}, "REJECTED"
+		statuses = []string{"CANDIDATE", "VERIFIED"}
 	case "archive":
-		statuses, to = []string{"ACTIVE", "STALE"}, "ARCHIVED"
+		statuses = []string{"APPROVED", "STALE"}
 	default:
 		return fmt.Errorf("unknown action %q", action)
 	}
@@ -281,14 +279,16 @@ func MemoryDecide(ctx context.Context, c *Client, out io.Writer, prefix, action,
 	if err != nil {
 		return err
 	}
-	body := map[string]string{"expected_status": m.Status, "to": to, "reason": reason}
-	if err := c.Do(ctx, "POST", "/api/memories/"+url.PathEscape(m.ID)+"/transition", body, nil); err != nil {
+	path := "/api/memories/" + url.PathEscape(m.ID) + "/transition"
+	var body any = map[string]string{"expected_status": m.Status, "to": "REVOKED", "reason": reason}
+	if action == "approve" {
+		path = "/api/memories/" + url.PathEscape(m.ID) + "/approve"
+		body = map[string]int64{"expected_version": m.Version}
+	}
+	if err := c.Do(ctx, "POST", path, body, nil); err != nil {
 		return err
 	}
 	verb := map[string]string{"approve": "approved", "reject": "rejected", "archive": "archived"}[action]
-	if action == "approve" && m.Status == "STALE" {
-		verb = "restored"
-	}
 	fmt.Fprintf(out, "%s %s (%s)\n", verb, shortID(m.ID), m.Title)
 	return nil
 }
@@ -378,7 +378,7 @@ func MemorySuggestions(ctx context.Context, c *Client, out io.Writer) error {
 			}
 		}
 	}
-	fmt.Fprintf(out, "\n%d suggestion(s): harness memory apply|dismiss ID   (applying sets memories aside as STALE; restore with `approve`)\n", len(ps))
+	fmt.Fprintf(out, "\n%d suggestion(s): harness memory apply|dismiss ID   (applying sets memories aside as STALE; re-verification is required before approval)\n", len(ps))
 	return nil
 }
 

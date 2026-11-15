@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,10 +17,14 @@ import (
 // memoryRec keeps the tenant with the record; memory.Memory carries it in
 // JSON, so the plain value is enough.
 type memoryRec struct {
-	Mem memory.Memory `json:"mem"`
+	Mem       memory.Memory                    `json:"mem"`
+	ACL       []memory.ACLGrant                `json:"acl,omitempty"`
+	Conflicts map[string]memory.ConflictRecord `json:"conflicts,omitempty"`
 	// Embeddings are keyed by embedding model (Memory.Embedding is not
 	// serialized), so they survive restarts and a model switch.
-	Embeddings map[string][]float32 `json:"embeddings,omitempty"`
+	Embeddings           map[string][]float32                  `json:"embeddings,omitempty"`
+	EmbeddingDescriptors map[string]memory.EmbeddingDescriptor `json:"embedding_descriptors,omitempty"`
+	Verifications        map[string]memory.VerificationRecord  `json:"verifications,omitempty"`
 }
 
 type incidentRec struct {
@@ -33,11 +38,31 @@ type incidentRec struct {
 }
 
 func (s *Store) saveMemory(rec memoryRec) {
+	current := s.memories[rec.Mem.ID]
 	if rec.Embeddings == nil {
-		rec.Embeddings = s.memories[rec.Mem.ID].Embeddings // status changes keep the vectors
+		rec.Embeddings = current.Embeddings
+	}
+	if rec.EmbeddingDescriptors == nil {
+		rec.EmbeddingDescriptors = current.EmbeddingDescriptors
+	}
+	if rec.ACL == nil {
+		rec.ACL = current.ACL
+	}
+	if rec.Verifications == nil {
+		rec.Verifications = current.Verifications
+	}
+	if rec.Conflicts == nil {
+		rec.Conflicts = current.Conflicts
 	}
 	s.memories[rec.Mem.ID] = rec
 	s.put("memory", rec.Mem.ID, rec.Mem.TenantID, 0, rec)
+}
+
+func newMemoryEmbeddingKey(m memory.NewMemory) string {
+	if key := m.EmbeddingDescriptor.Key(); key != "" {
+		return key
+	}
+	return m.EmbeddingModel
 }
 
 func (s *Store) saveIncident(v incidentRec) {
@@ -45,22 +70,11 @@ func (s *Store) saveIncident(v incidentRec) {
 	s.put("incident", v.ID, v.TenantID, 0, v)
 }
 
-var memoryTransitions = map[string][]string{
-	"CANDIDATE":  {"VALIDATING", "ACTIVE", "REJECTED"},
-	"VALIDATING": {"ACTIVE", "REJECTED"},
-	"ACTIVE":     {"STALE", "SUPERSEDED", "ARCHIVED"},
-	"STALE":      {"ACTIVE", "ARCHIVED"},
-	"SUPERSEDED": {"ARCHIVED"},
-	"REJECTED":   {"ARCHIVED"},
-}
-
 func allowedMemoryTransition(from, to string) bool {
-	for _, t := range memoryTransitions[from] {
-		if t == to {
-			return true
-		}
+	if to == memory.Verified || to == memory.Approved || to == memory.Superseded {
+		return false
 	}
-	return false
+	return memory.CanTransition(from, to)
 }
 
 func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Memory, bool, error) {
@@ -69,7 +83,7 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 	for _, rec := range s.memories {
 		cur := rec.Mem
 		if cur.TenantID == m.TenantID && cur.Scope == m.Scope && cur.ScopeID == m.ScopeID &&
-			cur.ContentHash == m.ContentHash && cur.Status != "REJECTED" && cur.Status != "ARCHIVED" {
+			cur.ContentHash == m.ContentHash && cur.Status != memory.Revoked && cur.Status != memory.Superseded {
 			return s.reinforceLocked(rec, m.SourceRefs), false, nil
 		}
 	}
@@ -82,7 +96,7 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 			memory.StatusRank(cur.Status) < 0 || memory.StatusRank(cur.Status) < memory.StatusRank(m.Status) {
 			continue
 		}
-		if memory.NearDuplicate(m, cur, rec.Embeddings[m.EmbeddingModel]) && (near == nil || cur.UpdatedAt.After(near.Mem.UpdatedAt)) {
+		if memory.NearDuplicate(m, cur, rec.Embeddings[newMemoryEmbeddingKey(m)]) && (near == nil || cur.UpdatedAt.After(near.Mem.UpdatedAt)) {
 			r := rec
 			near = &r
 		}
@@ -96,18 +110,20 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 		ContentRef: m.ContentRef, ContentHash: m.ContentHash, SourceRefs: m.SourceRefs, EvidenceRefs: m.EvidenceRefs,
 		Trust: m.Trust, Sensitivity: m.Sensitivity, Confidence: m.Confidence, VerifiedBy: m.VerifiedBy,
 		Environment: m.Environment, ExpiresAt: m.ExpiresAt, CreatedBy: m.CreatedBy, CreatedAt: now, UpdatedAt: now,
-		Embedding: m.Embedding, EmbeddingModel: m.EmbeddingModel, Applicability: m.Applicability}
-	rec := memoryRec{Mem: mem}
-	if len(m.Embedding) > 0 && m.EmbeddingModel != "" {
-		rec.Embeddings = map[string][]float32{m.EmbeddingModel: m.Embedding}
+		Embedding: m.Embedding, EmbeddingModel: m.EmbeddingModel, EmbeddingDescriptor: m.EmbeddingDescriptor,
+		EmbeddingVersion: m.EmbeddingDescriptor.Version, Applicability: m.Applicability}
+	memory.ApplyOwnerPreferencePublication(&mem, now)
+	rec := memoryRec{Mem: mem, ACL: initialMemoryACL(m, mem.ID)}
+	if key := newMemoryEmbeddingKey(m); len(m.Embedding) > 0 && key != "" {
+		rec.Embeddings = map[string][]float32{key: m.Embedding}
+		if m.EmbeddingDescriptor.Valid() {
+			rec.EmbeddingDescriptors = map[string]memory.EmbeddingDescriptor{key: m.EmbeddingDescriptor}
+		}
 	}
 	s.saveMemory(rec)
 	shards := stringShards(m)
 	s.shards[mem.ID] = shards
 	s.put("shard", mem.ID, mem.TenantID, 0, shards)
-	if mem.Status == "ACTIVE" {
-		s.supersedeSubjectLocked(mem.TenantID, mem.ID, mem.Scope, mem.ScopeID, mem.Subject)
-	}
 	return mem, true, nil
 }
 
@@ -165,17 +181,24 @@ func (s *Store) UpdateMemory(_ context.Context, r memory.Revision) (memory.Memor
 	}
 	for id, o := range s.memories {
 		if id != cur.ID && o.Mem.TenantID == cur.TenantID && o.Mem.Scope == cur.Scope && o.Mem.ScopeID == cur.ScopeID &&
-			o.Mem.ContentHash == p.ContentHash && o.Mem.Status != "REJECTED" && o.Mem.Status != "ARCHIVED" {
+			o.Mem.ContentHash == p.ContentHash && o.Mem.Status != memory.Revoked && o.Mem.Status != memory.Superseded {
 			return memory.Memory{}, &domain.RejectedError{Reason: "duplicate_content_of_" + id}
 		}
 	}
 	cur.Title, cur.Content, cur.ContentRef, cur.ContentHash = p.Title, p.Content, p.ContentRef, p.ContentHash
-	cur.SourceRefs, cur.EvidenceRefs, cur.Version, cur.UpdatedAt = p.SourceRefs, p.EvidenceRefs, cur.Version+1, now()
+	updatedAt := now()
+	cur.SourceRefs, cur.EvidenceRefs, cur.Version, cur.UpdatedAt = p.SourceRefs, p.EvidenceRefs, cur.Version+1, updatedAt
+	memory.ApplyRevisionPublication(&cur, p, updatedAt)
 	emb := map[string][]float32{}
-	if len(p.Embedding) > 0 && p.EmbeddingModel != "" {
-		emb[p.EmbeddingModel] = p.Embedding // vectors of the old version no longer apply
+	descriptors := map[string]memory.EmbeddingDescriptor{}
+	cur.EmbeddingDescriptor, cur.EmbeddingVersion = p.EmbeddingDescriptor, p.EmbeddingDescriptor.Version
+	if key := newMemoryEmbeddingKey(p); len(p.Embedding) > 0 && key != "" {
+		emb[key] = p.Embedding
+		if p.EmbeddingDescriptor.Valid() {
+			descriptors[key] = p.EmbeddingDescriptor
+		}
 	}
-	s.saveMemory(memoryRec{Mem: cur, Embeddings: emb})
+	s.saveMemory(memoryRec{Mem: cur, Embeddings: emb, EmbeddingDescriptors: descriptors})
 	return cur, nil
 }
 
@@ -192,7 +215,7 @@ func (s *Store) RunInitiator(_ context.Context, tenantID, runID string) (string,
 	return *r.InitiatorID, nil
 }
 
-func (s *Store) PersonalMemories(_ context.Context, tenantID, userID string, limit int) ([]memory.Memory, error) {
+func (s *Store) PersonalMemories(ctx context.Context, tenantID, userID string, limit int) ([]memory.Memory, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 || limit > 200 {
@@ -201,7 +224,8 @@ func (s *Store) PersonalMemories(_ context.Context, tenantID, userID string, lim
 	var out []memory.Memory
 	for _, rec := range s.memories {
 		m := rec.Mem
-		if m.TenantID == tenantID && m.Scope == "user" && m.ScopeID == userID && m.Status == "ACTIVE" &&
+		if m.TenantID == tenantID && m.Scope == "user" && m.ScopeID == userID &&
+			memory.RecallStatus(m.Status, m.Type) && s.memoryReadableLocked(ctx, rec) &&
 			(m.ExpiresAt == nil || m.ExpiresAt.After(now())) {
 			out = append(out, m)
 		}
@@ -233,19 +257,6 @@ func stringShards(m memory.NewMemory) []domain.MemoryShard {
 	return out
 }
 
-func (s *Store) supersedeSubjectLocked(tenantID, keepID, scope, scopeID, subject string) {
-	for id, rec := range s.memories {
-		m := rec.Mem
-		if id == keepID || m.TenantID != tenantID || m.Scope != scope || m.ScopeID != scopeID ||
-			m.Subject != subject || m.Status != "ACTIVE" {
-			continue
-		}
-		keep := keepID
-		m.Status, m.SupersededBy, m.UpdatedAt = "SUPERSEDED", &keep, now()
-		s.saveMemory(memoryRec{Mem: m})
-	}
-}
-
 func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, actor, reason string) (memory.Memory, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -260,27 +271,10 @@ func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, ac
 	if !allowedMemoryTransition(cur.Status, to) {
 		return memory.Memory{}, &domain.RejectedError{Reason: fmt.Sprintf("invalid_transition_%s_to_%s", cur.Status, to)}
 	}
-	if to == "ACTIVE" {
-		if err := memory.CanPromote(cur, actor); err != nil {
-			return memory.Memory{}, &domain.RejectedError{Reason: "playbook_promotion: " + err.Error()}
-		}
-	}
-	trust := cur.Trust
-	var verifier *string
-	if to == "ACTIVE" {
-		verifier = &actor
-		if trust == "T3" {
-			trust = "T2"
-		}
-	}
-	cur.Status, cur.Trust, cur.UpdatedAt = to, trust, now()
-	if verifier != nil {
-		cur.VerifiedBy = verifier
-	}
+	cur.Status, cur.UpdatedAt = to, now()
 	s.saveMemory(memoryRec{Mem: cur})
-	if to == "ACTIVE" {
-		s.supersedeSubjectLocked(tenantID, id, cur.Scope, cur.ScopeID, cur.Subject)
-	}
+	s.put("memory_audit", newID(), tenantID, 0, map[string]any{"action": "memory.transition", "memory_id": id,
+		"from": from, "to": to, "actor": actor, "reason": reason})
 	return cur, nil
 }
 
@@ -288,7 +282,7 @@ func (s *Store) GetMemory(ctx context.Context, tenantID, id string) (memory.Memo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.memories[id]
-	if !ok || rec.Mem.TenantID != tenantID {
+	if !ok || rec.Mem.TenantID != tenantID || !s.memoryReadableLocked(ctx, rec) {
 		return memory.Memory{}, domain.ErrNotFound
 	}
 	return rec.Mem, nil
@@ -304,7 +298,7 @@ func (s *Store) ListMemories(ctx context.Context, tenantID string, f pg.MemoryFi
 	var out []memory.Memory
 	for _, rec := range s.memories {
 		m := rec.Mem
-		if m.TenantID != tenantID {
+		if m.TenantID != tenantID || !s.memoryReadableLocked(ctx, rec) {
 			continue
 		}
 		if f.Status != "" && m.Status != f.Status {
@@ -352,10 +346,15 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 	text := strings.ToLower(strings.TrimSpace(q.Text))
 	// Tokenize splits CJK text into bigrams, so Chinese queries match by part.
 	terms := uniqueTerms(memory.Tokenize(text), 32)
+	embeddingKey := q.EmbeddingDescriptor.Key()
+	if embeddingKey == "" {
+		embeddingKey = q.EmbeddingModel
+	}
 	var out []memory.Candidate
 	for _, rec := range s.memories {
 		m := rec.Mem
-		if m.TenantID != q.TenantID || m.Status != "ACTIVE" || !allowed[m.Sensitivity] {
+		if m.TenantID != q.TenantID || !memory.RecallStatus(m.Status, m.Type) || !allowed[m.Sensitivity] ||
+			!s.memoryReadableLocked(ctx, rec) {
 			continue
 		}
 		if m.ExpiresAt != nil && !m.ExpiresAt.After(now()) {
@@ -392,7 +391,14 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 				}
 			}
 		}
-		m.Embedding = rec.Embeddings[q.EmbeddingModel]
+		m.Embedding = rec.Embeddings[embeddingKey]
+		m.EmbeddingDescriptor = rec.EmbeddingDescriptors[embeddingKey]
+		if len(m.Embedding) > 0 && !m.EmbeddingDescriptor.Valid() && q.EmbeddingDescriptor.Valid() {
+			legacy := memory.LegacyEmbeddingDescriptor(q.EmbeddingModel, len(m.Embedding))
+			if legacy.Comparable(q.EmbeddingDescriptor) {
+				m.EmbeddingDescriptor = legacy
+			}
+		}
 		out = append(out, memory.Candidate{Memory: m, FTSRank: rank, ShardWeight: shardWeight})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -530,9 +536,9 @@ func (s *Store) PutFeedback(ctx context.Context, tenantID, runID string, f memor
 	// up the verdict, as the server does.
 	s.requeueConsolidationLocked(tenantID, runID)
 	if f.RootCauseCorrect != nil {
-		moves := [][2]string{{"CANDIDATE", "VALIDATING"}}
+		moves := [][2]string{}
 		if !*f.RootCauseCorrect {
-			moves = [][2]string{{"CANDIDATE", "REJECTED"}, {"VALIDATING", "REJECTED"}, {"ACTIVE", "STALE"}}
+			moves = [][2]string{{memory.StatusCandidate, memory.Revoked}, {memory.Verified, memory.Stale}, {memory.Approved, memory.Stale}}
 		}
 		for _, rec := range s.memories {
 			m := rec.Mem
@@ -671,24 +677,22 @@ func uniqueTerms(in []string, max int) []string {
 
 var _ memory.IndexStore = (*Store)(nil)
 
-// MemoriesToIndex returns live memories without an embedding of the given
-// model. Local full-text search tokenizes at query time, so no search
-// terms are stored.
-func (s *Store) MemoriesToIndex(_ context.Context, model string, limit int) ([]memory.IndexItem, error) {
+func (s *Store) MemoriesToIndex(_ context.Context, descriptor memory.EmbeddingDescriptor, limit int) ([]memory.IndexItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if model == "" {
+	if !descriptor.Valid() {
 		return nil, nil
 	}
+	key := descriptor.Key()
 	var out []memory.IndexItem
 	for _, rec := range s.memories {
 		m := rec.Mem
 		switch m.Status {
-		case "ACTIVE", "CANDIDATE", "VALIDATING", "STALE":
+		case memory.StatusCandidate, memory.Verified, memory.Approved, memory.Contested, memory.Stale:
 		default:
 			continue
 		}
-		if _, ok := rec.Embeddings[model]; ok {
+		if _, ok := rec.Embeddings[key]; ok {
 			continue
 		}
 		out = append(out, memory.IndexItem{TenantID: m.TenantID, ID: m.ID, Version: m.Version, Title: m.Title,
@@ -701,20 +705,28 @@ func (s *Store) MemoriesToIndex(_ context.Context, model string, limit int) ([]m
 	return out, nil
 }
 
-func (s *Store) PutMemoryIndex(_ context.Context, it memory.IndexItem, model string, emb []float32, _ string) error {
-	if len(emb) == 0 || model == "" {
+func (s *Store) PutMemoryIndex(_ context.Context, it memory.IndexItem, descriptor memory.EmbeddingDescriptor, emb []float32, _ string) error {
+	if !descriptor.Matches(emb) {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.memories[it.ID]
-	if !ok || rec.Mem.TenantID != it.TenantID {
+	if !ok || rec.Mem.TenantID != it.TenantID || rec.Mem.Version != it.Version {
 		return nil
 	}
 	if rec.Embeddings == nil {
 		rec.Embeddings = map[string][]float32{}
 	}
-	rec.Embeddings[model] = emb
+	if rec.EmbeddingDescriptors == nil {
+		rec.EmbeddingDescriptors = map[string]memory.EmbeddingDescriptor{}
+	}
+	key := descriptor.Key()
+	if existing, ok := rec.Embeddings[key]; ok && slices.Equal(existing, emb) {
+		return nil
+	}
+	rec.Embeddings[key] = append([]float32(nil), emb...)
+	rec.EmbeddingDescriptors[key] = descriptor
 	s.saveMemory(rec)
 	return nil
 }

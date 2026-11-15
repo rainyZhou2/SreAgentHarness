@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/memory"
 )
 
 // capNodeRec keeps the tenant next to the node: CapabilityNode hides TenantID
@@ -420,7 +421,7 @@ func (s *Store) ServiceCapabilityNotes(ctx context.Context, tenantID string, ser
 		var lessonAt time.Time
 		for _, mem := range s.memories {
 			m := mem.Mem
-			if m.TenantID != tenantID || m.Status != "ACTIVE" || m.Sensitivity == "restricted" || m.Trust == "T4" {
+			if m.TenantID != tenantID || !memory.RecallStatus(m.Status, m.Type) || m.Sensitivity == "restricted" || m.Trust == "T4" || !s.memoryReadableLocked(ctx, mem) {
 				continue
 			}
 			if m.ExpiresAt != nil && !m.ExpiresAt.After(now()) {

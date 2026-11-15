@@ -4,8 +4,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"go-sre-harness/internal/store/pg"
 )
 
 type fakeStore struct{ reasoningCutoff time.Time }
@@ -13,10 +11,13 @@ type fakeStore struct{ reasoningCutoff time.Time }
 func (f *fakeStore) DeletePublishedOutbox(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
 }
-func (f *fakeStore) ExpiredSegments(context.Context, time.Time, int) ([]pg.ExpiredSegment, error) {
+func (f *fakeStore) ClaimArtifacts(context.Context, time.Time, int, time.Duration) ([]ArtifactClaim, error) {
 	return nil, nil
 }
-func (f *fakeStore) DeleteSegment(context.Context, pg.ExpiredSegment) error        { return nil }
+func (f *fakeStore) ConfirmArtifactDeleted(context.Context, ArtifactClaim) error { return nil }
+func (f *fakeStore) RetryArtifact(context.Context, ArtifactClaim, time.Time, string) error {
+	return nil
+}
 func (f *fakeStore) ExpireMemories(context.Context, time.Time, int) (int64, error) { return 0, nil }
 func (f *fakeStore) DeleteOldAudit(context.Context, time.Time, int) (int64, error) { return 0, nil }
 func (f *fakeStore) DeleteOldReasoningScores(_ context.Context, c time.Time, _ int) (int64, error) {

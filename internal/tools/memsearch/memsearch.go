@@ -24,9 +24,13 @@ const Name = domain.MemorySearchToolName
 // MaxContentRunes bounds each hit's content in the observation.
 const MaxContentRunes = 1500
 
+type Searcher interface {
+	Search(ctx context.Context, tenantID, runID, query string, extra []string, k int) (memory.SearchResult, error)
+}
+
 // Tool searches the tenant's ACTIVE memories with the retrieval pipeline.
 type Tool struct {
-	Retriever *memory.Retriever
+	Retriever Searcher
 }
 
 func (Tool) Descriptor() tools.Descriptor {

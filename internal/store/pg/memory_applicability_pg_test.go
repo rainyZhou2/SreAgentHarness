@@ -19,7 +19,7 @@ func TestMemoryApplicabilityAndPlaybookPromotionPG(t *testing.T) {
 	m, _, err := app.CreateMemory(tctx, memory.NewMemory{TenantID: tenant, Scope: "service", ScopeID: "checkout",
 		Type: "procedural", Status: "CANDIDATE", Subject: "playbook:incident:deployment", Title: "Roll back bad deploy",
 		Content: "1. deployment.rollback", ContentHash: "h-" + tenant, ContentRef: "ref", Trust: "T3", Sensitivity: "internal",
-		CreatedBy: "alice", Applicability: &memory.Applicability{Kind: "playbook", Services: []string{"checkout"},
+		EvidenceRefs: []string{"evidence:initial"}, CreatedBy: "alice", Applicability: &memory.Applicability{Kind: "playbook", Services: []string{"checkout"},
 			VersionConstraints: []string{"kubernetes>=1.28"}, RiskOfReuse: "high", SourceWorkIDs: []string{"w1"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +27,13 @@ func TestMemoryApplicabilityAndPlaybookPromotionPG(t *testing.T) {
 	if m.Applicability == nil || m.Applicability.Kind != "playbook" || m.Applicability.VersionConstraints[0] != "kubernetes>=1.28" {
 		t.Fatalf("applicability: %+v", m.Applicability)
 	}
-	if _, err := app.TransitionMemory(tctx, tenant, m.ID, "CANDIDATE", "ACTIVE", "bob", "lgtm"); err == nil {
+	if _, err := app.ApproveMemory(tctx, tenant, m.ID, m.Version, "bob"); err == nil {
+		t.Fatal("approved without machine verification")
+	}
+	if _, _, err := app.VerifyMemory(tctx, memory.VerificationInputFor(m, "decision:initial", "outcome:initial"), "service:verifier", "verify-"+tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ApproveMemory(tctx, tenant, m.ID, m.Version, "bob"); err == nil {
 		t.Fatal("promoted without a verified success")
 	}
 	for i, w := range []string{"w1", "w1", "w2"} {
@@ -40,14 +46,14 @@ func TestMemoryApplicabilityAndPlaybookPromotionPG(t *testing.T) {
 	if counted, err := app.RecordMemoryOutcome(WithTenant(ctx, "x-"+tenant), "x-"+tenant, m.ID, "w9", false, ""); err != nil || counted {
 		t.Fatalf("cross-tenant record: %v %v", counted, err)
 	}
-	if _, err := app.TransitionMemory(tctx, tenant, m.ID, "CANDIDATE", "ACTIVE", "alice", "self"); err == nil {
+	if _, err := app.ApproveMemory(tctx, tenant, m.ID, m.Version, "alice"); err == nil {
 		t.Fatal("self-promotion accepted")
 	}
-	got, err := app.TransitionMemory(tctx, tenant, m.ID, "CANDIDATE", "ACTIVE", "bob", "lgtm")
+	got, err := app.ApproveMemory(tctx, tenant, m.ID, m.Version, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != "ACTIVE" || got.Verification.SuccessCount != 2 || got.Verification.LastVerifiedAt == nil {
+	if got.Status != "APPROVED" || got.Verification.SuccessCount != 2 || got.Verification.LastVerifiedAt == nil {
 		t.Fatalf("promoted: %+v", got)
 	}
 	upd, err := admin.SetMemoryApplicability(ctx, tenant, m.ID, "carol", memory.Applicability{Kind: "playbook", Environments: []string{"prod"}})

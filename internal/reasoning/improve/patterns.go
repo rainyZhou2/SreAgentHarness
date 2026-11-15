@@ -9,6 +9,7 @@ import (
 
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eval"
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning"
 )
@@ -52,7 +53,7 @@ func PlanExclusions(ctx context.Context, st Store, tenant string, current []stri
 		excluded[id] = true
 		m, err := st.GetMemory(ctx, tenant, id)
 		switch {
-		case errors.Is(err, domain.ErrNotFound) || (err == nil && m.Status != "ACTIVE"):
+		case errors.Is(err, domain.ErrNotFound) || (err == nil && !memory.RecallStatus(m.Status, m.Type)):
 			plan.Pruned = append(plan.Pruned, id)
 			continue
 		case err != nil:
@@ -76,7 +77,7 @@ func PlanExclusions(ctx context.Context, st Store, tenant string, current []stri
 			continue
 		}
 		m, err := st.GetMemory(ctx, tenant, s.MemoryID)
-		if err != nil || m.Status != "ACTIVE" || !reasoning.IsPattern(m) {
+		if err != nil || !memory.RecallStatus(m.Status, m.Type) || !reasoning.IsPattern(m) {
 			continue
 		}
 		retire = append(retire, PatternDecision{MemoryID: s.MemoryID, Basis: basis, Effect: *ef})

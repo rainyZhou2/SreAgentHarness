@@ -148,3 +148,13 @@ func TestMuxKeepsOldRefsReadable(t *testing.T) {
 		t.Fatalf("unknown scheme: %v", err)
 	}
 }
+
+func TestS3ManagedRetentionRejectsIndependentLifecycleClass(t *testing.T) {
+	_, err := NewS3(S3Config{Endpoint: "https://s3.example.com", Bucket: "harness", ManagedRetention: true, RetentionClass: "30d"})
+	if err == nil {
+		t.Fatal("managed database retention must not authorize an independent bucket lifecycle")
+	}
+	if _, err := NewS3(S3Config{Endpoint: "https://s3.example.com", Bucket: "harness", ManagedRetention: true}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -26,5 +26,16 @@ type adapter struct{ MemoryStore }
 func Memories(s MemoryStore) curate.Memories { return adapter{s} }
 
 func (a adapter) ActiveMemories(ctx context.Context, tenantID string, limit int) ([]memory.Memory, error) {
-	return a.ListMemories(ctx, tenantID, pg.MemoryFilter{Status: "ACTIVE", Limit: limit})
+	var out []memory.Memory
+	for _, status := range []string{memory.Verified, memory.Approved} {
+		items, err := a.ListMemories(ctx, tenantID, pg.MemoryFilter{Status: status, Limit: limit})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

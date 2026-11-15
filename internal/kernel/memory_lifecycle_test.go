@@ -38,7 +38,7 @@ func TestWorkerCarriesCurrentMemoryEnvironmentToPinnedContext(t *testing.T) {
 			env := newLoopEnv(t, kernel.Config{Memory: retriever}, agent, "", nil)
 			retriever.Store, retriever.Artifacts = env.st, env.arts
 			prod := "prod"
-			_, _, err := env.st.CreateMemory(ctx, memory.NewMemory{TenantID: "t1", Scope: "organization", Type: "semantic", Status: "ACTIVE", Subject: "checkout", Title: "checkout slow", Content: "checkout is slow", ContentHash: "env-memory", Trust: "T2", Sensitivity: "internal", Environment: &prod, Applicability: &memory.Applicability{RiskOfReuse: "high", VersionConstraints: []string{"driver>=550"}}})
+			_, _, err := env.st.CreateMemory(ctx, memory.NewMemory{TenantID: "t1", Scope: "organization", Type: "semantic", Status: memory.Verified, Subject: "checkout", Title: "checkout slow", Content: "checkout is slow", ContentHash: "env-memory", Trust: "T2", Sensitivity: "internal", Environment: &prod, Applicability: &memory.Applicability{RiskOfReuse: "high", VersionConstraints: []string{"driver>=550"}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,7 +79,7 @@ func TestHistoricalMemorySearchRevalidatesWithoutChangingAudit(t *testing.T) {
 					if len(in.RecalledMemories) != 1 {
 						t.Fatalf("active search missing: %+v", in.RecalledMemories)
 					}
-					if _, err := env.st.TransitionMemory(ctx, "t1", memoryID, "ACTIVE", "STALE", "reviewer", "retracted"); err != nil {
+					if _, err := env.st.TransitionMemory(ctx, "t1", memoryID, memory.Verified, "STALE", "reviewer", "retracted"); err != nil {
 						t.Fatal(err)
 					}
 					return toolDecision("metrics.b", `{}`), nil
@@ -97,7 +97,7 @@ func TestHistoricalMemorySearchRevalidatesWithoutChangingAudit(t *testing.T) {
 			}}
 			env = newLoopEnv(t, kernel.Config{Memory: retriever, CompactEvery: -1, CompactTokens: -1}, agent, "", nil, memsearch.Tool{Retriever: retriever}, fixedTool{name: "metrics.a", out: `{"a":1}`}, fixedTool{name: "metrics.b", out: `{"b":1}`})
 			retriever.Store, retriever.Artifacts = env.st, env.arts
-			m, _, err := env.st.CreateMemory(ctx, memory.NewMemory{TenantID: "t1", Scope: "organization", Type: "semantic", Status: "ACTIVE", Subject: "checkout", Title: "checkout", Content: "checkout obsolete advice", ContentHash: "recall-memory", Trust: "T2", Sensitivity: "internal"})
+			m, _, err := env.st.CreateMemory(ctx, memory.NewMemory{TenantID: "t1", Scope: "organization", Type: "semantic", Status: memory.Verified, Subject: "checkout", Title: "checkout", Content: "checkout obsolete advice", ContentHash: "recall-memory", Trust: "T2", Sensitivity: "internal"})
 			if err != nil {
 				t.Fatal(err)
 			}

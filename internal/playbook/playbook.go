@@ -191,7 +191,8 @@ func (s *Service) Propose(ctx context.Context, req ProposeRequest) (memory.Memor
 	if _, err := s.Memories.RecordMemoryOutcome(ctx, req.TenantID, m.ID, w.ID, true, v.EvaluationID); err != nil {
 		return m, err
 	}
-	return s.Memories.GetMemory(ctx, req.TenantID, m.ID)
+	access := memory.WithAccessContext(ctx, memory.AccessContext{TenantID: req.TenantID, Subjects: []string{"user:" + req.ActorID}})
+	return s.Memories.GetMemory(access, req.TenantID, m.ID)
 }
 
 // riskOf derives the reuse risk from the most dangerous applied action.
@@ -283,6 +284,7 @@ func Content(w work.Work, acts []action.Record, e outcome.Evaluation) string {
 // RCA memory its runs retrieved. It is idempotent (per memory and Work)
 // and best-effort: errors are returned for the caller to log or retry.
 func (s *Service) WorkClosed(ctx context.Context, w work.Work) (int, error) {
+	ctx = memory.WithAccessContext(ctx, memory.AccessContext{TenantID: w.TenantID, Subjects: []string{"role:service"}})
 	evals, err := s.Works.ListOutcomes(ctx, w.TenantID, w.ID, 5)
 	if err != nil {
 		return 0, err

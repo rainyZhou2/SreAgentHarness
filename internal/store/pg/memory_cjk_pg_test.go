@@ -14,8 +14,9 @@ func TestMemoryCJKSearchAndIndexPG(t *testing.T) {
 	admin, _, _ := pgTestStores(t)
 	ctx := context.Background()
 	tenant := "t-" + uuid.NewString()[:8]
+	ctx = memory.WithAccessContext(ctx, memory.AccessContext{TenantID: tenant, Subjects: []string{"role:admin"}})
 	w := memory.Writer{Embedder: memory.HashingEmbedder{Dims: 16}, Artifacts: artifact.NewMemory()}
-	p, err := w.Prepare(ctx, memory.NewMemory{TenantID: tenant, Scope: "organization", Type: "episodic", Status: "ACTIVE",
+	p, err := w.Prepare(ctx, memory.NewMemory{TenantID: tenant, Scope: "organization", Type: "episodic", Status: "VERIFIED",
 		Title: "数据库连接池耗尽", Content: "订单服务高峰期连接池打满", Subject: "db", Trust: "T2", Sensitivity: "internal",
 		CreatedBy: "test"})
 	if err != nil {
@@ -26,7 +27,7 @@ func TestMemoryCJKSearchAndIndexPG(t *testing.T) {
 		t.Fatal(err)
 	}
 	cands, err := admin.MemoryCandidates(ctx, memory.CandidateQuery{TenantID: tenant, Text: "连接池耗尽了怎么办",
-		EmbeddingModel: "hash-uni-bigram-v2-16", MaxSensitivity: "internal"})
+		EmbeddingDescriptor: (memory.HashingEmbedder{Dims: 16}).Descriptor(), MaxSensitivity: "internal"})
 	if err != nil || len(cands) != 1 || cands[0].FTSRank <= 0 || len(cands[0].Embedding) != 16 {
 		t.Fatalf("CJK full-text: %v %+v", err, cands)
 	}
@@ -44,11 +45,11 @@ func TestMemoryCJKSearchAndIndexPG(t *testing.T) {
 		t.Fatal(err)
 	}
 	cands, err = admin.MemoryCandidates(ctx, memory.CandidateQuery{TenantID: tenant, Text: "耗尽",
-		EmbeddingModel: neu.Model(), MaxSensitivity: "internal"})
+		EmbeddingDescriptor: neu.Descriptor(), MaxSensitivity: "internal"})
 	if err != nil || len(cands) != 1 || cands[0].FTSRank <= 0 || len(cands[0].Embedding) != 24 {
 		t.Fatalf("after indexing: %v %+v", err, cands)
 	}
-	items, _ := admin.MemoriesToIndex(ctx, neu.Model(), 1000)
+	items, _ := admin.MemoriesToIndex(ctx, neu.Descriptor(), 1000)
 	for _, it := range items {
 		if it.ID == m.ID {
 			t.Fatal("indexed memory listed again")

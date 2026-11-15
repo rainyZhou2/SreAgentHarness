@@ -195,9 +195,9 @@ tool_overlays: {}
 #          endpoint_ref: internal, allowed_scope: ["service://prod"]}
 # plugins:
 #   artifact_store:                    # S3 / MinIO, with old fs:// refs still readable
-#     name: s3
+#     name: s3                           # Disable bucket lifecycle expiry for this prefix; DB holds govern deletion.
 #     config: {endpoint: "https://s3.eu-west-1.amazonaws.com", region: eu-west-1, bucket: harness, prefix: prod,
-#              encryption: "aws:kms", kms_key_id: alias/harness, retention_class: incident, legacy_fs_root: /var/lib/harness/artifacts}
+#              encryption: "aws:kms", kms_key_id: alias/harness, managed_retention: true, legacy_fs_root: /var/lib/harness/artifacts}
 #   work_extension:
 #     - name: sre
 #       config:

@@ -243,7 +243,7 @@ func OutcomeBoost(v Verification) float64 {
 }
 
 // CanPromote checks the promotion rules of a procedural memory sourced
-// from Works (§14.3 ⑤ ⑥): a playbook becomes ACTIVE only after at least
+// from Works (§14.3 ⑤ ⑥): a playbook becomes APPROVED only after at least
 // one machine-verified success, with no failure majority, approved by a
 // reviewer who did not create it.
 func CanPromote(m Memory, actor string) error {

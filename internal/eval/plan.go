@@ -274,14 +274,24 @@ func (s *Service) ReplayPlans(ctx context.Context, tenantID, datasetID, split st
 	}
 	sort.Slice(report.Cases, func(i, j int) bool { return report.Cases[i].Key < report.Cases[j].Key })
 	report.ByVariant = summarizePlans(report.Cases)
-	if s.Artifacts != nil {
-		if data, err := json.Marshal(report); err == nil {
-			if ref, _, err := s.Artifacts.Put(ctx, tenantID, "plan-replay-report", data); err == nil {
-				report.ReportRef = ref
-			}
-		}
+	data, err := json.Marshal(report)
+	if err != nil {
+		return PlanReplayReport{}, err
 	}
+	ref, err := s.putReplayReport(ctx, tenantID, data)
+	if err != nil {
+		return PlanReplayReport{}, err
+	}
+	report.ReportRef = ref
 	return report, nil
+}
+
+func (s *Service) putReplayReport(ctx context.Context, tenantID string, data []byte) (string, error) {
+	if s.ReplayArtifacts == nil {
+		return "", nil
+	}
+	ref, _, err := s.ReplayArtifacts.Put(ctx, tenantID, "plan-replay-report", data)
+	return ref, err
 }
 
 func (s *Service) replayPlanCase(c Case) PlanCaseResult {

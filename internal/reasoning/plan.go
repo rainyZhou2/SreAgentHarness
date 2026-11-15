@@ -156,10 +156,7 @@ func DistillPlanExemplar(run domain.Run, goal, service string, p *planArt, pm *P
 		title += " for " + service
 	}
 	title += ": " + clip(oneLine(goal), 100)
-	status := "CANDIDATE"
-	if quality == "VERIFIED" || (correct != nil && *correct) {
-		status = "VALIDATING"
-	}
+	status := memory.StatusCandidate
 	conf := 0.6
 	if correct != nil && *correct {
 		conf = 0.8

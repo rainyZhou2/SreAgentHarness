@@ -97,16 +97,19 @@ type fakeIndex struct {
 	put   map[string]string
 }
 
-func (f *fakeIndex) MemoriesToIndex(_ context.Context, model string, limit int) ([]IndexItem, error) {
+func (f *fakeIndex) MemoriesToIndex(_ context.Context, descriptor EmbeddingDescriptor, limit int) ([]IndexItem, error) {
 	return f.items, nil
 }
-func (f *fakeIndex) PutMemoryIndex(_ context.Context, it IndexItem, model string, emb []float32, terms string) error {
-	f.put[it.ID] = model + "|" + terms + "|" + strings.Repeat("x", len(emb))
+func (f *fakeIndex) PutMemoryIndex(_ context.Context, it IndexItem, descriptor EmbeddingDescriptor, emb []float32, terms string) error {
+	f.put[it.ID] = descriptor.Model + "|" + terms + "|" + strings.Repeat("x", len(emb))
 	return nil
 }
 
 type nilEmbedder struct{}
 
+func (nilEmbedder) Descriptor() EmbeddingDescriptor {
+	return EmbeddingDescriptor{Model: "dead", Version: "v1", Dimensions: 1}
+}
 func (nilEmbedder) Model() string          { return "dead" }
 func (nilEmbedder) Embed(string) []float32 { return nil }
 
@@ -116,7 +119,7 @@ func TestIndexer(t *testing.T) {
 		{ID: "b", Title: "x", NeedEmbedding: true},
 	}}
 	n, err := (&Indexer{Store: f, Embedder: HashingEmbedder{Dims: 4}}).Tick(context.Background())
-	if err != nil || n != 2 || f.put["a"] != "hash-uni-bigram-v2-4|连接 接池|xxxx" {
+	if err != nil || n != 2 || f.put["a"] != "hash-uni-bigram|连接 接池|xxxx" {
 		t.Fatalf("%d %v %v", n, err, f.put)
 	}
 	f.put = map[string]string{}

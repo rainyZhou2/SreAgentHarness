@@ -13,6 +13,7 @@ import (
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/memory"
+	"go-sre-harness/internal/memorycontext"
 )
 
 func (s *Store) KnownServices(ctx context.Context, tenantID string, limit int) ([]string, error) {
@@ -86,19 +87,30 @@ func (s *Store) RunCapabilities(ctx context.Context, tenantID, runID string) ([]
 
 // pinnedMemories revalidates pinned versions before injecting their content.
 func (s *Store) pinnedMemories(ctx context.Context, tenantID, runID, _ string, beforeSeq int64) ([]cognitive.MemoryRef, error) {
+	ctx = s.memoryRunContext(ctx, tenantID, runID)
 	rows, err := s.pool.Query(ctx, `WITH last AS (
 			SELECT id FROM agent_steps WHERE run_id=$1 AND tenant_id=$2 AND kind='retrieve_memory' AND status='SUCCEEDED'
 		AND ($3=0 OR seq < $3) ORDER BY seq DESC LIMIT 1)
-		SELECT m.id, h.memory_version, m.memory_type, m.scope, m.title,
-			m.content_text, m.trust, h.score, m.environment, m.applicability
+		SELECT m.id, h.memory_version, m.memory_type, m.scope, m.title, m.content_text, m.trust, h.score,
+			m.environment, m.applicability, m.status, m.sensitivity, m.decision_ref, m.outcome_ref,
+			v.id::text, e.embedding_model, e.embedding_version, e.dims
 		FROM step_memory_hits h JOIN last ON h.step_id = last.id
 		JOIN agent_memories m ON m.id = h.memory_id AND m.tenant_id=h.tenant_id
-		WHERE h.tenant_id=$2 AND m.status='ACTIVE' AND m.current_version=h.memory_version
+		LEFT JOIN LATERAL (
+			SELECT id FROM memory_verifications v WHERE v.tenant_id=m.tenant_id AND v.memory_id=m.id
+			AND v.memory_version=h.memory_version ORDER BY v.created_at DESC, v.id DESC LIMIT 1
+		) v ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT embedding_model, embedding_version, dims FROM memory_embeddings e
+			WHERE e.tenant_id=m.tenant_id AND e.memory_id=m.id AND e.memory_version=h.memory_version
+			AND e.embedding_version=m.embedding_version ORDER BY e.created_at DESC, e.embedding_model DESC LIMIT 1
+		) e ON TRUE
+		WHERE h.tenant_id=$2 AND m.status IN ('VERIFIED','APPROVED') AND m.current_version=h.memory_version
 		AND ((m.scope <> 'user' AND m.sensitivity IN ('public','internal')) OR
 			(m.scope='user' AND EXISTS (SELECT 1 FROM agent_runs r WHERE r.id=$1
 			AND r.tenant_id=$2 AND r.initiator_type='user' AND r.initiator_id=m.scope_id)))
-		AND m.superseded_by IS NULL AND (m.expires_at IS NULL OR m.expires_at > now())
-		ORDER BY h.rank`, runID, tenantID, beforeSeq)
+		AND m.superseded_by IS NULL AND (m.expires_at IS NULL OR m.expires_at > now())`+memoryACLPredicate(4)+`
+		ORDER BY h.rank`, runID, tenantID, beforeSeq, memorySubjects(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -107,22 +119,33 @@ func (s *Store) pinnedMemories(ctx context.Context, tenantID, runID, _ string, b
 	env, _ := memory.EnvFrom(ctx)
 	at := time.Now().UTC()
 	for rows.Next() {
-		var m cognitive.MemoryRef
-		candidate := memory.Memory{TenantID: tenantID, Status: "ACTIVE"}
+		candidate := memory.Memory{TenantID: tenantID}
 		var applicability []byte
-		if err := rows.Scan(&m.ID, &m.Version, &m.Kind, &m.Scope, &m.Title, &m.Content, &m.Trust, &m.Score, &candidate.Environment, &applicability); err != nil {
+		var score float64
+		var verificationID, embeddingModel, embeddingVersion *string
+		var dimensions *int
+		if err := rows.Scan(&candidate.ID, &candidate.Version, &candidate.Type, &candidate.Scope, &candidate.Title,
+			&candidate.Content, &candidate.Trust, &score, &candidate.Environment, &applicability, &candidate.Status,
+			&candidate.Sensitivity, &candidate.DecisionRef, &candidate.OutcomeRef, &verificationID,
+			&embeddingModel, &embeddingVersion, &dimensions); err != nil {
 			return nil, err
 		}
-		candidate.Trust = m.Trust
 		if len(applicability) > 0 {
 			if err := json.Unmarshal(applicability, &candidate.Applicability); err != nil {
 				return nil, fmt.Errorf("decode pinned memory applicability: %w", err)
 			}
 		}
+		if embeddingModel != nil && embeddingVersion != nil && dimensions != nil {
+			candidate.EmbeddingDescriptor = memory.EmbeddingDescriptor{Model: *embeddingModel, Version: *embeddingVersion, Dimensions: *dimensions}
+		}
 		if valid, _ := candidate.Recallable(tenantID, env, at); !valid {
 			continue
 		}
-		out = append(out, m)
+		verification := ""
+		if verificationID != nil {
+			verification = *verificationID
+		}
+		out = append(out, memorycontext.Ref(candidate, score, verification))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -165,7 +188,8 @@ var _ memory.ConsolidationStore = (*Store)(nil)
 const memoryCols = `id, tenant_id, scope, scope_id, memory_type, status, current_version, subject, title, content_text,
 	content_ref, content_hash, source_refs, evidence_refs, trust, sensitivity, confidence, verified_by, environment,
 	superseded_by, expires_at, created_by, created_at, updated_at, reinforcements, last_reinforced_at, applicability,
-	verified_success_count, verified_failure_count, last_verified_at`
+	verified_success_count, verified_failure_count, last_verified_at, decision_ref, outcome_ref, embedding_version,
+	approved_by, approved_at, approval_basis`
 
 func scanMemory(row pgx.Row, extra ...any) (memory.Memory, error) {
 	var m memory.Memory
@@ -174,7 +198,8 @@ func scanMemory(row pgx.Row, extra ...any) (memory.Memory, error) {
 		&m.Content, &m.ContentRef, &m.ContentHash, &src, &ev, &m.Trust, &m.Sensitivity, &m.Confidence, &m.VerifiedBy,
 		&m.Environment, &m.SupersededBy, &m.ExpiresAt, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt, &m.Reinforcements,
 		&m.LastReinforcedAt, &appl, &m.Verification.SuccessCount, &m.Verification.FailureCount,
-		&m.Verification.LastVerifiedAt}
+		&m.Verification.LastVerifiedAt, &m.DecisionRef, &m.OutcomeRef, &m.EmbeddingVersion, &m.ApprovedBy,
+		&m.ApprovedAt, &m.ApprovalBasis}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return m, domain.ErrNotFound
@@ -192,9 +217,7 @@ func scanMemory(row pgx.Row, extra ...any) (memory.Memory, error) {
 	return m, nil
 }
 
-// CreateMemory inserts a memory (deduplicated by content within its scope),
-// its first version and its embedding. Activating a memory supersedes other
-// ACTIVE memories with the same subject in the same scope.
+// CreateMemory inserts a memory, its first version, ACL and exact-descriptor embedding.
 func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Memory, bool, error) {
 	var out memory.Memory
 	created := false
@@ -206,18 +229,26 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 			return err
 		}
 		id := newID()
+		descriptor := m.EmbeddingDescriptor
+		if !descriptor.Valid() && len(m.Embedding) > 0 {
+			descriptor = memory.LegacyEmbeddingDescriptor(m.EmbeddingModel, len(m.Embedding))
+		}
+		publication := memory.Memory{Scope: m.Scope, ScopeID: m.ScopeID, Type: m.Type, Subject: m.Subject, Status: m.Status}
+		memory.ApplyOwnerPreferencePublication(&publication, time.Now().UTC())
 		var inserted string
 		err := tx.QueryRow(ctx, `INSERT INTO agent_memories (id, tenant_id, scope, scope_id, memory_type, status, subject,
 			title, content_text, content_ref, content_hash, source_refs, evidence_refs, trust, sensitivity, confidence,
-			verified_by, environment, expires_at, created_by, search_terms, search_terms_v, applicability)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,$22)
-			ON CONFLICT (tenant_id, scope, scope_id, content_hash) WHERE status NOT IN ('REJECTED','ARCHIVED') DO NOTHING
+			verified_by, environment, expires_at, created_by, search_terms, search_terms_v, applicability, embedding_version,
+			approved_by, approved_at, approval_basis)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,$22,$23,$24,$25,$26)
+			ON CONFLICT (tenant_id, scope, scope_id, content_hash) WHERE status NOT IN ('REVOKED','SUPERSEDED') DO NOTHING
 			RETURNING id`, id, m.TenantID, m.Scope, m.ScopeID, m.Type, m.Status, m.Subject, m.Title, m.Content,
 			m.ContentRef, m.ContentHash, jsonb(nonNil(m.SourceRefs)), jsonb(nonNil(m.EvidenceRefs)), m.Trust, m.Sensitivity,
-			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy, m.SearchTerms, applicabilityJSON(m.Applicability)).Scan(&inserted)
+			m.Confidence, m.VerifiedBy, m.Environment, m.ExpiresAt, m.CreatedBy, m.SearchTerms, applicabilityJSON(m.Applicability),
+			descriptor.Version, publication.ApprovedBy, publication.ApprovedAt, publication.ApprovalBasis).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			cur, err := scanMemory(tx.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
-				AND scope_id=$3 AND content_hash=$4 AND status NOT IN ('REJECTED','ARCHIVED') FOR UPDATE`, m.TenantID, m.Scope, m.ScopeID,
+				AND scope_id=$3 AND content_hash=$4 AND status NOT IN ('REVOKED','SUPERSEDED') FOR UPDATE`, m.TenantID, m.Scope, m.ScopeID,
 				m.ContentHash))
 			if err != nil {
 				return err
@@ -234,21 +265,19 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 			jsonb(map[string]any{"created_by": m.CreatedBy, "source_refs": m.SourceRefs, "redactions": m.Redactions})); err != nil {
 			return err
 		}
-		if len(m.Embedding) > 0 {
+		if err := insertMemoryACL(ctx, tx, m, id); err != nil {
+			return err
+		}
+		if descriptor.Matches(m.Embedding) {
 			if _, err := tx.Exec(ctx, `INSERT INTO memory_embeddings (tenant_id, memory_id, memory_version, embedding_model,
-				dims, embedding) VALUES ($1,$2,1,$3,$4,$5)`, m.TenantID, id, m.EmbeddingModel, len(m.Embedding),
-				m.Embedding); err != nil {
+				embedding_version, dims, embedding) VALUES ($1,$2,1,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, m.TenantID, id,
+				descriptor.Model, descriptor.Version, descriptor.Dimensions, m.Embedding); err != nil {
 				return err
 			}
 		}
 		for _, sh := range memoryShards(m) {
 			if _, err := tx.Exec(ctx, `INSERT INTO memory_shards (tenant_id, memory_id, shard_key, weight, source)
 				VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, m.TenantID, id, sh.ShardKey, sh.Weight, sh.Source); err != nil {
-				return err
-			}
-		}
-		if m.Status == "ACTIVE" {
-			if err := supersedeSubject(ctx, tx, m.TenantID, id, m.Scope, m.ScopeID, m.Subject); err != nil {
 				return err
 			}
 		}
@@ -261,11 +290,20 @@ func (s *Store) CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Me
 // nearDuplicate finds a live memory with the same scope and subject that
 // says the same thing (memory.NearDuplicate) and is at least as validated.
 func nearDuplicate(ctx context.Context, tx pgx.Tx, m memory.NewMemory) (memory.Memory, bool, error) {
+	descriptor := m.EmbeddingDescriptor
+	if !descriptor.Valid() {
+		descriptor = memory.LegacyEmbeddingDescriptor(m.EmbeddingModel, len(m.Embedding))
+	}
+	model := descriptor.Model
+	if model == "" {
+		model = m.EmbeddingModel
+	}
 	rows, err := tx.Query(ctx, `SELECT `+prefixCols("m.", memoryCols)+`, e.embedding FROM agent_memories m
-		LEFT JOIN memory_embeddings e ON e.memory_id = m.id AND e.memory_version = m.current_version AND e.embedding_model = $5
+		LEFT JOIN memory_embeddings e ON e.tenant_id=m.tenant_id AND e.memory_id = m.id AND e.memory_version = m.current_version
+		AND e.embedding_model = $5 AND ($6='' OR e.embedding_version=$6) AND ($7=0 OR e.dims=$7)
 		WHERE m.tenant_id=$1 AND m.scope=$2 AND m.scope_id=$3 AND m.subject=$4
-		AND m.status IN ('ACTIVE','VALIDATING','CANDIDATE') ORDER BY m.updated_at DESC LIMIT 20`,
-		m.TenantID, m.Scope, m.ScopeID, m.Subject, m.EmbeddingModel)
+		AND m.status IN ('VERIFIED','APPROVED','CANDIDATE','CONTESTED','STALE') ORDER BY m.updated_at DESC LIMIT 20`,
+		m.TenantID, m.Scope, m.ScopeID, m.Subject, model, descriptor.Version, descriptor.Dimensions)
 	if err != nil {
 		return memory.Memory{}, false, err
 	}
@@ -329,20 +367,11 @@ func nonNil(xs []string) []string {
 	return xs
 }
 
-func supersedeSubject(ctx context.Context, tx pgx.Tx, tenantID, keepID, scope, scopeID, subject string) error {
-	_, err := tx.Exec(ctx, `UPDATE agent_memories SET status='SUPERSEDED', superseded_by=$2, updated_at=now()
-		WHERE tenant_id=$1 AND id<>$2 AND scope=$3 AND scope_id=$4 AND subject=$5 AND status='ACTIVE'`,
-		tenantID, keepID, scope, scopeID, subject)
-	return err
-}
-
-var memoryTransitions = map[string][]string{
-	"CANDIDATE":  {"VALIDATING", "ACTIVE", "REJECTED"},
-	"VALIDATING": {"ACTIVE", "REJECTED"},
-	"ACTIVE":     {"STALE", "SUPERSEDED", "ARCHIVED"},
-	"STALE":      {"ACTIVE", "ARCHIVED"},
-	"SUPERSEDED": {"ARCHIVED"},
-	"REJECTED":   {"ARCHIVED"},
+func allowedMemoryTransition(from, to string) bool {
+	if to == memory.Verified || to == memory.Approved || to == memory.Superseded {
+		return false
+	}
+	return memory.CanTransition(from, to)
 }
 
 // TransitionMemory moves a memory through its lifecycle (§8.3). Activation
@@ -358,34 +387,12 @@ func (s *Store) TransitionMemory(ctx context.Context, tenantID, id, from, to, ac
 		if from != "" && cur.Status != from {
 			return domain.ErrVersionConflict
 		}
-		allowed := false
-		for _, t := range memoryTransitions[cur.Status] {
-			allowed = allowed || t == to
-		}
-		if !allowed {
+		if !allowedMemoryTransition(cur.Status, to) {
 			return &domain.RejectedError{Reason: fmt.Sprintf("invalid_transition_%s_to_%s", cur.Status, to)}
 		}
-		if to == "ACTIVE" {
-			if err := memory.CanPromote(cur, actor); err != nil {
-				return &domain.RejectedError{Reason: "playbook_promotion: " + err.Error()}
-			}
-		}
-		trust := cur.Trust
-		var verifier *string
-		if to == "ACTIVE" {
-			verifier = &actor
-			if trust == "T3" {
-				trust = "T2" // human-verified
-			}
-		}
-		if _, err := tx.Exec(ctx, `UPDATE agent_memories SET status=$3, trust=$4, verified_by=COALESCE($5, verified_by),
-			updated_at=now() WHERE tenant_id=$1 AND id=$2`, tenantID, id, to, trust, verifier); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE agent_memories SET status=$3, updated_at=now()
+			WHERE tenant_id=$1 AND id=$2`, tenantID, id, to); err != nil {
 			return err
-		}
-		if to == "ACTIVE" {
-			if err := supersedeSubject(ctx, tx, tenantID, id, cur.Scope, cur.ScopeID, cur.Subject); err != nil {
-				return err
-			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO security_audit_log (id, tenant_id, actor_type, actor_id, action, resource_type,
 			resource_id, outcome, details) VALUES ($1,$2,'user',$3,'memory.transition','memory',$4,'applied',$5)`, newID(),
@@ -463,8 +470,8 @@ var _ memory.PersonalStore = (*Store)(nil)
 // scope and subject.
 func (s *Store) LiveMemoryBySubject(ctx context.Context, tenantID, scope, scopeID, subject string) (memory.Memory, bool, error) {
 	m, err := scanMemory(s.pool.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope=$2
-		AND scope_id=$3 AND subject=$4 AND status IN ('ACTIVE','VALIDATING','CANDIDATE')
-		ORDER BY CASE status WHEN 'ACTIVE' THEN 0 WHEN 'VALIDATING' THEN 1 ELSE 2 END, updated_at DESC LIMIT 1`,
+		AND scope_id=$3 AND subject=$4 AND status IN ('APPROVED','VERIFIED','CANDIDATE','CONTESTED','STALE')
+		ORDER BY CASE status WHEN 'APPROVED' THEN 0 WHEN 'VERIFIED' THEN 1 WHEN 'CANDIDATE' THEN 2 ELSE 3 END, updated_at DESC LIMIT 1`,
 		tenantID, scope, scopeID, subject))
 	if errors.Is(err, domain.ErrNotFound) {
 		return m, false, nil
@@ -496,7 +503,7 @@ func (s *Store) UpdateMemory(ctx context.Context, r memory.Revision) (memory.Mem
 		}
 		var clash string
 		err = tx.QueryRow(ctx, `SELECT id FROM agent_memories WHERE tenant_id=$1 AND scope=$2 AND scope_id=$3
-			AND content_hash=$4 AND id<>$5 AND status NOT IN ('REJECTED','ARCHIVED') LIMIT 1`, cur.TenantID, cur.Scope,
+			AND content_hash=$4 AND id<>$5 AND status NOT IN ('REVOKED','SUPERSEDED') LIMIT 1`, cur.TenantID, cur.Scope,
 			cur.ScopeID, p.ContentHash, cur.ID).Scan(&clash)
 		if err == nil {
 			return &domain.RejectedError{Reason: "duplicate_content_of_" + clash}
@@ -505,10 +512,17 @@ func (s *Store) UpdateMemory(ctx context.Context, r memory.Revision) (memory.Mem
 			return err
 		}
 		next := cur.Version + 1
+		descriptor := p.EmbeddingDescriptor
+		if !descriptor.Valid() && len(p.Embedding) > 0 {
+			descriptor = memory.LegacyEmbeddingDescriptor(p.EmbeddingModel, len(p.Embedding))
+		}
+		memory.ApplyRevisionPublication(&cur, p, time.Now().UTC())
 		if _, err := tx.Exec(ctx, `UPDATE agent_memories SET title=$3, content_text=$4, content_ref=$5, content_hash=$6,
-			source_refs=$7, evidence_refs=$8, search_terms=$9, search_terms_v=1, current_version=$10, updated_at=now()
+			source_refs=$7, evidence_refs=$8, search_terms=$9, search_terms_v=1, current_version=$10, embedding_version=$11,
+			status=$12, verified_by=$13, approved_by=$14, approved_at=$15, approval_basis=$16, decision_ref=$17, outcome_ref=$18, updated_at=now()
 			WHERE tenant_id=$1 AND id=$2`, cur.TenantID, cur.ID, p.Title, p.Content, p.ContentRef, p.ContentHash,
-			jsonb(nonNil(p.SourceRefs)), jsonb(nonNil(p.EvidenceRefs)), p.SearchTerms, next); err != nil {
+			jsonb(nonNil(p.SourceRefs)), jsonb(nonNil(p.EvidenceRefs)), p.SearchTerms, next, descriptor.Version, cur.Status,
+			cur.VerifiedBy, cur.ApprovedBy, cur.ApprovedAt, cur.ApprovalBasis, cur.DecisionRef, cur.OutcomeRef); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO agent_memory_versions (tenant_id, memory_id, version, content_ref, content_hash,
@@ -517,10 +531,10 @@ func (s *Store) UpdateMemory(ctx context.Context, r memory.Revision) (memory.Mem
 				"redactions": p.Redactions})); err != nil {
 			return err
 		}
-		if len(p.Embedding) > 0 && p.EmbeddingModel != "" {
+		if descriptor.Matches(p.Embedding) {
 			if _, err := tx.Exec(ctx, `INSERT INTO memory_embeddings (tenant_id, memory_id, memory_version, embedding_model,
-				dims, embedding) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, cur.TenantID, cur.ID, next,
-				p.EmbeddingModel, len(p.Embedding), p.Embedding); err != nil {
+				embedding_version, dims, embedding) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, cur.TenantID, cur.ID, next,
+				descriptor.Model, descriptor.Version, descriptor.Dimensions, p.Embedding); err != nil {
 				return err
 			}
 		}
@@ -554,14 +568,14 @@ func (s *Store) RunInitiator(ctx context.Context, tenantID, runID string) (strin
 	return *id, nil
 }
 
-// PersonalMemories returns a user's ACTIVE personal memories.
+// PersonalMemories returns a user's recallable personal memories.
 func (s *Store) PersonalMemories(ctx context.Context, tenantID, userID string, limit int) ([]memory.Memory, error) {
 	if limit <= 0 || limit > 200 {
 		limit = memory.MaxPersonalMemories
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND scope='user'
-		AND scope_id=$2 AND status='ACTIVE' AND (expires_at IS NULL OR expires_at > now())
-		ORDER BY updated_at DESC LIMIT $3`, tenantID, userID, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+memoryCols+` FROM agent_memories m WHERE tenant_id=$1 AND scope='user'
+		AND scope_id=$2 AND status IN ('VERIFIED','APPROVED') AND (expires_at IS NULL OR expires_at > now())`+memoryACLPredicate(4)+`
+		ORDER BY updated_at DESC LIMIT $3`, tenantID, userID, limit, memorySubjects(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -572,7 +586,8 @@ func (s *Store) GetMemory(ctx context.Context, tenantID, id string) (memory.Memo
 	if !validID(id) {
 		return memory.Memory{}, domain.ErrNotFound
 	}
-	return scanMemory(s.pool.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1 AND id=$2`, tenantID, id))
+	return scanMemory(s.pool.QueryRow(ctx, `SELECT `+memoryCols+` FROM agent_memories m WHERE tenant_id=$1 AND id=$2`+
+		memoryACLPredicate(3), tenantID, id, memorySubjects(ctx)))
 }
 
 type MemoryFilter struct {
@@ -587,10 +602,11 @@ func (s *Store) ListMemories(ctx context.Context, tenantID string, f MemoryFilte
 	if f.Limit <= 0 || f.Limit > 500 {
 		f.Limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+memoryCols+` FROM agent_memories WHERE tenant_id=$1
+	rows, err := s.pool.Query(ctx, `SELECT `+memoryCols+` FROM agent_memories m WHERE tenant_id=$1
 		AND ($2='' OR status=$2) AND ($3='' OR scope=$3) AND ($4='' OR scope_id=$4)
-		AND ($5='' OR search_tsv @@ to_tsquery('simple', $5)) ORDER BY updated_at DESC LIMIT $6`,
-		tenantID, f.Status, f.Scope, f.ScopeID, tsQuery(f.Query), f.Limit)
+		AND ($5='' OR search_tsv @@ to_tsquery('simple', $5))`+memoryACLPredicate(7)+`
+		ORDER BY updated_at DESC LIMIT $6`,
+		tenantID, f.Status, f.Scope, f.ScopeID, tsQuery(f.Query), f.Limit, memorySubjects(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -633,18 +649,26 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 		allowed = []string{"public"}
 	}
 	tq := tsQuery(q.Text)
+	descriptor := q.EmbeddingDescriptor
+	model := descriptor.Model
+	if model == "" {
+		model = q.EmbeddingModel
+	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixCols("m.", memoryCols)+`,
 		CASE WHEN $4 = '' THEN 0 ELSE ts_rank(m.search_tsv, to_tsquery('simple', $4)) END AS rank, e.embedding,
 		COALESCE((SELECT MAX(ms.weight) FROM memory_shards ms
-			WHERE ms.tenant_id = m.tenant_id AND ms.memory_id = m.id AND ms.shard_key = ANY($8)), 0) AS shard_weight
+			WHERE ms.tenant_id = m.tenant_id AND ms.memory_id = m.id AND ms.shard_key = ANY($8)), 0) AS shard_weight,
+		e.embedding_version, e.dims
 		FROM agent_memories m
-		LEFT JOIN memory_embeddings e ON e.memory_id = m.id AND e.memory_version = m.current_version AND e.embedding_model = $5
-		WHERE m.tenant_id=$1 AND m.status='ACTIVE' AND m.sensitivity = ANY($6)
+		LEFT JOIN memory_embeddings e ON e.tenant_id=m.tenant_id AND e.memory_id = m.id AND e.memory_version = m.current_version
+		AND e.embedding_model = $5 AND ($10='' OR e.embedding_version=$10) AND ($11=0 OR e.dims=$11)
+		WHERE m.tenant_id=$1 AND m.status IN ('VERIFIED','APPROVED') AND m.sensitivity = ANY($6)
 		AND (m.expires_at IS NULL OR m.expires_at > now()) AND (m.valid_until IS NULL OR m.valid_until > now())
 		AND (m.scope='organization' OR (m.scope='service' AND m.scope_id = ANY($2))
-		     OR (m.scope='incident' AND m.scope_id = $3) OR m.scope='agent')
+		     OR (m.scope='incident' AND m.scope_id = $3) OR m.scope='agent')`+memoryACLPredicate(9)+`
 		ORDER BY rank DESC, m.updated_at DESC LIMIT $7`,
-		q.TenantID, q.Services, q.IncidentID, tq, q.EmbeddingModel, allowed, q.Limit, q.Shards)
+		q.TenantID, q.Services, q.IncidentID, tq, model, allowed, q.Limit, q.Shards, memorySubjects(ctx),
+		descriptor.Version, descriptor.Dimensions)
 	if err != nil {
 		return nil, err
 	}
@@ -655,9 +679,14 @@ func (s *Store) MemoryCandidates(ctx context.Context, q memory.CandidateQuery) (
 		var rank float32
 		var emb []float32
 		var shardW float64
-		m, err := scanMemory(rows, &rank, &emb, &shardW)
+		var version *string
+		var dimensions *int
+		m, err := scanMemory(rows, &rank, &emb, &shardW, &version, &dimensions)
 		if err != nil {
 			return nil, err
+		}
+		if len(emb) > 0 && version != nil && dimensions != nil {
+			m.EmbeddingDescriptor = memory.EmbeddingDescriptor{Model: model, Version: *version, Dimensions: *dimensions}
 		}
 		c.Memory, c.FTSRank, c.Embedding, c.ShardWeight = m, float64(rank), emb, shardW
 		out = append(out, c)
@@ -786,13 +815,7 @@ func (s *Store) ListExperiences(ctx context.Context, tenantID, runID string) ([]
 	})
 }
 
-// PutFeedback upserts an actor's feedback on a finished run and applies its
-// consequence to memories derived from the run (§11.3). Feedback is an
-// operator action, so it can never activate a memory: a confirmed root cause
-// only moves candidates to VALIDATING, where an approver must activate them
-// through TransitionMemory. A refuted root cause takes memories out of
-// retrieval at once (candidates are REJECTED, active ones become STALE so an
-// approver can still restore them). Every change is audited.
+// PutFeedback records operator feedback without granting publication authority.
 func (s *Store) PutFeedback(ctx context.Context, tenantID, runID string, f memory.Feedback) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO run_feedback (id, tenant_id, run_id, actor_id, root_cause_correct,
@@ -802,14 +825,9 @@ func (s *Store) PutFeedback(ctx context.Context, tenantID, runID string, f memor
 			newID(), tenantID, runID, f.ActorID, f.RootCauseCorrect, f.RootCauseLabel, f.Rating, f.Notes); err != nil {
 			return err
 		}
-		if f.RootCauseCorrect != nil {
+		if f.RootCauseCorrect != nil && !*f.RootCauseCorrect {
 			src := jsonb([]string{"run:" + runID})
-			var moves [][2]string // {from, to}
-			if *f.RootCauseCorrect {
-				moves = [][2]string{{"CANDIDATE", "VALIDATING"}}
-			} else {
-				moves = [][2]string{{"CANDIDATE", "REJECTED"}, {"VALIDATING", "REJECTED"}, {"ACTIVE", "STALE"}}
-			}
+			moves := [][2]string{{memory.StatusCandidate, memory.Revoked}, {memory.Verified, memory.Stale}, {memory.Approved, memory.Stale}}
 			for _, m := range moves {
 				rows, err := tx.Query(ctx, `UPDATE agent_memories SET status=$4, updated_at=now()
 					WHERE tenant_id=$1 AND source_refs @> $2 AND status=$3 RETURNING id`, tenantID, src, m[0], m[1])
@@ -912,19 +930,17 @@ func (s *Store) ListIncidentEvents(ctx context.Context, tenantID, incidentID str
 
 var _ memory.IndexStore = (*Store)(nil)
 
-// MemoriesToIndex returns live memories without search terms or without an
-// embedding of the given model for their current version (all tenants:
-// the indexer is a background job).
-func (s *Store) MemoriesToIndex(ctx context.Context, model string, limit int) ([]memory.IndexItem, error) {
+func (s *Store) MemoriesToIndex(ctx context.Context, descriptor memory.EmbeddingDescriptor, limit int) ([]memory.IndexItem, error) {
 	rows, err := s.pool.Query(ctx, `SELECT m.tenant_id, m.id, m.current_version, m.title, m.content_text, m.subject,
 		m.search_terms_v < 1,
-		$1 <> '' AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id
-			AND e.memory_version = m.current_version AND e.embedding_model = $1)
+		$1 <> '' AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.tenant_id=m.tenant_id AND e.memory_id = m.id
+			AND e.memory_version = m.current_version AND e.embedding_model = $1 AND e.embedding_version=$3 AND e.dims=$4)
 		FROM agent_memories m
-		WHERE m.status IN ('ACTIVE','CANDIDATE','VALIDATING','STALE')
-		AND (m.search_terms_v < 1 OR ($1 <> '' AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id
-			AND e.memory_version = m.current_version AND e.embedding_model = $1)))
-		ORDER BY (m.status = 'ACTIVE') DESC, m.updated_at DESC LIMIT $2`, model, limit)
+		WHERE m.status IN ('CANDIDATE','VERIFIED','APPROVED','CONTESTED','STALE')
+		AND (m.search_terms_v < 1 OR ($1 <> '' AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.tenant_id=m.tenant_id
+			AND e.memory_id = m.id AND e.memory_version = m.current_version AND e.embedding_model = $1
+			AND e.embedding_version=$3 AND e.dims=$4)))
+		ORDER BY (m.status = 'APPROVED') DESC, m.updated_at DESC LIMIT $2`, descriptor.Model, limit, descriptor.Version, descriptor.Dimensions)
 	if err != nil {
 		return nil, err
 	}
@@ -941,20 +957,19 @@ func (s *Store) MemoriesToIndex(ctx context.Context, model string, limit int) ([
 	return out, rows.Err()
 }
 
-// PutMemoryIndex stores a memory's search terms and/or embedding. It is
-// idempotent, so concurrent indexers do no harm.
-func (s *Store) PutMemoryIndex(ctx context.Context, it memory.IndexItem, model string, emb []float32, terms string) error {
+func (s *Store) PutMemoryIndex(ctx context.Context, it memory.IndexItem, descriptor memory.EmbeddingDescriptor, emb []float32, terms string) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		if it.NeedTerms {
 			if _, err := tx.Exec(ctx, `UPDATE agent_memories SET search_terms=$3, search_terms_v=1
-				WHERE tenant_id=$1 AND id=$2`, it.TenantID, it.ID, terms); err != nil {
+				WHERE tenant_id=$1 AND id=$2 AND current_version=$4`, it.TenantID, it.ID, terms, it.Version); err != nil {
 				return err
 			}
 		}
-		if len(emb) > 0 && model != "" {
+		if descriptor.Matches(emb) {
 			if _, err := tx.Exec(ctx, `INSERT INTO memory_embeddings (tenant_id, memory_id, memory_version, embedding_model,
-				dims, embedding) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, it.TenantID, it.ID, it.Version, model,
-				len(emb), emb); err != nil {
+				embedding_version, dims, embedding) SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS
+				(SELECT 1 FROM agent_memories WHERE tenant_id=$1 AND id=$2 AND current_version=$3) ON CONFLICT DO NOTHING`,
+				it.TenantID, it.ID, it.Version, descriptor.Model, descriptor.Version, descriptor.Dimensions, emb); err != nil {
 				return err
 			}
 		}

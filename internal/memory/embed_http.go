@@ -22,6 +22,7 @@ import (
 type HTTPEmbedder struct {
 	BaseURL    string // e.g. https://api.openai.com/v1
 	ModelName  string
+	Version    string
 	APIKey     string
 	Dimensions int // optional; sent as "dimensions" when > 0
 	Timeout    time.Duration
@@ -29,12 +30,27 @@ type HTTPEmbedder struct {
 	Client     *http.Client
 	Log        *slog.Logger
 
-	mu    sync.Mutex
-	cache map[string][]float32 // recent texts (queries repeat across steps)
-	order []string
+	mu           sync.Mutex
+	cache        map[string][]float32 // recent texts (queries repeat across steps)
+	order        []string
+	observedDims int
 }
 
 const httpEmbedCacheSize = 256
+
+func (h *HTTPEmbedder) Descriptor() EmbeddingDescriptor {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	version := h.Version
+	if version == "" {
+		version = "v1"
+	}
+	dimensions := h.Dimensions
+	if dimensions == 0 {
+		dimensions = h.observedDims
+	}
+	return EmbeddingDescriptor{Model: "http:" + h.ModelName, Version: version, Dimensions: dimensions}
+}
 
 // Model names the embedding space: provider model and dimensions.
 func (h *HTTPEmbedder) Model() string {
@@ -76,6 +92,7 @@ func (h *HTTPEmbedder) Embed(text string) []float32 {
 		return nil
 	}
 	h.mu.Lock()
+	h.observedDims = len(v)
 	if h.cache == nil {
 		h.cache = map[string][]float32{}
 	}
@@ -163,8 +180,8 @@ type IndexItem struct {
 
 // IndexStore is implemented by stores that keep memory search indexes.
 type IndexStore interface {
-	MemoriesToIndex(ctx context.Context, embeddingModel string, limit int) ([]IndexItem, error)
-	PutMemoryIndex(ctx context.Context, it IndexItem, embeddingModel string, embedding []float32, terms string) error
+	MemoriesToIndex(ctx context.Context, descriptor EmbeddingDescriptor, limit int) ([]IndexItem, error)
+	PutMemoryIndex(ctx context.Context, it IndexItem, descriptor EmbeddingDescriptor, embedding []float32, terms string) error
 }
 
 // Indexer fills in what older memories lack: CJK search terms, and
@@ -186,11 +203,11 @@ func (x *Indexer) Tick(ctx context.Context) (int, error) {
 	if n <= 0 {
 		n = 50
 	}
-	model := ""
+	var descriptor EmbeddingDescriptor
 	if x.Embedder != nil {
-		model = x.Embedder.Model()
+		descriptor = x.Embedder.Descriptor()
 	}
-	items, err := x.Store.MemoriesToIndex(ctx, model, n)
+	items, err := x.Store.MemoriesToIndex(ctx, descriptor, n)
 	if err != nil {
 		return 0, err
 	}
@@ -201,21 +218,26 @@ func (x *Indexer) Tick(ctx context.Context) (int, error) {
 		}
 		var emb []float32
 		if it.NeedEmbedding && x.Embedder != nil {
-			if emb = x.Embedder.Embed(it.Title + "\n" + it.Content); emb == nil && !it.NeedTerms {
-				break // the embedding service is failing: retry next tick
+			emb = x.Embedder.Embed(it.Title + "\n" + it.Content)
+			descriptor = x.Embedder.Descriptor()
+			if !descriptor.Matches(emb) {
+				emb = nil
+				if !it.NeedTerms {
+					break
+				}
 			}
 		}
 		terms := ""
 		if it.NeedTerms {
 			terms = SearchTerms(it.Title, it.Content, it.Subject)
 		}
-		if err := x.Store.PutMemoryIndex(ctx, it, model, emb, terms); err != nil {
+		if err := x.Store.PutMemoryIndex(ctx, it, descriptor, emb, terms); err != nil {
 			return done, err
 		}
 		done++
 	}
 	if done > 0 && x.Log != nil {
-		x.Log.Info("memory index updated", "memories", done, "embedding_model", model)
+		x.Log.Info("memory index updated", "memories", done, "embedding_model", descriptor.Model, "embedding_version", descriptor.Version)
 	}
 	return done, nil
 }
@@ -235,5 +257,5 @@ func EmbedderFromEnv(getenv func(string) string, log *slog.Logger) *HTTPEmbedder
 	}
 	dims := 0
 	fmt.Sscanf(getenv("HARNESS_EMBEDDING_DIMENSIONS"), "%d", &dims)
-	return &HTTPEmbedder{BaseURL: base, ModelName: model, APIKey: getenv(keyEnv), Dimensions: dims, Log: log}
+	return &HTTPEmbedder{BaseURL: base, ModelName: model, Version: strings.TrimSpace(getenv("HARNESS_EMBEDDING_VERSION")), APIKey: getenv(keyEnv), Dimensions: dims, Log: log}
 }

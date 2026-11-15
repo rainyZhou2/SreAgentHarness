@@ -20,7 +20,7 @@ func (s recallStore) GetMemory(context.Context, string, string) (Memory, error) 
 func TestHistoricalRecallUsesCurrentLifecycle(t *testing.T) {
 	now := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
 	past := now.Add(-time.Second)
-	base := Memory{ID: "m", TenantID: "t", Version: 2, Status: "ACTIVE", Trust: "T2", Sensitivity: "internal"}
+	base := Memory{ID: "m", TenantID: "t", Version: 2, Status: Verified, Type: "semantic", Trust: "T2", Sensitivity: "internal"}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*Memory)

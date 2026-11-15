@@ -28,7 +28,7 @@ func TestMemoryCurationAPI(t *testing.T) {
 	defer st.Close()
 	w := memory.Writer{Embedder: memory.HashingEmbedder{Dims: 16}, Artifacts: artifact.NewMemory()}
 	seed := func(subject, content string) string {
-		p, err := w.Prepare(ctx, memory.NewMemory{TenantID: "t", Scope: "service", ScopeID: "checkout", Type: "semantic", Status: "ACTIVE",
+		p, err := w.Prepare(ctx, memory.NewMemory{TenantID: "t", Scope: "service", ScopeID: "checkout", Type: "semantic", Status: memory.Verified,
 			Subject: subject, Title: "pool size", Content: content, Trust: "T3", Sensitivity: "internal", CreatedBy: "seed"})
 		if err != nil {
 			t.Fatal(err)
@@ -83,7 +83,7 @@ func TestMemoryCurationAPI(t *testing.T) {
 	if code, _ := do(approver, "POST", "/api/memory/curation/"+id+"/decide", `{"decision":"apply","reason":"ok"}`); code != 200 {
 		t.Fatalf("apply: %d", code)
 	}
-	got, _ := st.GetMemory(ctx, "t", oldID)
+	got, _ := st.GetMemory(memory.WithAccessContext(ctx, memory.AccessContext{TenantID: "t", Subjects: []string{"role:admin"}}), "t", oldID)
 	if got.Status != "STALE" {
 		t.Fatalf("applying sets the memory aside as STALE, got %s", got.Status)
 	}

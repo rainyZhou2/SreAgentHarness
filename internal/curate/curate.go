@@ -613,9 +613,7 @@ func (c *Curator) unused(ctx context.Context, tenantID string, ms []memory.Memor
 // ErrOutdated means a target changed after the proposal was made.
 var ErrOutdated = errors.New("a memory in the proposal changed since it was made")
 
-// Apply sets a PENDING proposal's targets aside (ACTIVE to STALE). If any
-// target is no longer the ACTIVE version the proposal saw, nothing is changed
-// and the proposal becomes OUTDATED.
+// Apply sets a PENDING proposal's currently published targets aside.
 func Apply(ctx context.Context, st Store, mem Memories, tenantID, id, actor, reason string) (Proposal, error) {
 	p, err := st.GetProposal(ctx, tenantID, id)
 	if err != nil {
@@ -626,7 +624,7 @@ func Apply(ctx context.Context, st Store, mem Memories, tenantID, id, actor, rea
 	}
 	for _, t := range p.Targets {
 		cur, err := mem.GetMemory(ctx, tenantID, t.MemoryID)
-		if err != nil || cur.Status != "ACTIVE" || cur.Version != t.Version {
+		if err != nil || !memory.RecallStatus(cur.Status, cur.Type) || cur.Version != t.Version {
 			if out, derr := st.DecideProposal(ctx, tenantID, id, Outdated, actor, "a memory changed since this was proposed", time.Now().UTC()); derr == nil {
 				return out, ErrOutdated
 			}
@@ -634,7 +632,11 @@ func Apply(ctx context.Context, st Store, mem Memories, tenantID, id, actor, rea
 		}
 	}
 	for _, t := range p.Targets {
-		if _, err := mem.TransitionMemory(ctx, tenantID, t.MemoryID, "ACTIVE", "STALE", actor,
+		cur, err := mem.GetMemory(ctx, tenantID, t.MemoryID)
+		if err != nil {
+			return p, err
+		}
+		if _, err := mem.TransitionMemory(ctx, tenantID, t.MemoryID, cur.Status, memory.Stale, actor,
 			fmt.Sprintf("curation %s: %s", p.Signal, firstLine(p.Reason))); err != nil {
 			return p, fmt.Errorf("set aside %s: %w", t.MemoryID, err)
 		}

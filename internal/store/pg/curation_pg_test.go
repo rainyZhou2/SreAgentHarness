@@ -72,7 +72,7 @@ func TestMemoryLastHitsPostgres(t *testing.T) {
 	tenant := "t-" + uuid.NewString()[:8]
 	_, stepID := seedRun(t, admin, tenant)
 	m, _, err := admin.CreateMemory(ctx, memory.NewMemory{TenantID: tenant, Scope: "service", ScopeID: "api", Type: "semantic",
-		Status: "ACTIVE", Subject: "s", Title: "p", Content: "c", ContentHash: uuid.NewString(), Trust: "T3", Sensitivity: "internal", CreatedBy: "test"})
+		Status: "VERIFIED", Subject: "s", Title: "p", Content: "c", ContentHash: uuid.NewString(), Trust: "T3", Sensitivity: "internal", CreatedBy: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

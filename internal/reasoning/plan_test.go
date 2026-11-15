@@ -26,7 +26,7 @@ func TestDistillPlanExemplar(t *testing.T) {
 		t.Fatal("content must not carry the run id")
 	}
 	yes, no := true, false
-	if nm, _ := DistillPlanExemplar(run, "g", "", p, pm, "", &yes); nm.Status != "VALIDATING" || nm.Scope != "organization" {
+	if nm, _ := DistillPlanExemplar(run, "g", "", p, pm, "", &yes); nm.Status != "CANDIDATE" || nm.Scope != "organization" {
 		t.Fatalf("correct feedback: %+v", nm)
 	}
 	reject := []func(){

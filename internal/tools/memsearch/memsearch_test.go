@@ -26,7 +26,7 @@ func TestMemorySearchCJKAndBackfill(t *testing.T) {
 		{Title: "数据库连接池耗尽", Content: "订单服务高峰期连接池打满，扩大 max_open_conns 后恢复", Subject: "db"},
 		{Title: "磁盘写满", Content: "日志未轮转导致磁盘写满", Subject: "disk"},
 	} {
-		nm.TenantID, nm.Scope, nm.Type, nm.Status, nm.Trust, nm.Sensitivity = "t", "organization", "episodic", "ACTIVE", "T2", "internal"
+		nm.TenantID, nm.Scope, nm.Type, nm.Status, nm.Trust, nm.Sensitivity = "t", "organization", "episodic", memory.Verified, "T2", "internal"
 		nm.CreatedBy = "test"
 		nm.SourceRefs = []string{"run:past-run"}
 		nm.EvidenceRefs = []string{"evidence:past-evidence"}

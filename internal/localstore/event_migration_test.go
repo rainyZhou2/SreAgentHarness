@@ -74,8 +74,8 @@ func TestLocalEventMigrationIncludesUnindexedTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Upgraded() == nil || s.Upgraded().From != 1 || s.Upgraded().To != 2 {
-		t.Fatalf("missing v2 migration: %+v", s.Upgraded())
+	if s.Upgraded() == nil || s.Upgraded().From != 1 || s.Upgraded().To != SchemaVersion {
+		t.Fatalf("missing schema migration: %+v", s.Upgraded())
 	}
 	got, err := s.ListEvents(context.Background(), "t", "run", 0, 100)
 	if err != nil || len(got) != len(want) {

@@ -14,6 +14,7 @@ func TestMemoryTiersPG(t *testing.T) {
 	admin, _, _ := pgTestStores(t)
 	ctx := context.Background()
 	tenant := "t-" + uuid.NewString()[:8]
+	ctx = memory.WithAccessContext(ctx, memory.AccessContext{TenantID: tenant, Subjects: []string{"role:admin"}})
 	w := memory.Writer{Embedder: memory.HashingEmbedder{Dims: 256}, Artifacts: artifact.NewMemory()}
 	prep := func(nm memory.NewMemory) memory.NewMemory {
 		nm.TenantID, nm.CreatedBy = tenant, "test"
@@ -27,7 +28,7 @@ func TestMemoryTiersPG(t *testing.T) {
 		return p
 	}
 	// Personal memory: scope 'user' is accepted, kept out of shared retrieval.
-	pm, created, err := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "user", ScopeID: "u1", Status: "ACTIVE",
+	pm, created, err := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "user", ScopeID: "u1", Status: "APPROVED",
 		Subject: memory.PersonalSubject("answer language"), Title: "answer language", Content: "中文", Sensitivity: "restricted",
 		SourceRefs: []string{"run:a"}}))
 	if err != nil || !created {
@@ -45,13 +46,13 @@ func TestMemoryTiersPG(t *testing.T) {
 		t.Fatal("personal memory in shared candidates")
 	}
 	// Same content again from another run: reinforced once; same run again: unchanged.
-	again, created, _ := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "user", ScopeID: "u1", Status: "ACTIVE",
+	again, created, _ := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "user", ScopeID: "u1", Status: "APPROVED",
 		Subject: memory.PersonalSubject("answer language"), Title: "answer language", Content: "中文", Sensitivity: "restricted",
 		SourceRefs: []string{"run:b"}}))
 	if created || again.ID != pm.ID || again.Reinforcements != 1 || again.LastReinforcedAt == nil {
 		t.Fatalf("reinforce: %v %+v", created, again)
 	}
-	again, _, _ = admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "user", ScopeID: "u1", Status: "ACTIVE",
+	again, _, _ = admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "user", ScopeID: "u1", Status: "APPROVED",
 		Subject: memory.PersonalSubject("answer language"), Title: "answer language", Content: "中文", Sensitivity: "restricted",
 		SourceRefs: []string{"run:b"}}))
 	if again.Reinforcements != 1 {
@@ -59,7 +60,7 @@ func TestMemoryTiersPG(t *testing.T) {
 	}
 	// Near duplicate in service scope.
 	base := "API latency rises when the connection pool of the api service is exhausted under load."
-	a, _, _ := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "service", ScopeID: "api", Status: "ACTIVE",
+	a, _, _ := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "service", ScopeID: "api", Status: "APPROVED",
 		Subject: "api:root_cause", Title: "API latency", Content: base, SourceRefs: []string{"run:1"}}))
 	b, created, _ := admin.CreateMemory(ctx, prep(memory.NewMemory{Scope: "service", ScopeID: "api", Status: "CANDIDATE",
 		Subject: "api:root_cause", Title: "API latency", Content: base + "!", SourceRefs: []string{"run:2"}}))
@@ -86,7 +87,7 @@ func TestMemoryTiersPG(t *testing.T) {
 		t.Fatalf("versions=%d embeddings(v2)=%d", versions, embs)
 	}
 	got, _ := admin.MemoryCandidates(ctx, memory.CandidateQuery{TenantID: tenant, Services: []string{"api"}, Text: "max_open_conns",
-		EmbeddingModel: "hash-uni-bigram-v2-256", MaxSensitivity: "internal"})
+		EmbeddingDescriptor: (memory.HashingEmbedder{Dims: 256}).Descriptor(), MaxSensitivity: "internal"})
 	if len(got) != 1 || got[0].FTSRank <= 0 || len(got[0].Embedding) != 256 || got[0].Reinforcements != 1 {
 		t.Fatalf("search sees the new version: %+v", got)
 	}

@@ -22,11 +22,12 @@ type PlanMemory struct {
 	Score float64 // similarity to the goal
 }
 
-// PlanMemories returns ACTIVE plan exemplars and reasoning patterns for a
+// PlanMemories returns APPROVED plan exemplars and reasoning patterns for a
 // goal: at most k of each, ranked by similarity to the goal, restricted to
 // the organization and the services in play. Memories the run profile
 // excludes (domain.WithMemoryExclude) and untrusted (T4) ones are skipped.
 func (r *Retriever) PlanMemories(ctx context.Context, tenantID, goal string, services []string, k int) ([]PlanMemory, error) {
+	ctx = r.withRunAccess(ctx, tenantID, "")
 	if k <= 0 {
 		k = 2
 	}
@@ -38,18 +39,19 @@ func (r *Retriever) PlanMemories(ctx context.Context, tenantID, goal string, ser
 	for _, s := range services {
 		shards = append(shards, "service:"+s)
 	}
-	model := ""
-	if r.Embedder != nil {
-		model = r.Embedder.Model()
-	}
-	cands, err := r.Store.MemoryCandidates(ctx, CandidateQuery{TenantID: tenantID, Services: services, Text: goal,
-		EmbeddingModel: model, MaxSensitivity: "internal", Shards: shards, Limit: 300})
-	if err != nil {
-		return nil, domain.Retryable(err, 0)
-	}
+	var descriptor EmbeddingDescriptor
 	var q []float32
 	if r.Embedder != nil {
 		q = r.Embedder.Embed(goal)
+		descriptor = r.Embedder.Descriptor()
+		if !descriptor.Matches(q) {
+			q = nil
+		}
+	}
+	cands, err := r.Store.MemoryCandidates(ctx, CandidateQuery{TenantID: tenantID, Services: services, Text: goal,
+		EmbeddingModel: descriptor.Model, EmbeddingDescriptor: descriptor, MaxSensitivity: "internal", Shards: shards, Limit: 300})
+	if err != nil {
+		return nil, domain.Retryable(err, 0)
 	}
 	var plans, patterns []PlanMemory
 	env, at := r.environment(ctx, tenantID, "", services), r.now()
@@ -71,7 +73,7 @@ func (r *Retriever) PlanMemories(ctx context.Context, tenantID, goal string, ser
 			continue
 		}
 		score := c.FTSRank
-		if len(q) > 0 && len(c.Embedding) > 0 {
+		if len(q) > 0 && c.EmbeddingDescriptor.Comparable(descriptor) && c.EmbeddingDescriptor.Matches(c.Embedding) {
 			score += Cosine(q, c.Embedding)
 		}
 		score *= 1 + 0.25*minf(c.ShardWeight, 1)

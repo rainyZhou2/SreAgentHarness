@@ -36,7 +36,7 @@ func TestEveryRetrievalPathEnforcesMemoryValidity(t *testing.T) {
 	past := now.Add(-time.Minute)
 	for _, path := range []string{"search", "planner", "personal"} {
 		t.Run(path, func(t *testing.T) {
-			good := Memory{ID: "good", TenantID: "t", Status: "ACTIVE", Scope: "organization", Type: "procedural", Subject: "good:plan_exemplar", Trust: "T2", Sensitivity: "internal"}
+			good := Memory{ID: "good", TenantID: "t", Status: Approved, Scope: "organization", Type: "procedural", Subject: "good:plan_exemplar", Trust: "T2", Sensitivity: "internal"}
 			if path == "personal" {
 				good.Scope, good.ScopeID = "user", "user"
 			}

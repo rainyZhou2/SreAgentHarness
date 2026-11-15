@@ -16,13 +16,13 @@ import (
 // no migration. When one does, bump SchemaVersion and append a function to
 // schemaMigrations: it upgrades from version index+1 to index+2. An upgrade
 // first takes a consistent SQLite snapshot; old binaries reject the new version.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // currentSchema is SchemaVersion; a variable so tests can simulate a later build.
 var currentSchema = SchemaVersion
 
 // schemaMigrations[i] upgrades version i+1 to i+2 inside the version transaction.
-var schemaMigrations = []func(context.Context, *sql.Tx, string) error{migrateLocalEvents}
+var schemaMigrations = []func(context.Context, *sql.Tx, string) error{migrateLocalEvents, migrateMemoryGovernance}
 
 // ErrNewerSchema marks a database written by a newer harness.
 var ErrNewerSchema = errors.New("local database was written by a newer harness")

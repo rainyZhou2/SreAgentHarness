@@ -25,7 +25,7 @@ type fakeMem struct {
 func (f *fakeMem) ActiveMemories(_ context.Context, _ string, _ int) ([]memory.Memory, error) {
 	var out []memory.Memory
 	for _, m := range f.mems {
-		if m.Status == "ACTIVE" {
+		if m.Status == memory.Verified {
 			out = append(out, m)
 		}
 	}
@@ -106,7 +106,7 @@ func (s *memProposals) DecideProposal(_ context.Context, _, id, status, actor, r
 }
 
 func mem(id, scopeID, title, content string, age time.Duration) memory.Memory {
-	return memory.Memory{ID: id, TenantID: "t", Scope: "service", ScopeID: scopeID, Status: "ACTIVE", Version: 1,
+	return memory.Memory{ID: id, TenantID: "t", Scope: "service", ScopeID: scopeID, Status: memory.Verified, Version: 1,
 		Title: title, Content: content, Type: "semantic", CreatedAt: t0.Add(-age), UpdatedAt: t0.Add(-age)}
 }
 
@@ -276,7 +276,7 @@ func TestApplySetsAsideReversiblyAndRefusesStaleProposals(t *testing.T) {
 	_, _ = c.Run(context.Background(), "t")
 	ps, _ := st.ListProposals(context.Background(), "t", Pending, 10)
 	p, err := Apply(context.Background(), st, f, "t", ps[0].ID, "alice", "ok")
-	if err != nil || p.Status != Applied || f.mems["old"].Status != "STALE" || f.mems["new"].Status != "ACTIVE" {
+	if err != nil || p.Status != Applied || f.mems["old"].Status != "STALE" || f.mems["new"].Status != memory.Verified {
 		t.Fatalf("approving sets the target aside as STALE (reversible) and keeps the keeper: %v %+v %s", err, p, f.mems["old"].Status)
 	}
 	if len(f.trans) != 1 || !strings.HasSuffix(f.trans[0], ":alice") {
@@ -296,7 +296,7 @@ func TestApplySetsAsideReversiblyAndRefusesStaleProposals(t *testing.T) {
 	m.Version = 2
 	f.mems["o2"] = m
 	p, err = Apply(context.Background(), st, f, "t", ps[0].ID, "alice", "")
-	if !errors.Is(err, ErrOutdated) || p.Status != Outdated || f.mems["o2"].Status != "ACTIVE" {
+	if !errors.Is(err, ErrOutdated) || p.Status != Outdated || f.mems["o2"].Status != memory.Verified {
 		t.Fatalf("an outdated proposal must change nothing: %v %+v", err, p)
 	}
 }

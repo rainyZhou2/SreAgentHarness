@@ -17,36 +17,44 @@ import (
 )
 
 type Memory struct {
-	ID           string   `json:"id"`
-	TenantID     string   `json:"tenant_id"`
-	Scope        string   `json:"scope"` // organization | service | incident | agent | user
-	ScopeID      string   `json:"scope_id"`
-	Type         string   `json:"memory_type"` // semantic | episodic | procedural
-	Status       string   `json:"status"`
-	Version      int64    `json:"version"`
-	Subject      string   `json:"subject"`
-	Title        string   `json:"title"`
-	Content      string   `json:"content"`
-	ContentRef   string   `json:"content_ref"`
-	ContentHash  string   `json:"content_hash"`
-	SourceRefs   []string `json:"source_refs"`
-	EvidenceRefs []string `json:"evidence_refs"`
-	Trust        string   `json:"trust"`
-	Sensitivity  string   `json:"sensitivity"`
-	Confidence   *float64 `json:"confidence,omitempty"`
-	VerifiedBy   *string  `json:"verified_by,omitempty"`
-	Environment  *string  `json:"environment,omitempty"`
-	SupersededBy *string  `json:"superseded_by,omitempty"`
+	ID               string     `json:"id"`
+	TenantID         string     `json:"tenant_id"`
+	Scope            string     `json:"scope"` // organization | service | incident | agent | user
+	ScopeID          string     `json:"scope_id"`
+	Type             string     `json:"memory_type"` // semantic | episodic | procedural
+	Status           string     `json:"status"`
+	Version          int64      `json:"version"`
+	Subject          string     `json:"subject"`
+	Title            string     `json:"title"`
+	Content          string     `json:"content"`
+	ContentRef       string     `json:"content_ref"`
+	ContentHash      string     `json:"content_hash"`
+	SourceRefs       []string   `json:"source_refs"`
+	EvidenceRefs     []string   `json:"evidence_refs"`
+	Trust            string     `json:"trust"`
+	Sensitivity      string     `json:"sensitivity"`
+	Confidence       *float64   `json:"confidence,omitempty"`
+	VerifiedBy       *string    `json:"verified_by,omitempty"`
+	ApprovedBy       *string    `json:"approved_by,omitempty"`
+	ApprovedAt       *time.Time `json:"approved_at,omitempty"`
+	ApprovalBasis    string     `json:"approval_basis,omitempty"`
+	DecisionRef      string     `json:"decision_ref,omitempty"`
+	OutcomeRef       string     `json:"outcome_ref,omitempty"`
+	EmbeddingVersion string     `json:"embedding_version,omitempty"`
+	ConflictsWith    []string   `json:"conflicts_with,omitempty"`
+	Environment      *string    `json:"environment,omitempty"`
+	SupersededBy     *string    `json:"superseded_by,omitempty"`
 	// Reinforcements counts how often the same (or a near-identical)
 	// memory was written again from a new source.
-	Reinforcements   int        `json:"reinforcements"`
-	LastReinforcedAt *time.Time `json:"last_reinforced_at,omitempty"`
-	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
-	CreatedBy        string     `json:"created_by"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	Embedding        []float32  `json:"-"`
-	EmbeddingModel   string     `json:"-"`
+	Reinforcements      int                 `json:"reinforcements"`
+	LastReinforcedAt    *time.Time          `json:"last_reinforced_at,omitempty"`
+	ExpiresAt           *time.Time          `json:"expires_at,omitempty"`
+	CreatedBy           string              `json:"created_by"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
+	Embedding           []float32           `json:"-"`
+	EmbeddingModel      string              `json:"-"`
+	EmbeddingDescriptor EmbeddingDescriptor `json:"embedding_descriptor,omitempty"`
 	// Applicability bounds reuse (§14.2); Verification is the memory's
 	// machine-verified outcome record.
 	Applicability *Applicability `json:"applicability,omitempty"`
@@ -94,7 +102,7 @@ var poisonPatterns = []*regexp.Regexp{
 }
 
 // PoisonCheck flags instruction-like content. Such text is never stored as an
-// ACTIVE memory: it is rejected or kept for human review (§8.4, §16.2).
+// published memory: it is rejected or kept for human review (§8.4, §16.2).
 func PoisonCheck(s string) (bool, string) {
 	for _, re := range poisonPatterns {
 		if m := re.FindString(s); m != "" {
@@ -125,10 +133,8 @@ func PoisonMatches(s string, max int) []string {
 
 // ---------- embeddings ----------
 
-// Embedder turns text into a fixed-size vector. Model identifies the
-// embedding space; vectors of different models are never compared (§13.5).
 type Embedder interface {
-	Model() string
+	Descriptor() EmbeddingDescriptor
 	Embed(text string) []float32
 }
 
@@ -138,8 +144,10 @@ type Embedder interface {
 // model-backed Embedder behind the same interface.
 type HashingEmbedder struct{ Dims int }
 
-// Model names the embedding space; v2 tokenizes CJK text into bigrams, so
-// v1 vectors are not comparable and are re-embedded by the indexer.
+func (h HashingEmbedder) Descriptor() EmbeddingDescriptor {
+	return EmbeddingDescriptor{Model: "hash-uni-bigram", Version: "v2", Dimensions: h.dims()}
+}
+
 func (h HashingEmbedder) Model() string { return "hash-uni-bigram-v2-" + itoa(h.dims()) }
 
 func (h HashingEmbedder) dims() int {
@@ -304,33 +312,43 @@ func RRF(lists ...[]string) map[string]float64 {
 
 var trustRank = map[string]int{"T0": 0, "T1": 1, "T2": 2, "T3": 3, "T4": 4}
 
-// ResolveConflicts keeps one memory per subject: the most trusted, then the
-// most confident, then the newest. Dropped duplicates are reported so the
-// model can be told the evidence is contested.
 func ResolveConflicts(ms []Memory) (kept []Memory, conflicts map[string][]string) {
 	conflicts = map[string][]string{}
-	best := map[string]Memory{}
+	type group struct {
+		memories []Memory
+		hashes   map[string]bool
+	}
+	groups := map[string]*group{}
 	order := []string{}
 	for _, m := range ms {
 		key := m.Scope + "|" + m.ScopeID + "|" + m.Subject
-		cur, ok := best[key]
-		if !ok {
-			best[key] = m
+		g := groups[key]
+		if g == nil {
+			g = &group{hashes: map[string]bool{}}
+			groups[key] = g
 			order = append(order, key)
+		}
+		g.memories = append(g.memories, m)
+		g.hashes[m.ContentHash] = true
+	}
+	for _, key := range order {
+		g := groups[key]
+		if len(g.hashes) > 1 {
+			ids := make([]string, 0, len(g.memories))
+			for _, m := range g.memories {
+				ids = append(ids, m.ID)
+			}
+			sort.Strings(ids)
+			conflicts[g.memories[0].Subject] = ids
 			continue
 		}
-		if cur.ContentHash != m.ContentHash {
-			conflicts[m.Subject] = append(conflicts[m.Subject], m.ID)
-		}
-		if better(m, cur) {
-			if cur.ContentHash != m.ContentHash {
-				conflicts[m.Subject] = append(conflicts[m.Subject], cur.ID)
+		best := g.memories[0]
+		for _, candidate := range g.memories[1:] {
+			if better(candidate, best) {
+				best = candidate
 			}
-			best[key] = m
 		}
-	}
-	for _, k := range order {
-		kept = append(kept, best[k])
+		kept = append(kept, best)
 	}
 	return kept, conflicts
 }

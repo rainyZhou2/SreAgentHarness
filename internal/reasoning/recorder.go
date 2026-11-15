@@ -247,10 +247,7 @@ func DistillPattern(run domain.Run, goal, service string, t Trace, m Metrics, qu
 	if firstVerified != "" {
 		title += ": " + clip(oneLine(firstVerified), 120)
 	}
-	status := "CANDIDATE"
-	if quality == "VERIFIED" {
-		status = "VALIDATING"
-	}
+	status := memory.StatusCandidate
 	conf := m.Quality
 	shards := []domain.MemoryShard{{ShardKey: "service:" + service, Weight: 1, Source: "scope"},
 		{ShardKey: "run:" + run.ID, Weight: 0.4, Source: "run"}}

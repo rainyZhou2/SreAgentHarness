@@ -255,8 +255,10 @@ func (s *Store) ServiceCapabilityNotes(ctx context.Context, tenantID string, ser
 			SELECT m.title FROM memory_shards s
 			JOIN agent_memories m ON m.tenant_id = s.tenant_id AND m.id = s.memory_id
 			WHERE s.tenant_id = c.tenant_id AND s.shard_key = 'capability:' || c.ref
-			  AND m.status = 'ACTIVE' AND m.sensitivity <> 'restricted' AND m.trust <> 'T4'
-			  AND (m.expires_at IS NULL OR m.expires_at > now())
+			  AND ((m.memory_type = 'procedural' AND m.status = 'APPROVED') OR
+				(m.memory_type <> 'procedural' AND m.status IN ('VERIFIED','APPROVED')))
+			  AND m.sensitivity <> 'restricted' AND m.trust <> 'T4'
+			  AND (m.expires_at IS NULL OR m.expires_at > now())`+memoryACLPredicate(5)+`
 			ORDER BY m.updated_at DESC LIMIT 1
 		) l ON true
 		WHERE c.tenant_id=$1 AND (
@@ -269,7 +271,7 @@ func (s *Store) ServiceCapabilityNotes(ctx context.Context, tenantID string, ser
 			)
 		)
 		ORDER BY CASE c.kind WHEN 'tool' THEN 0 WHEN 'skill' THEN 1 WHEN 'mcp_server' THEN 2 ELSE 3 END,
-			c.name LIMIT $4`, tenantID, services, refs, limit)
+			c.name LIMIT $4`, tenantID, services, refs, limit, memorySubjects(ctx))
 	if err != nil {
 		return nil, err
 	}

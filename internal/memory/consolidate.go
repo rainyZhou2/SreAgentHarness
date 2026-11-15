@@ -11,6 +11,7 @@ import (
 
 	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/security"
 )
 
 // NewMemory is a memory write request (from the consolidator or the API).
@@ -19,7 +20,7 @@ type NewMemory struct {
 	Scope        string
 	ScopeID      string
 	Type         string
-	Status       string // CANDIDATE (default) or ACTIVE for verified writes
+	Status       string // CANDIDATE (default), VERIFIED or APPROVED for governed writes
 	Subject      string
 	Title        string
 	Content      string
@@ -38,12 +39,13 @@ type NewMemory struct {
 	// CreateMemory always adds the scope-derived shard.
 	Shards []domain.MemoryShard
 	// Filled by Writer.Prepare.
-	ContentRef     string
-	ContentHash    string
-	SearchTerms    string
-	Embedding      []float32
-	EmbeddingModel string
-	Redactions     int
+	ContentRef          string
+	ContentHash         string
+	SearchTerms         string
+	Embedding           []float32
+	EmbeddingModel      string
+	EmbeddingDescriptor EmbeddingDescriptor
+	Redactions          int
 }
 
 var ErrPoisoned = errors.New("memory content looks like instructions (possible poisoning)")
@@ -98,7 +100,16 @@ func (w Writer) Prepare(ctx context.Context, m NewMemory) (NewMemory, error) {
 	m.ContentRef, m.ContentHash = ref, artifact.Hash([]byte(m.Scope+"|"+m.ScopeID+"|"+m.Subject+"|"+m.Content))
 	_ = hash
 	m.SearchTerms = SearchTerms(m.Title, m.Content, m.Subject)
-	m.Embedding, m.EmbeddingModel = w.Embedder.Embed(m.Title+"\n"+m.Content), w.Embedder.Model()
+	if w.Embedder != nil {
+		m.Embedding = w.Embedder.Embed(m.Title + "\n" + m.Content)
+		m.EmbeddingDescriptor = w.Embedder.Descriptor()
+		m.EmbeddingModel = m.EmbeddingDescriptor.Model
+		if !m.EmbeddingDescriptor.Matches(m.Embedding) {
+			m.Embedding = nil
+			m.EmbeddingDescriptor = EmbeddingDescriptor{}
+			m.EmbeddingModel = ""
+		}
+	}
 	return m, nil
 }
 
@@ -219,6 +230,7 @@ type lessons struct {
 }
 
 func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
+	ctx = security.WithCaller(ctx, security.Caller{TenantID: j.TenantID, Subject: "run:" + j.RunID, RunID: j.RunID})
 	rec, err := c.Store.RunRecord(ctx, j.TenantID, j.RunID)
 	if err != nil {
 		return err
@@ -311,12 +323,7 @@ func (c *Consolidator) process(ctx context.Context, j ConsolidationJob) error {
 		}
 	}
 	if run.Status == domain.RunCompleted && l.Conclusion != "" && service != "" && quality != "DISPUTED" {
-		// Operator feedback is not approval: a verified run only yields a
-		// VALIDATING memory, which an approver activates (TransitionMemory).
-		status, trust := "CANDIDATE", "T3"
-		if quality == "VERIFIED" {
-			status = "VALIDATING"
-		}
+		status, trust := StatusCandidate, "T3"
 		content := fmt.Sprintf("Incident goal: %s\nConclusion: %s", goal.Goal, l.Conclusion)
 		if len(l.Actions) > 0 {
 			content += "\nActions executed: " + strings.Join(l.Actions, "; ")

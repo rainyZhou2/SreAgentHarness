@@ -21,6 +21,8 @@ type MemoryStore interface {
 	CreateMemory(ctx context.Context, m memory.NewMemory) (memory.Memory, bool, error)
 	TransitionMemory(ctx context.Context, tenantID, id, from, to, actor, reason string) (memory.Memory, error)
 	GetMemory(ctx context.Context, tenantID, id string) (memory.Memory, error)
+	VerifyMemory(ctx context.Context, input memory.VerificationInput, verifier, idempotencyKey string) (memory.VerificationRecord, memory.Memory, error)
+	ApproveMemory(ctx context.Context, tenantID, id string, expectedVersion int64, approver string) (memory.Memory, error)
 	ListMemories(ctx context.Context, tenantID string, f pg.MemoryFilter) ([]memory.Memory, error)
 	PutServiceDependency(ctx context.Context, tenantID, service, dependsOn, relation string) error
 	PutFeedback(ctx context.Context, tenantID, runID string, f memory.Feedback) error
@@ -36,9 +38,10 @@ type MemoryStore interface {
 
 // MemoryAPI exposes the memory lifecycle, feedback and incident working memory.
 type MemoryAPI struct {
-	Store  MemoryStore
-	Writer memory.Writer
-	Server *Server
+	Store      MemoryStore
+	Writer     memory.Writer
+	Server     *Server
+	Governance *memory.GovernanceService
 	// Curator enables the memory curation routes (nil: not served).
 	Curator *curate.Curator
 }
@@ -47,6 +50,8 @@ func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
 	roles := map[string]auth.Role{
 		"POST /api/memories":                              auth.Operator,
 		"POST /api/memories/{memory_id}/transition":       auth.Approver,
+		"POST /api/memories/{memory_id}/verify":           auth.Service,
+		"POST /api/memories/{memory_id}/approve":          auth.Approver,
 		"PATCH /api/memories/{memory_id}":                 auth.Approver,
 		"PUT /api/me/memories/{key}":                      auth.Viewer,
 		"DELETE /api/me/memories/{key}":                   auth.Viewer,
@@ -62,21 +67,26 @@ func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
 }
 
 func (m *MemoryAPI) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/memories", m.create)
-	mux.HandleFunc("GET /api/memories", m.list)
-	mux.HandleFunc("GET /api/memories/{memory_id}", m.get)
-	mux.HandleFunc("POST /api/memories/{memory_id}/transition", m.transition)
-	mux.HandleFunc("PATCH /api/memories/{memory_id}", m.update)
-	mux.HandleFunc("GET /api/me/memories", m.listMine)
-	mux.HandleFunc("PUT /api/me/memories/{key}", m.putMine)
-	mux.HandleFunc("DELETE /api/me/memories/{key}", m.deleteMine)
-	mux.HandleFunc("POST /api/service-dependencies", m.putDependency)
-	mux.HandleFunc("POST /api/runs/{run_id}/feedback", m.feedback)
-	mux.HandleFunc("GET /api/runs/{run_id}/feedback", m.listFeedback)
-	mux.HandleFunc("GET /api/experiences", m.experiences)
-	mux.HandleFunc("POST /api/incidents", m.createIncident)
-	mux.HandleFunc("POST /api/incidents/{incident_id}/memory-events", m.appendIncident)
-	mux.HandleFunc("GET /api/incidents/{incident_id}/memory-events", m.listIncident)
+	handle := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, withMemoryAccess(handler))
+	}
+	handle("POST /api/memories", m.create)
+	handle("GET /api/memories", m.list)
+	handle("GET /api/memories/{memory_id}", m.get)
+	handle("POST /api/memories/{memory_id}/transition", m.transition)
+	handle("POST /api/memories/{memory_id}/verify", m.verify)
+	handle("POST /api/memories/{memory_id}/approve", m.approve)
+	handle("PATCH /api/memories/{memory_id}", m.update)
+	handle("GET /api/me/memories", m.listMine)
+	handle("PUT /api/me/memories/{key}", m.putMine)
+	handle("DELETE /api/me/memories/{key}", m.deleteMine)
+	handle("POST /api/service-dependencies", m.putDependency)
+	handle("POST /api/runs/{run_id}/feedback", m.feedback)
+	handle("GET /api/runs/{run_id}/feedback", m.listFeedback)
+	handle("GET /api/experiences", m.experiences)
+	handle("POST /api/incidents", m.createIncident)
+	handle("POST /api/incidents/{incident_id}/memory-events", m.appendIncident)
+	handle("GET /api/incidents/{incident_id}/memory-events", m.listIncident)
 	m.registerCuration(mux)
 }
 
@@ -271,12 +281,12 @@ func (m *MemoryAPI) putMine(w http.ResponseWriter, r *http.Request) {
 		m.Server.domainErr(w, err)
 		return
 	}
-	if found && cur.Status == "ACTIVE" {
+	if found {
 		m.revise(w, r, id, cur, cur.Version, key, b.Value, nil, "set by the user")
 		return
 	}
 	prepared, err := m.Writer.Prepare(r.Context(), memory.NewMemory{TenantID: id.tenant, Scope: "user", ScopeID: id.actor,
-		Type: "semantic", Status: "ACTIVE", Subject: memory.PersonalSubject(key), Title: key, Content: b.Value,
+		Type: "semantic", Status: memory.Approved, Subject: memory.PersonalSubject(key), Title: key, Content: b.Value,
 		SourceRefs: []string{"user:" + id.actor}, Trust: "T2", Sensitivity: "restricted", CreatedBy: id.actor})
 	if errors.Is(err, memory.ErrPoisoned) {
 		writeErr(w, http.StatusUnprocessableEntity, "memory_rejected_poisoning", err.Error())
@@ -313,11 +323,7 @@ func (m *MemoryAPI) deleteMine(w http.ResponseWriter, r *http.Request) {
 		m.Server.domainErr(w, err)
 		return
 	}
-	to := "ARCHIVED"
-	if cur.Status != "ACTIVE" {
-		to = "REJECTED"
-	}
-	mem, err := m.Store.TransitionMemory(r.Context(), id.tenant, cur.ID, cur.Status, to, id.actor, "deleted by the user")
+	mem, err := m.Store.TransitionMemory(r.Context(), id.tenant, cur.ID, cur.Status, memory.Revoked, id.actor, "deleted by the user")
 	if err != nil {
 		m.Server.domainErr(w, err)
 		return
@@ -337,6 +343,10 @@ func (m *MemoryAPI) transition(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&b); err != nil || b.To == "" || b.From == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body", "expected_status and to are required")
+		return
+	}
+	if err := rejectPublicationTransition(b.To); err != nil {
+		m.Server.domainErr(w, err)
 		return
 	}
 	if cur, err := m.Store.GetMemory(r.Context(), id.tenant, r.PathValue("memory_id")); err != nil || !canSeeMemory(r, id, cur) {

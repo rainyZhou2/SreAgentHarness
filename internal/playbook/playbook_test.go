@@ -133,11 +133,14 @@ func TestProposePromoteAndFeedback(t *testing.T) {
 	if err != nil || again.ID != m.ID || again.Verification.SuccessCount != 1 {
 		t.Fatalf("re-propose: %+v %v", again.Verification, err)
 	}
-	// The proposer cannot promote it; another reviewer can.
-	if _, err := l.TransitionMemory(ctx, "t", m.ID, "CANDIDATE", "ACTIVE", "alice", "lgtm"); err == nil {
+	verification := memory.VerificationInputFor(m, "decision:w1:review", "outcome:w1:ev-w1")
+	if _, m, err = l.VerifyMemory(ctx, verification, "service:verifier", "verify-"+m.ID); err != nil {
+		t.Fatalf("verification: %v", err)
+	}
+	if _, err := l.ApproveMemory(ctx, "t", m.ID, m.Version, "alice"); err == nil {
 		t.Fatal("self-promotion accepted")
 	}
-	if _, err := l.TransitionMemory(ctx, "t", m.ID, "CANDIDATE", "ACTIVE", "bob", "lgtm"); err != nil {
+	if _, err := l.ApproveMemory(ctx, "t", m.ID, m.Version, "bob"); err != nil {
 		t.Fatalf("promotion: %v", err)
 	}
 
@@ -157,12 +160,13 @@ func TestProposePromoteAndFeedback(t *testing.T) {
 	if n, err := svc.Sweep(ctx, fw, time.Time{}, 100); err != nil || n != 0 {
 		t.Fatalf("sweep recounted: %d %v", n, err)
 	}
-	got, _ := l.GetMemory(ctx, "t", m.ID)
+	reader := memory.WithAccessContext(ctx, memory.AccessContext{TenantID: "t", Subjects: []string{"role:admin"}})
+	got, _ := l.GetMemory(reader, "t", m.ID)
 	if got.Verification.SuccessCount != 2 || got.Verification.FailureCount != 1 || got.Verification.LastVerifiedAt == nil {
 		t.Fatalf("verification: %+v", got.Verification)
 	}
 	// Plain memories retrieved by a run are not scored.
-	plain, _, err := l.CreateMemory(ctx, memory.NewMemory{TenantID: "t", Scope: "organization", Type: "semantic", Status: "ACTIVE",
+	plain, _, err := l.CreateMemory(ctx, memory.NewMemory{TenantID: "t", Scope: "organization", Type: "semantic", Status: memory.Approved,
 		Subject: "s", Title: "t", Content: "c", ContentHash: "h1", CreatedBy: "x"})
 	if err != nil {
 		t.Fatal(err)

@@ -28,9 +28,9 @@ func (m *MemoryAPI) registerCuration(mux *http.ServeMux) {
 	if m.Curator == nil {
 		return
 	}
-	mux.HandleFunc("GET /api/memory/curation", m.listCuration)
-	mux.HandleFunc("POST /api/memory/curation/run", m.runCuration)
-	mux.HandleFunc("POST /api/memory/curation/{id}/decide", m.decideCuration)
+	mux.HandleFunc("GET /api/memory/curation", withMemoryAccess(m.listCuration))
+	mux.HandleFunc("POST /api/memory/curation/run", withMemoryAccess(m.runCuration))
+	mux.HandleFunc("POST /api/memory/curation/{id}/decide", withMemoryAccess(m.decideCuration))
 }
 
 func (m *MemoryAPI) listCuration(w http.ResponseWriter, r *http.Request) {

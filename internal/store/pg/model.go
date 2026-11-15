@@ -9,6 +9,7 @@ import (
 
 	"go-sre-harness/internal/domain"
 	gw "go-sre-harness/internal/gateway"
+	"go-sre-harness/internal/retention"
 	"go-sre-harness/internal/stream"
 )
 
@@ -278,11 +279,17 @@ func (s *Store) costSummary(ctx context.Context, where string, args ...any) (Cos
 
 // InsertStreamSegment records a bounded delta segment stored in object storage (§35.5).
 func (s *Store) InsertStreamSegment(ctx context.Context, seg stream.Segment) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO model_stream_segments (tenant_id, run_id, model_request_id, segment_no,
-		first_delta_seq, last_delta_seq, segment_ref, segment_hash, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (model_request_id, segment_no) DO NOTHING`, seg.TenantID, seg.RunID, seg.ModelRequestID, seg.No,
-		seg.FirstSeq, seg.LastSeq, seg.Ref, seg.Hash, seg.ExpiresAt)
-	return err
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO model_stream_segments (tenant_id, run_id, model_request_id, segment_no,
+			first_delta_seq, last_delta_seq, segment_ref, segment_hash, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT (model_request_id, segment_no) DO NOTHING`, seg.TenantID, seg.RunID, seg.ModelRequestID, seg.No,
+			seg.FirstSeq, seg.LastSeq, seg.Ref, seg.Hash, seg.ExpiresAt)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		return referenceArtifact(ctx, tx, retention.ArtifactReference{TenantID: seg.TenantID, ArtifactRef: seg.Ref,
+			ReferrerType: streamSegmentReference, ReferrerID: seg.ModelRequestID, ReferrerVersion: int64(seg.No)})
+	})
 }
 
 type SegmentView struct {

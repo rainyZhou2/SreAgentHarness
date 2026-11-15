@@ -13,17 +13,18 @@ import (
 )
 
 // CandidateQuery is the hard-filter stage, evaluated in SQL: tenant, status
-// ACTIVE, scope (organization, the services in play, the incident), not
+// VERIFIED/APPROVED, scope (organization, the services in play, the incident), not
 // expired, sensitivity allowed. Only filtered rows reach ranking.
 type CandidateQuery struct {
-	TenantID       string
-	Services       []string
-	IncidentID     string
-	Text           string
-	EmbeddingModel string
-	MaxSensitivity string // public | internal | restricted
-	Shards         []string
-	Limit          int
+	TenantID            string
+	Services            []string
+	IncidentID          string
+	Text                string
+	EmbeddingModel      string
+	EmbeddingDescriptor EmbeddingDescriptor
+	MaxSensitivity      string // public | internal | restricted
+	Shards              []string
+	Limit               int
 }
 
 type Candidate struct {
@@ -71,13 +72,14 @@ func uniqueStrings(in []string, max int) []string {
 }
 
 type hitView struct {
-	MemoryID string   `json:"memory_id"`
-	Version  int64    `json:"version"`
-	Title    string   `json:"title"`
-	Scope    string   `json:"scope"`
-	Trust    string   `json:"trust"`
-	Score    float64  `json:"score"`
-	Branches []string `json:"branches"`
+	MemoryID  string               `json:"memory_id"`
+	Version   int64                `json:"version"`
+	Title     string               `json:"title"`
+	Scope     string               `json:"scope"`
+	Trust     string               `json:"trust"`
+	Score     float64              `json:"score"`
+	Branches  []string             `json:"branches"`
+	Embedding *EmbeddingDescriptor `json:"embedding_descriptor,omitempty"`
 }
 
 // SearchResult is one retrieval: the kept memories in rank order, their
@@ -97,10 +99,11 @@ type SearchResult struct {
 }
 
 // Search runs the retrieval pipeline for a query: hard filters (tenant,
-// ACTIVE, scope, expiry, sensitivity), full-text, vector and dependency
+// VERIFIED/APPROVED, scope, expiry, sensitivity), full-text, vector and dependency
 // branches, RRF fusion with shard affinity, trust and exclusion filters,
 // conflict resolution and top-k. Extra services widen the scope filter.
 func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, extra []string, k int) (SearchResult, error) {
+	ctx = r.withRunAccess(ctx, tenantID, runID)
 	service := ServiceFromGoal(query)
 	services := []string{}
 	if service != "" {
@@ -149,8 +152,17 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 		shards = append(shards, more...)
 	}
 	shards = uniqueStrings(shards, 20)
+	var descriptor EmbeddingDescriptor
+	var queryEmbedding []float32
+	if r.Embedder != nil {
+		queryEmbedding = r.Embedder.Embed(query)
+		descriptor = r.Embedder.Descriptor()
+		if !descriptor.Matches(queryEmbedding) {
+			queryEmbedding = nil
+		}
+	}
 	cands, err := r.Store.MemoryCandidates(ctx, CandidateQuery{TenantID: tenantID, Services: services,
-		IncidentID: incident, Text: query, EmbeddingModel: r.Embedder.Model(), MaxSensitivity: "internal",
+		IncidentID: incident, Text: query, EmbeddingModel: descriptor.Model, EmbeddingDescriptor: descriptor, MaxSensitivity: "internal",
 		Shards: shards, Limit: 500})
 	if err != nil {
 		return SearchResult{}, domain.Retryable(err, 0)
@@ -166,7 +178,7 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 	var ftsS, vecS []scored
 	env, at := r.environment(ctx, tenantID, runID, services), r.now()
 	inapplicable := map[string]string{}
-	q := r.Embedder.Embed(query)
+	q := queryEmbedding
 	depSet := map[string]bool{}
 	for _, d := range deps {
 		depSet[d] = true
@@ -184,7 +196,7 @@ func (r *Retriever) Search(ctx context.Context, tenantID, runID, query string, e
 		if c.FTSRank > 0 {
 			ftsS = append(ftsS, scored{c.ID, c.FTSRank})
 		}
-		if len(q) > 0 && len(c.Embedding) > 0 {
+		if len(q) > 0 && c.EmbeddingDescriptor.Comparable(descriptor) && c.EmbeddingDescriptor.Matches(c.Embedding) {
 			if s := Cosine(q, c.Embedding); s > 0.05 {
 				vecS = append(vecS, scored{c.ID, s})
 			}
@@ -280,6 +292,7 @@ func (r *Retriever) personal(ctx context.Context, tenantID, runID string) []Memo
 }
 
 func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal string) (domain.StepSuccess, error) {
+	ctx = r.withRunAccess(ctx, lease.TenantID, lease.RunID)
 	res, err := r.Search(ctx, lease.TenantID, lease.RunID, goal, nil, 0)
 	if err != nil {
 		return domain.StepSuccess{}, err
@@ -288,8 +301,13 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 	var views []hitView
 	for i, m := range res.Kept {
 		hits = append(hits, domain.MemoryHit{MemoryID: m.ID, Version: m.Version, Score: res.Scores[m.ID], Rank: i + 1})
-		views = append(views, hitView{MemoryID: m.ID, Version: m.Version, Title: m.Title, Scope: m.Scope + ":" + m.ScopeID,
-			Trust: m.Trust, Score: res.Scores[m.ID], Branches: res.Branches[m.ID]})
+		view := hitView{MemoryID: m.ID, Version: m.Version, Title: m.Title, Scope: m.Scope + ":" + m.ScopeID,
+			Trust: m.Trust, Score: res.Scores[m.ID], Branches: res.Branches[m.ID]}
+		if m.EmbeddingDescriptor.Valid() {
+			descriptor := m.EmbeddingDescriptor
+			view.Embedding = &descriptor
+		}
+		views = append(views, view)
 	}
 	// Personal memory of the user who started the run is pinned with the
 	// rest, so every step and retry of the run sees the same preferences.
@@ -300,8 +318,12 @@ func (r *Retriever) Retrieve(ctx context.Context, lease domain.Lease, goal strin
 		views = append(views, hitView{MemoryID: m.ID, Version: m.Version, Title: m.Title, Scope: "user", Trust: m.Trust,
 			Branches: []string{"personal"}})
 	}
+	var descriptor EmbeddingDescriptor
+	if r.Embedder != nil {
+		descriptor = r.Embedder.Descriptor()
+	}
 	out := map[string]any{"query": goal, "service": res.Service, "dependencies": res.Deps, "shards": res.Shards,
-		"candidates": res.Candidates, "embedding_model": r.Embedder.Model(), "hits": views, "conflicts": res.Conflicts,
+		"candidates": res.Candidates, "embedding_descriptor": descriptor, "hits": views, "conflicts": res.Conflicts,
 		"personal": personal}
 	data, _ := json.Marshal(out)
 	ref, h, err := r.Artifacts.Put(ctx, lease.TenantID, "memory-retrieval", data)

@@ -111,7 +111,7 @@ func newImprover(st *fakeStore, ev *fakeEvo, dataset string) *Improver {
 }
 
 func pattern(id string) memory.Memory {
-	return memory.Memory{ID: id, Type: "procedural", Subject: "api:" + reasoning.PatternSubject, Status: "ACTIVE"}
+	return memory.Memory{ID: id, Type: "procedural", Subject: "api:" + reasoning.PatternSubject, Status: memory.Approved}
 }
 
 func reasoningPatch(t *testing.T, ev *fakeEvo) profile.ReasoningSpec {
@@ -192,7 +192,7 @@ func TestRetiresRelativeToServiceBaseline(t *testing.T) {
 
 func TestReinstatesFromProbeEvidence(t *testing.T) {
 	ctx := context.Background()
-	mems := map[string]memory.Memory{"m1": pattern("m1"), "gone": {ID: "gone", Status: "ARCHIVED"}}
+	mems := map[string]memory.Memory{"m1": pattern("m1"), "gone": {ID: "gone", Status: memory.Revoked}}
 	spec := `{"reasoning":{"patterns_excluded":["gone","m1"],"pattern_probe_rate":0.05}}`
 	// Probed runs with m1 do as well as the baseline.
 	st := &fakeStore{scores: cat(runs("a", "api", 30, 24, nil, nil), runs("p", "api", 10, 9, []string{"m1"}, nil)), mems: mems, spec: spec}
@@ -242,7 +242,7 @@ func TestExclusionCapacity(t *testing.T) {
 func TestOnlyActivePatternsAreRetired(t *testing.T) {
 	m := pattern("m1")
 	m.Status = "CANDIDATE"
-	other := memory.Memory{ID: "m2", Type: "semantic", Status: "ACTIVE"}
+	other := memory.Memory{ID: "m2", Type: "semantic", Status: memory.Approved}
 	scores := cat(runs("a", "api", 30, 27, nil, nil), runs("m", "api", 20, 1, []string{"m1", "m2"}, nil))
 	st := &fakeStore{scores: scores, mems: map[string]memory.Memory{"m1": m, "m2": other}, spec: `{}`}
 	o := newImprover(st, &fakeEvo{}, "").TickTenant(context.Background(), "t")

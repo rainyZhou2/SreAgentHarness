@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/memory"
 )
 
 func hypo(s string, st domain.ThoughtStatus, c float64, refs ...string) domain.Thought {
@@ -108,7 +109,7 @@ func TestDistillPattern(t *testing.T) {
 	if !ok {
 		t.Fatal("verified run must distill")
 	}
-	if nm.Status != "VALIDATING" || nm.Subject != "api:"+PatternSubject || nm.Type != "procedural" || nm.ScopeID != "api" {
+	if nm.Status != memory.StatusCandidate || nm.Subject != "api:"+PatternSubject || nm.Type != "procedural" || nm.ScopeID != "api" {
 		t.Fatalf("%+v", nm)
 	}
 	for _, want := range []string{"1. cache stampede → REFUTED (confidence 0.40)", "2. disk full → VERIFIED", "Tools in order until the first verdict: logs", "df shows 100%"} {

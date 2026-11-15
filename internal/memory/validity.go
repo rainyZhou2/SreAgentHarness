@@ -17,6 +17,7 @@ func (r *Retriever) MemoryContext(ctx context.Context, tenantID, runID string) c
 // RecallableMemory revalidates a historical search hit against the live ledger.
 // Missing readers and missing records fail closed; storage errors remain errors.
 func (r *Retriever) RecallableMemory(ctx context.Context, tenantID, runID, id string, version int64) (bool, error) {
+	ctx = r.withRunAccess(ctx, tenantID, runID)
 	reader, ok := r.Store.(interface {
 		GetMemory(context.Context, string, string) (Memory, error)
 	})
@@ -42,7 +43,7 @@ func (m Memory) Recallable(tenantID string, env Env, at time.Time) (bool, string
 	if tenantID == "" || m.TenantID != tenantID {
 		return false, "tenant"
 	}
-	if m.Status != "ACTIVE" {
+	if !RecallStatus(m.Status, m.Type) {
 		return false, "status " + m.Status
 	}
 	if rank, ok := trustRank[m.Trust]; !ok || rank >= trustRank["T4"] {

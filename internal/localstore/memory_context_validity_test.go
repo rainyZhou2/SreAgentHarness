@@ -20,7 +20,7 @@ func TestPinnedMemoryCannotBypassRevocationOrVersion(t *testing.T) {
 	s.runs["r"] = domain.Run{ID: "r", TenantID: "t", InitiatorType: "user", InitiatorID: &user}
 	s.steps["retrieve"] = domain.Step{ID: "retrieve", RunID: "r", TenantID: "t", Seq: 1, Kind: domain.StepRetrieve, Status: domain.StepSucceeded}
 	s.memHits["retrieve"] = []memoryHitRec{{MemoryID: "m", Version: 1}}
-	base := memory.Memory{ID: "m", TenantID: "t", Version: 1, Status: "ACTIVE", Trust: "T2", Sensitivity: "internal", Content: "approved"}
+	base := memory.Memory{ID: "m", TenantID: "t", Version: 1, Status: memory.Verified, Trust: "T2", Sensitivity: "internal", Content: "approved"}
 	for _, tc := range []struct {
 		name   string
 		change func(*memory.Memory)
@@ -39,7 +39,11 @@ func TestPinnedMemoryCannotBypassRevocationOrVersion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := base
 			tc.change(&m)
-			s.memories["m"] = memoryRec{Mem: m}
+			acl := []memory.ACLGrant{{TenantID: m.TenantID, MemoryID: m.ID, Subject: "role:viewer"}}
+			if m.Scope == "user" {
+				acl = []memory.ACLGrant{{TenantID: m.TenantID, MemoryID: m.ID, Subject: "user:" + m.ScopeID}}
+			}
+			s.memories["m"] = memoryRec{Mem: m, ACL: acl}
 			got, err := s.SnapshotContext(context.Background(), "t", "r", "", 2)
 			if err != nil || len(got.Memories) != tc.want {
 				t.Fatalf("context=%+v error=%v", got, err)

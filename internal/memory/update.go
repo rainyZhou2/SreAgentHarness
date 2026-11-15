@@ -14,8 +14,8 @@ import (
 //   - revision: UpdateMemory writes a new version of the content (pinned
 //     citations of the old version stay valid); embeddings and search
 //     terms follow the new version;
-//   - supersession: activating a memory retires ACTIVE memories with the
-//     same subject in the same scope (a newer answer to the same question);
+//   - supersession: an explicit governed relation retires the previous
+//     memory while retaining its immutable history;
 //   - lifecycle: feedback, review and retention move it between statuses.
 
 // NearDuplicateCosine is the embedding similarity at or above which two
@@ -32,11 +32,13 @@ const MaxSourceRefs = 50
 // StatusRank orders live statuses by how validated they are.
 func StatusRank(s string) int {
 	switch s {
-	case "ACTIVE":
+	case Approved:
+		return 3
+	case Verified:
 		return 2
-	case "VALIDATING":
+	case StatusCandidate:
 		return 1
-	case "CANDIDATE":
+	case Contested, Stale:
 		return 0
 	}
 	return -1
@@ -119,7 +121,7 @@ type Revision struct {
 // Updater is implemented by stores that revise and look up memories.
 type Updater interface {
 	// LiveMemoryBySubject returns the most validated live memory
-	// (ACTIVE, VALIDATING, CANDIDATE) with this scope and subject.
+	// (APPROVED, VERIFIED, CANDIDATE, CONTESTED, STALE) with this scope and subject.
 	LiveMemoryBySubject(ctx context.Context, tenantID, scope, scopeID, subject string) (Memory, bool, error)
 	UpdateMemory(ctx context.Context, r Revision) (Memory, error)
 	TransitionMemory(ctx context.Context, tenantID, id, from, to, actor, reason string) (Memory, error)
@@ -138,8 +140,12 @@ func (w Writer) PrepareRevision(ctx context.Context, cur Memory, title, content 
 	if evidence == nil {
 		evidence = cur.EvidenceRefs
 	}
+	status := StatusCandidate
+	if IsOwnerPreference(cur) {
+		status = Approved
+	}
 	return w.Prepare(ctx, NewMemory{TenantID: cur.TenantID, Scope: cur.Scope, ScopeID: cur.ScopeID, Type: cur.Type,
-		Status: cur.Status, Subject: cur.Subject, Title: title, Content: content, SourceRefs: srcs, EvidenceRefs: evidence,
+		Status: status, Subject: cur.Subject, Title: title, Content: content, SourceRefs: srcs, EvidenceRefs: evidence,
 		Trust: cur.Trust, Sensitivity: cur.Sensitivity, Confidence: cur.Confidence, Environment: cur.Environment,
 		ExpiresAt: cur.ExpiresAt, CreatedBy: cur.CreatedBy})
 }
@@ -151,7 +157,7 @@ type PersonalStore interface {
 	// RunInitiator returns the user who started the run ("" when it was
 	// not a user: a trigger, a schedule, a parent flow).
 	RunInitiator(ctx context.Context, tenantID, runID string) (string, error)
-	// PersonalMemories returns the user's ACTIVE, unexpired memories,
+	// PersonalMemories returns the user's recallable, unexpired memories,
 	// most recently updated first.
 	PersonalMemories(ctx context.Context, tenantID, userID string, limit int) ([]Memory, error)
 }

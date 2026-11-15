@@ -170,12 +170,13 @@ type RolloutEnd struct {
 }
 
 type Service struct {
-	Store     Store
-	Artifacts artifact.Store
-	Registry  *tools.Registry
-	Factory   profile.Factory
-	Gate      GateConfig
-	Log       *slog.Logger
+	Store           Store
+	Artifacts       artifact.Store
+	ReplayArtifacts artifact.Store
+	Registry        *tools.Registry
+	Factory         profile.Factory
+	Gate            GateConfig
+	Log             *slog.Logger
 	// Grader scores answers during replay (nil = SubstringGrader).
 	Grader Grader
 }

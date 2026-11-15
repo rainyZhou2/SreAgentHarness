@@ -45,6 +45,8 @@ type S3Config struct {
 	// "incident"); bucket lifecycle rules expire raw telemetry by tag while
 	// evidence cited by a postmortem keeps the longer class.
 	RetentionClass string `json:"retention_class,omitempty"`
+	// ManagedRetention delegates all deletion decisions to database references and holds.
+	ManagedRetention bool `json:"managed_retention,omitempty"`
 	// TimeoutSeconds bounds one request (default 30).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 
@@ -94,6 +96,9 @@ func NewS3(cfg S3Config) (*S3, error) {
 	}
 	if cfg.KMSKeyID != "" && cfg.Encryption != "aws:kms" {
 		return nil, fmt.Errorf("artifact s3: kms_key_id needs encryption aws:kms")
+	}
+	if cfg.ManagedRetention && cfg.RetentionClass != "" {
+		return nil, fmt.Errorf("artifact s3: retention_class cannot authorize external lifecycle deletion with managed retention")
 	}
 	if cfg.Prefix != "" && !strings.HasSuffix(cfg.Prefix, "/") {
 		cfg.Prefix += "/"

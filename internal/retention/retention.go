@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"go-sre-harness/internal/artifact"
-	"go-sre-harness/internal/store/pg"
 )
 
 type Store interface {
+	ArtifactLeaseStore
 	DeletePublishedOutbox(ctx context.Context, cutoff time.Time, limit int) (int64, error)
-	ExpiredSegments(ctx context.Context, now time.Time, limit int) ([]pg.ExpiredSegment, error)
-	DeleteSegment(ctx context.Context, e pg.ExpiredSegment) error
 	ExpireMemories(ctx context.Context, now time.Time, limit int) (int64, error)
 	DeleteOldAudit(ctx context.Context, cutoff time.Time, limit int) (int64, error)
 	DeleteOldReasoningScores(ctx context.Context, cutoff time.Time, limit int) (int64, error)
@@ -35,6 +33,8 @@ type Config struct {
 	// ReasoningRetention bounds reasoning_scores (default 90 days). Keep it
 	// longer than the reasoning improver's window and any canary.
 	ReasoningRetention time.Duration
+	ArtifactLease      time.Duration
+	ArtifactBackoff    time.Duration
 	Batch              int
 }
 
@@ -82,25 +82,14 @@ func (c *Cleaner) Tick(ctx context.Context) (Result, error) {
 	}
 	res.Outbox = n
 
-	segs, err := c.Store.ExpiredSegments(ctx, now, c.Cfg.Batch)
-	if err != nil {
-		return res, err
-	}
-	del, _ := c.Artifacts.(artifact.Deleter)
-	for _, s := range segs {
-		// Object first: a row without its object is harmless (reads 404),
-		// an object without its row would leak.
-		if del != nil {
-			if err := del.Delete(ctx, s.TenantID, s.Ref); err != nil {
-				c.Log.Warn("segment object delete failed", "ref", s.Ref, "err", err)
-				continue
-			}
-			res.SegmentObjects++
+	if del, ok := c.Artifacts.(artifact.Deleter); ok {
+		cleaned, cleanErr := (&ArtifactCleaner{Store: c.Store, Objects: del, Batch: c.Cfg.Batch,
+			Lease: c.Cfg.ArtifactLease, Backoff: c.Cfg.ArtifactBackoff, Now: c.Now}).Clean(ctx)
+		res.Segments = int64(cleaned.Confirmed)
+		res.SegmentObjects = int64(cleaned.Deleted)
+		if cleanErr != nil {
+			return res, cleanErr
 		}
-		if err := c.Store.DeleteSegment(ctx, s); err != nil {
-			return res, err
-		}
-		res.Segments++
 	}
 	if res.Memories, err = c.Store.ExpireMemories(ctx, now, c.Cfg.Batch); err != nil {
 		return res, err
