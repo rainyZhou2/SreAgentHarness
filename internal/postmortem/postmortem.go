@@ -522,7 +522,7 @@ func Brief(r Report, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	const marker = "\n... (report truncated; GET /v1/works/{id}/postmortem has the full report)\n"
+	const marker = "\n... (report truncated; GET /api/works/{id}/postmortem has the full report)\n"
 	cut := s[:max(0, n-len(marker))]
 	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
 		cut = cut[:i]

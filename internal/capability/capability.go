@@ -65,7 +65,7 @@ func (Base) RegisterOutcomes(OutcomeRegistry) error { return nil }
 // EventRegistry receives event sources and correlation rules.
 type EventRegistry interface {
 	// AddSource registers a webhook normalizer for a source name; the
-	// harness serves it at POST /v1/sources/{source}/events.
+	// harness serves it at POST /api/sources/{source}/events.
 	AddSource(source string, n Normalizer) error
 	// AddRule adds a default correlation rule; an operator rule with the
 	// same name replaces it.

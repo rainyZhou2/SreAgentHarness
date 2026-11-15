@@ -1,5 +1,5 @@
 // Package cli is the command-line client of the harness: an interactive chat
-// with inline approvals (`harness chat`). It talks to the same /v1 API as the
+// with inline approvals (`harness chat`). It talks to the same /api API as the
 // desktop client, so it works against the local runtime and a team server.
 package cli
 
@@ -157,7 +157,7 @@ func (c *Client) Follow(ctx context.Context, runID string, onEvent func(Event), 
 }
 
 func (c *Client) followOnce(ctx context.Context, runID string, after *int64, onEvent func(Event), onDelta func(Delta)) (got, ended bool, err error) {
-	r, err := c.req(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/events/stream?include_deltas=true", nil)
+	r, err := c.req(ctx, http.MethodGet, "/api/runs/"+url.PathEscape(runID)+"/events/stream?include_deltas=true", nil)
 	if err != nil {
 		return false, false, err
 	}

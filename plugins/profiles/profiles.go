@@ -22,7 +22,7 @@ const DemoSpec = `{"strategy":"llm","tools":["demo.metrics","demo.restart"],"max
 
 // ExtensionsSpec (sre-diagnosis@2, the default) also allows the tenant's
 // runtime tools: MCP servers (mcp.*) and HTTP tools (http.*) added through
-// /v1/extensions. Policy and approvals still apply to every call.
+// /api/extensions. Policy and approvals still apply to every call.
 const ExtensionsSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*"],"max_steps":12}`
 
 // WebSpec (sre-diagnosis@3) also allows the built-in web tools.

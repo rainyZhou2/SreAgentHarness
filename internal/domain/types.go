@@ -354,7 +354,7 @@ const (
 
 // Attachment is one structured part of a final answer. URL is an http(s)
 // address; Ref names a stored tool output of the run (served by
-// GET /v1/runs/{id}/attachments/{index}). Model output is untrusted: the
+// GET /api/runs/{id}/attachments/{index}). Model output is untrusted: the
 // kernel validates and caps attachments before they reach the result.
 type Attachment struct {
 	Type      string     `json:"type"`

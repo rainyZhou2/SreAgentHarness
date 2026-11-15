@@ -6,7 +6,7 @@
 // Add it from the desktop client (Customize → MCP servers) with the URL
 // http://127.0.0.1:8090/mcp, or with the API:
 //
-//	PUT /v1/extensions/mcp-servers/demo
+//	PUT /api/extensions/mcp-servers/demo
 //	{"spec":{"url":"http://127.0.0.1:8090/mcp","allow":{"runbook_search":{"risk":"R0"}}}}
 //
 // It exposes two read-only tools (runbook_search, oncall_lookup) and one

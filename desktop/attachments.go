@@ -50,7 +50,7 @@ func (a *App) OpenURL(raw string) error {
 var unsafeFileName = regexp.MustCompile(`[^\p{L}\p{N}._ -]+`)
 
 func attachmentPath(runID string, index int) string {
-	return fmt.Sprintf("/v1/runs/%s/attachments/%d", url.PathEscape(runID), index)
+	return fmt.Sprintf("/api/runs/%s/attachments/%d", url.PathEscape(runID), index)
 }
 
 // AttachmentImage returns a stored image attachment as a data: URL for an

@@ -132,38 +132,38 @@ func TestUsersCannotSeeEachOthersChatsAndRuns(t *testing.T) {
 	f := newFixture(t, false)
 	const bob = "operator"
 	for _, p := range []string{
-		"/v1/runs/" + f.aliceRun, "/v1/runs/" + f.aliceRun + "/steps", "/v1/runs/" + f.aliceRun + "/events",
-		"/v1/runs/" + f.aliceRun + "/events/stream", "/v1/runs/" + f.aliceRun + "/approvals", "/v1/runs/" + f.aliceRun + "/cost",
-		"/v1/runs/" + f.aliceRun + "/checkpoints", "/v1/runs/" + f.aliceRun + "/model-requests", "/v1/runs/" + f.aliceRun + "/flow",
-		"/v1/runs/" + f.aliceRun + "/attachments/0", "/v1/reasoning/runs/" + f.aliceRun,
-		"/v1/sessions/" + f.aliceSess, "/v1/sessions/" + f.aliceSess + "/turns",
+		"/api/runs/" + f.aliceRun, "/api/runs/" + f.aliceRun + "/steps", "/api/runs/" + f.aliceRun + "/events",
+		"/api/runs/" + f.aliceRun + "/events/stream", "/api/runs/" + f.aliceRun + "/approvals", "/api/runs/" + f.aliceRun + "/cost",
+		"/api/runs/" + f.aliceRun + "/checkpoints", "/api/runs/" + f.aliceRun + "/model-requests", "/api/runs/" + f.aliceRun + "/flow",
+		"/api/runs/" + f.aliceRun + "/attachments/0", "/api/reasoning/runs/" + f.aliceRun,
+		"/api/sessions/" + f.aliceSess, "/api/sessions/" + f.aliceSess + "/turns",
 	} {
 		if code, _ := f.do("bob", bob, "GET", p, ""); code != 404 {
 			t.Errorf("bob GET %s: %d, want 404 (the same answer as a missing id)", p, code)
 		}
 	}
 	for _, c := range [][3]string{
-		{"POST", "/v1/runs/" + f.aliceRun + "/commands", `{"type":"cancel","payload":{}}`},
-		{"POST", "/v1/runs/" + f.aliceRun + "/fork", `{}`},
-		{"POST", "/v1/sessions/" + f.aliceSess + "/turns", `{"text":"hi","client_request_id":"x"}`},
-		{"PATCH", "/v1/sessions/" + f.aliceSess, `{"title":"mine now"}`},
-		{"POST", "/v1/sessions/" + f.aliceSess + "/branches", `{}`},
+		{"POST", "/api/runs/" + f.aliceRun + "/commands", `{"type":"cancel","payload":{}}`},
+		{"POST", "/api/runs/" + f.aliceRun + "/fork", `{}`},
+		{"POST", "/api/sessions/" + f.aliceSess + "/turns", `{"text":"hi","client_request_id":"x"}`},
+		{"PATCH", "/api/sessions/" + f.aliceSess, `{"title":"mine now"}`},
+		{"POST", "/api/sessions/" + f.aliceSess + "/branches", `{}`},
 	} {
 		if code, _ := f.do("bob", bob, c[0], c[1], c[2]); code != 404 {
 			t.Errorf("bob %s %s: %d, want 404", c[0], c[1], code)
 		}
 	}
 	// a missing id answers the same
-	if code, _ := f.do("bob", bob, "GET", "/v1/runs/does-not-exist", ""); code != 404 {
+	if code, _ := f.do("bob", bob, "GET", "/api/runs/does-not-exist", ""); code != 404 {
 		t.Errorf("%d", code)
 	}
 
 	// lists
-	code, out := f.do("bob", bob, "GET", "/v1/sessions", "")
+	code, out := f.do("bob", bob, "GET", "/api/sessions", "")
 	if got := ids(out, "sessions"); code != 200 || got[f.aliceSess] || !got[f.bobSess] {
 		t.Errorf("bob lists only his own sessions: %v", got)
 	}
-	code, out = f.do("bob", bob, "GET", "/v1/runs", "")
+	code, out = f.do("bob", bob, "GET", "/api/runs", "")
 	got := ids(out, "runs")
 	if code != 200 || got[f.aliceRun] || !got[f.bobRun] || !got[f.cron] {
 		t.Errorf("bob sees his runs and shared operational runs, not alice's: %v", got)
@@ -176,34 +176,34 @@ func TestUsersCannotSeeEachOthersChatsAndRuns(t *testing.T) {
 	// are stored as "system" (the runs table accepts only a fixed set of kinds).
 	for _, kind := range []string{"work", "schedule", "service_principal"} {
 		id := f.startRun(t, "kind-"+kind, kind, "")
-		if code, _ := f.do("bob", bob, "GET", "/v1/runs/"+id, ""); code != 200 {
+		if code, _ := f.do("bob", bob, "GET", "/api/runs/"+id, ""); code != 200 {
 			t.Errorf("a %q run is shared operational work, bob got %d", kind, code)
 		}
 	}
 
 	// a run of unrecognized origin fails closed: admins only
-	if code, _ := f.do("bob", bob, "GET", "/v1/runs/"+f.unknown, ""); code != 404 {
+	if code, _ := f.do("bob", bob, "GET", "/api/runs/"+f.unknown, ""); code != 404 {
 		t.Errorf("a run of unknown origin must not be shared: %d", code)
 	}
-	if code, _ := f.do("root", "admin", "GET", "/v1/runs/"+f.unknown, ""); code != 200 {
+	if code, _ := f.do("root", "admin", "GET", "/api/runs/"+f.unknown, ""); code != 200 {
 		t.Errorf("%d", code)
 	}
 
 	// the owner, an admin and shared runs are reachable
 	for _, c := range []struct{ user, roles, path string }{
-		{"alice", "operator", "/v1/runs/" + f.aliceRun}, {"alice", "operator", "/v1/sessions/" + f.aliceSess},
-		{"root", "admin", "/v1/runs/" + f.aliceRun}, {"root", "admin", "/v1/sessions/" + f.aliceSess},
-		{"bob", "operator", "/v1/runs/" + f.cron}, {"bob", "viewer", "/v1/runs/" + f.bobRun},
+		{"alice", "operator", "/api/runs/" + f.aliceRun}, {"alice", "operator", "/api/sessions/" + f.aliceSess},
+		{"root", "admin", "/api/runs/" + f.aliceRun}, {"root", "admin", "/api/sessions/" + f.aliceSess},
+		{"bob", "operator", "/api/runs/" + f.cron}, {"bob", "viewer", "/api/runs/" + f.bobRun},
 	} {
 		if code, _ := f.do(c.user, c.roles, "GET", c.path, ""); code != 200 {
 			t.Errorf("%s (%s) GET %s: %d, want 200", c.user, c.roles, c.path, code)
 		}
 	}
-	code, out = f.do("root", "admin", "GET", "/v1/sessions", "")
+	code, out = f.do("root", "admin", "GET", "/api/sessions", "")
 	if got := ids(out, "sessions"); code != 200 || !got[f.aliceSess] || !got[f.bobSess] {
 		t.Errorf("an admin lists every session: %v", got)
 	}
-	code, out = f.do("root", "admin", "GET", "/v1/runs", "")
+	code, out = f.do("root", "admin", "GET", "/api/runs", "")
 	if got := ids(out, "runs"); code != 200 || !got[f.aliceRun] || !got[f.bobRun] {
 		t.Errorf("an admin lists every run: %v", got)
 	}
@@ -231,12 +231,12 @@ func TestIdempotencyKeysAreNotSharedAcrossUsers(t *testing.T) {
 		s, _ := m["id"].(string)
 		return s
 	}
-	_, a := post("alice", "/v1/sessions", `{"title":"alice idem"}`)
-	_, b := post("bob", "/v1/sessions", `{"title":"bob idem"}`)
+	_, a := post("alice", "/api/sessions", `{"title":"alice idem"}`)
+	_, b := post("bob", "/api/sessions", `{"title":"bob idem"}`)
 	if a["created"] != true || b["created"] != true || sessionID(a) == sessionID(b) {
 		t.Fatalf("the same key from two users must create two sessions: %v %v", a, b)
 	}
-	_, a2 := post("alice", "/v1/sessions", `{"title":"alice idem"}`)
+	_, a2 := post("alice", "/api/sessions", `{"title":"alice idem"}`)
 	if a2["created"] != false || sessionID(a2) != sessionID(a) {
 		t.Fatalf("the same user replaying a key gets the same session: %v", a2)
 	}
@@ -248,13 +248,13 @@ func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 // the same user's.
 func TestApproverSeesOnlyWhatNeedsApproval(t *testing.T) {
 	f := newFixture(t, true)
-	if code, _ := f.do("carol", "approver", "GET", "/v1/runs/"+f.aliceRun, ""); code != 200 {
+	if code, _ := f.do("carol", "approver", "GET", "/api/runs/"+f.aliceRun, ""); code != 200 {
 		t.Errorf("an approver opens a run with an approval request: %d", code)
 	}
-	if code, _ := f.do("carol", "approver", "GET", "/v1/sessions/"+f.aliceSess, ""); code != 200 {
+	if code, _ := f.do("carol", "approver", "GET", "/api/sessions/"+f.aliceSess, ""); code != 200 {
 		t.Errorf("an approver reads the session of a pending approval: %d", code)
 	}
-	if code, _ := f.do("carol", "approver", "POST", "/v1/sessions/"+f.aliceSess+"/turns", `{"text":"hi","client_request_id":"x"}`); code != 404 && code != 403 {
+	if code, _ := f.do("carol", "approver", "POST", "/api/sessions/"+f.aliceSess+"/turns", `{"text":"hi","client_request_id":"x"}`); code != 404 && code != 403 {
 		t.Errorf("the session exception is read-only: %d", code)
 	}
 	// The approver is let in to decide, not to run someone else's run.
@@ -264,39 +264,39 @@ func TestApproverSeesOnlyWhatNeedsApproval(t *testing.T) {
 		{"retry", `{"type":"retry","payload":{}}`, "approver_scope"},
 		{"inject_evidence", `{"type":"inject_evidence","payload":{"note":"x"}}`, "approver_scope"},
 	} {
-		code, out := f.do("carol", "approver,operator", "POST", "/v1/runs/"+f.aliceRun+"/commands", c[1])
+		code, out := f.do("carol", "approver,operator", "POST", "/api/runs/"+f.aliceRun+"/commands", c[1])
 		if code != 403 || out["error"] != c[2] {
 			t.Errorf("approver command %s on another user's run: %d %v, want 403 %s", c[0], code, out, c[2])
 		}
 	}
-	if code, out := f.do("carol", "approver,operator", "POST", "/v1/runs/"+f.aliceRun+"/fork", `{}`); code != 403 || out["error"] != "approver_scope" {
+	if code, out := f.do("carol", "approver,operator", "POST", "/api/runs/"+f.aliceRun+"/fork", `{}`); code != 403 || out["error"] != "approver_scope" {
 		t.Errorf("fork: %d %v", code, out)
 	}
 	// ... while the decision itself gets past the scope check (it may fail
 	// later for its own reasons, but never as approver_scope).
 	for _, typ := range []string{"approve_tool", "reject_tool"} {
-		_, out := f.do("carol", "approver,operator", "POST", "/v1/runs/"+f.aliceRun+"/commands", `{"type":"`+typ+`","payload":{"approval_request_id":"ap1","action_hash":"h"}}`)
+		_, out := f.do("carol", "approver,operator", "POST", "/api/runs/"+f.aliceRun+"/commands", `{"type":"`+typ+`","payload":{"approval_request_id":"ap1","action_hash":"h"}}`)
 		if out["error"] == "approver_scope" {
 			t.Errorf("%s must be allowed through for an approver: %v", typ, out)
 		}
 	}
 	// the owner is not limited
-	if _, out := f.do("alice", "operator", "POST", "/v1/runs/"+f.aliceRun+"/commands", `{"type":"cancel","payload":{}}`); out["error"] == "approver_scope" {
+	if _, out := f.do("alice", "operator", "POST", "/api/runs/"+f.aliceRun+"/commands", `{"type":"cancel","payload":{}}`); out["error"] == "approver_scope" {
 		t.Errorf("the owner is not an approver-only caller: %v", out)
 	}
-	for _, p := range []string{"/v1/runs/" + f.bobRun, "/v1/sessions/" + f.bobSess} {
+	for _, p := range []string{"/api/runs/" + f.bobRun, "/api/sessions/" + f.bobSess} {
 		if code, _ := f.do("carol", "approver", "GET", p, ""); code != 404 {
 			t.Errorf("an approver has no blanket access: GET %s %d", p, code)
 		}
 	}
 	// the inbox: approvers see every pending approval, others only their own
-	if code, out := f.do("carol", "approver", "GET", "/v1/approvals", ""); code != 200 || len(ids(out, "approvals")) != 1 {
+	if code, out := f.do("carol", "approver", "GET", "/api/approvals", ""); code != 200 || len(ids(out, "approvals")) != 1 {
 		t.Errorf("approver inbox: %d %v", code, out)
 	}
-	if _, out := f.do("alice", "operator", "GET", "/v1/approvals", ""); len(ids(out, "approvals")) != 1 {
+	if _, out := f.do("alice", "operator", "GET", "/api/approvals", ""); len(ids(out, "approvals")) != 1 {
 		t.Errorf("alice sees the approval on her own run: %v", out)
 	}
-	if _, out := f.do("bob", "operator", "GET", "/v1/approvals", ""); len(ids(out, "approvals")) != 0 {
+	if _, out := f.do("bob", "operator", "GET", "/api/approvals", ""); len(ids(out, "approvals")) != 0 {
 		t.Errorf("bob must not see alice's pending approval: %v", out)
 	}
 }

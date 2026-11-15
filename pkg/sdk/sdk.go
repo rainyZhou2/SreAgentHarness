@@ -235,7 +235,7 @@ func DefaultAssembler() cognitive.Assembler { return cognitive.DefaultAssembler(
 // PermanentDeliveryError marks an event sink error that must not be retried.
 func PermanentDeliveryError(err error) error { return eventsink.Permanent(err) }
 
-// ---- v2 control plane (Works, actions, outcomes, world) ----
+// ---- control plane (Works, actions, outcomes, world) ----
 
 type (
 	WorkExtension    = plugin.WorkExtension

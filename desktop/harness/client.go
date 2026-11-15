@@ -1,5 +1,5 @@
 // Package harness is a small HTTP client for the SRE harness control-plane
-// API (/v1). It has no UI dependencies, so it is tested on its own.
+// API (/api). It has no UI dependencies, so it is tested on its own.
 package harness
 
 import (
@@ -204,7 +204,7 @@ type Delta struct {
 	} `json:"event"`
 }
 
-// StreamEvents follows GET /v1/runs/{id}/events/stream from afterSeq and
+// StreamEvents follows GET /api/runs/{id}/events/stream from afterSeq and
 // calls fn for every event (and onDelta, when set, for model deltas). It
 // reconnects (resuming from the last event id) until the server ends the
 // stream of a finished run, ctx is cancelled or the server rejects the
@@ -239,7 +239,7 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, afterSeq int64,
 // streamOnce reads one connection. ended reports the server's "stream.end"
 // message: the run is finished and every event was delivered.
 func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn func(Event), onDelta func(Delta)) (got, ended bool, err error) {
-	path := "/v1/runs/" + url.PathEscape(runID) + "/events/stream"
+	path := "/api/runs/" + url.PathEscape(runID) + "/events/stream"
 	if onDelta != nil {
 		path += "?include_deltas=true"
 	}

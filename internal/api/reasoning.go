@@ -16,7 +16,7 @@ import (
 	"go-sre-harness/internal/store/pg"
 )
 
-// ReasoningStore backs the /v1/reasoning routes.
+// ReasoningStore backs the /api/reasoning routes.
 type ReasoningStore interface {
 	improve.Store
 	ReasoningScore(ctx context.Context, tenantID, runID string) (reasoning.RunScore, error)
@@ -29,25 +29,25 @@ type ReasoningAPI struct {
 	Store     ReasoningStore
 	Evolution improve.Evolution
 	Server    *Server
-	// Defaults are applied to POST /v1/reasoning/improve bodies.
+	// Defaults are applied to POST /api/reasoning/improve bodies.
 	Defaults improve.Config
 }
 
 func (a *ReasoningAPI) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
-		"POST /v1/reasoning/improve":                        auth.Admin,
-		"POST /v1/reasoning/patterns/{memory_id}/exclude":   auth.Operator,
-		"POST /v1/reasoning/patterns/{memory_id}/reinstate": auth.Operator,
+		"POST /api/reasoning/improve":                        auth.Admin,
+		"POST /api/reasoning/patterns/{memory_id}/exclude":   auth.Operator,
+		"POST /api/reasoning/patterns/{memory_id}/reinstate": auth.Operator,
 	}
 }
 
 func (a *ReasoningAPI) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/reasoning/summary", a.summary)
-	mux.HandleFunc("GET /v1/reasoning/runs/{run_id}", a.run)
-	mux.HandleFunc("GET /v1/reasoning/patterns", a.patterns)
-	mux.HandleFunc("POST /v1/reasoning/improve", a.improve)
-	mux.HandleFunc("POST /v1/reasoning/patterns/{memory_id}/exclude", a.exclusion(true))
-	mux.HandleFunc("POST /v1/reasoning/patterns/{memory_id}/reinstate", a.exclusion(false))
+	mux.HandleFunc("GET /api/reasoning/summary", a.summary)
+	mux.HandleFunc("GET /api/reasoning/runs/{run_id}", a.run)
+	mux.HandleFunc("GET /api/reasoning/patterns", a.patterns)
+	mux.HandleFunc("POST /api/reasoning/improve", a.improve)
+	mux.HandleFunc("POST /api/reasoning/patterns/{memory_id}/exclude", a.exclusion(true))
+	mux.HandleFunc("POST /api/reasoning/patterns/{memory_id}/reinstate", a.exclusion(false))
 }
 
 func (a *ReasoningAPI) filter(w http.ResponseWriter, r *http.Request, defaultSince time.Duration) (reasoning.ScoreFilter, bool) {

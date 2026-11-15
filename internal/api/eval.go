@@ -28,40 +28,40 @@ type EvalAPI struct {
 
 func (e *EvalAPI) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
-		"POST /v1/eval/datasets":                                auth.Operator,
-		"POST /v1/eval/datasets/{dataset_id}/cases":             auth.Operator,
-		"POST /v1/eval/datasets/{dataset_id}/plan-cases":        auth.Operator,
-		"POST /v1/eval/datasets/{dataset_id}/freeze":            auth.Operator,
-		"POST /v1/eval/plan-runs":                               auth.Operator,
-		"POST /v1/eval/runs":                                    auth.Operator,
-		"POST /v1/evolution/candidates":                         auth.Operator,
-		"POST /v1/evolution/candidates/{candidate_id}/evaluate": auth.Operator,
-		"POST /v1/evolution/candidates/{candidate_id}/approve":  auth.Approver,
-		"POST /v1/evolution/candidates/{candidate_id}/rollout":  auth.Admin,
-		"POST /v1/evolution/rollouts/{rollout_id}/promote":      auth.Admin,
-		"POST /v1/evolution/rollouts/{rollout_id}/rollback":     auth.Admin,
+		"POST /api/eval/datasets":                                auth.Operator,
+		"POST /api/eval/datasets/{dataset_id}/cases":             auth.Operator,
+		"POST /api/eval/datasets/{dataset_id}/plan-cases":        auth.Operator,
+		"POST /api/eval/datasets/{dataset_id}/freeze":            auth.Operator,
+		"POST /api/eval/plan-runs":                               auth.Operator,
+		"POST /api/eval/runs":                                    auth.Operator,
+		"POST /api/evolution/candidates":                         auth.Operator,
+		"POST /api/evolution/candidates/{candidate_id}/evaluate": auth.Operator,
+		"POST /api/evolution/candidates/{candidate_id}/approve":  auth.Approver,
+		"POST /api/evolution/candidates/{candidate_id}/rollout":  auth.Admin,
+		"POST /api/evolution/rollouts/{rollout_id}/promote":      auth.Admin,
+		"POST /api/evolution/rollouts/{rollout_id}/rollback":     auth.Admin,
 	}
 }
 
 func (e *EvalAPI) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/eval/datasets", e.createDataset)
-	mux.HandleFunc("GET /v1/eval/datasets", e.listDatasets)
-	mux.HandleFunc("GET /v1/eval/datasets/{dataset_id}", e.getDataset)
-	mux.HandleFunc("POST /v1/eval/datasets/{dataset_id}/cases", e.addCase)
-	mux.HandleFunc("POST /v1/eval/datasets/{dataset_id}/plan-cases", e.addPlanCase)
-	mux.HandleFunc("POST /v1/eval/datasets/{dataset_id}/freeze", e.freeze)
-	mux.HandleFunc("POST /v1/eval/plan-runs", e.replayPlans)
-	mux.HandleFunc("POST /v1/eval/runs", e.evaluate)
-	mux.HandleFunc("GET /v1/eval/runs/{eval_id}", e.getEvalRun)
-	mux.HandleFunc("GET /v1/profiles/{profile_id}/versions", e.listVersions)
-	mux.HandleFunc("POST /v1/evolution/candidates", e.propose)
-	mux.HandleFunc("GET /v1/evolution/candidates", e.listCandidates)
-	mux.HandleFunc("POST /v1/evolution/candidates/{candidate_id}/evaluate", e.evaluateCandidate)
-	mux.HandleFunc("POST /v1/evolution/candidates/{candidate_id}/approve", e.approve)
-	mux.HandleFunc("POST /v1/evolution/candidates/{candidate_id}/rollout", e.startRollout)
-	mux.HandleFunc("GET /v1/evolution/rollouts", e.listRollouts)
-	mux.HandleFunc("POST /v1/evolution/rollouts/{rollout_id}/promote", e.promote)
-	mux.HandleFunc("POST /v1/evolution/rollouts/{rollout_id}/rollback", e.rollback)
+	mux.HandleFunc("POST /api/eval/datasets", e.createDataset)
+	mux.HandleFunc("GET /api/eval/datasets", e.listDatasets)
+	mux.HandleFunc("GET /api/eval/datasets/{dataset_id}", e.getDataset)
+	mux.HandleFunc("POST /api/eval/datasets/{dataset_id}/cases", e.addCase)
+	mux.HandleFunc("POST /api/eval/datasets/{dataset_id}/plan-cases", e.addPlanCase)
+	mux.HandleFunc("POST /api/eval/datasets/{dataset_id}/freeze", e.freeze)
+	mux.HandleFunc("POST /api/eval/plan-runs", e.replayPlans)
+	mux.HandleFunc("POST /api/eval/runs", e.evaluate)
+	mux.HandleFunc("GET /api/eval/runs/{eval_id}", e.getEvalRun)
+	mux.HandleFunc("GET /api/profiles/{profile_id}/versions", e.listVersions)
+	mux.HandleFunc("POST /api/evolution/candidates", e.propose)
+	mux.HandleFunc("GET /api/evolution/candidates", e.listCandidates)
+	mux.HandleFunc("POST /api/evolution/candidates/{candidate_id}/evaluate", e.evaluateCandidate)
+	mux.HandleFunc("POST /api/evolution/candidates/{candidate_id}/approve", e.approve)
+	mux.HandleFunc("POST /api/evolution/candidates/{candidate_id}/rollout", e.startRollout)
+	mux.HandleFunc("GET /api/evolution/rollouts", e.listRollouts)
+	mux.HandleFunc("POST /api/evolution/rollouts/{rollout_id}/promote", e.promote)
+	mux.HandleFunc("POST /api/evolution/rollouts/{rollout_id}/rollback", e.rollback)
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {

@@ -1,6 +1,6 @@
 // Package localruntime supervises the processes that make the desktop client
 // self-contained: a SQLite-backed harness core. The UI still talks to the
-// core over the normal /v1 HTTP/SSE API.
+// core over the normal /api HTTP/SSE API.
 package localruntime
 
 import (

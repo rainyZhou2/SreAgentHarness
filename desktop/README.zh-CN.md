@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-SRE harness 的原生桌面客户端，基于 [Wails v2](https://wails.io)：Go + 操作系统自带的 WebView，不打包浏览器（macOS 上约 9 MB）。它是独立的 Go 模块，只通过公开的 `/v1` API 与服务端通信，认证和角色与其他客户端完全一致。
+SRE harness 的原生桌面客户端，基于 [Wails v2](https://wails.io)：Go + 操作系统自带的 WebView，不打包浏览器（macOS 上约 9 MB）。它是独立的 Go 模块，只通过公开的 `/api` API 与服务端通信，认证和角色与其他客户端完全一致。
 
 <p align="center"><img src="../docs/images/desktop-diagnosis.zh-CN.png" alt="桌面客户端：一次排查的工作日志和假设" width="860"></p>
 
@@ -67,7 +67,7 @@ Codex / Claude 桌面版风格的对话客户端，基于 harness 的会话（se
     logs/
   ```
 - 执行事件、状态和事件游标在同一个 SQLite 事务中提交。Schema v2 先生成数据库快照，再校验并导入旧 JSONL；损坏或缺失的历史会阻止升级。原归档保留不变，新事件仅写 SQLite。`RebuildEventIndex` 从 SQLite 事件重建查询索引，不再重放归档。旧二进制拒绝打开 v2；降级必须停止运行时，恢复升级前数据库及其原始归档，且会失去备份后的变更。
-- **模型**、**MCP**、**HTTP 工具**、**技能** 和 **工具开关** 与团队模式共用同一套 `/v1/extensions` API 和设置界面；配置字段仍是 provider / model / base URL / API key，保存在本地 SQLite。
+- **模型**、**MCP**、**HTTP 工具**、**技能** 和 **工具开关** 与团队模式共用同一套 `/api/extensions` API 和设置界面；配置字段仍是 provider / model / base URL / API key，保存在本地 SQLite。
 - 本地模式支持完整命令：pause/resume/cancel、approve/reject、provide input、retry、resolve unknown、replace pending input、override result、inject evidence、migrate profile。需要版本校验的命令必须携带 `expected_version`；幂等键跨重启保留；被拒绝的命令不会留下部分状态；取消会级联到子 Run 和未决审批。
 - 同样的状态能力离线可用：压缩摘要与 pinned 记忆命中会进入后续步骤，每个已提交步骤都会记录 checkpoint 并可 fork，步骤输出修订可查询，memory / graph / 评测 API 由本地存储直接提供。
 - stdio MCP 默认关闭，需 `HARNESS_MCP_ALLOW_STDIO=true`；默认允许回环地址，额外网络用 `HARNESS_EXTENSIONS_ALLOW_NETWORKS`。
@@ -91,7 +91,7 @@ SRE_DESKTOP_PREVIEW=127.0.0.1:34115 "build/bin/SRE Harness.app/Contents/MacOS/sr
 | `main.go` | Wails 窗口与选项；设置了 `SRE_DESKTOP_PREVIEW` 时进入预览模式 |
 | `app.go` | 绑定给界面的方法（`window.go.main.App.*`）：会话、对话记录、发送、Run 视图、命令、实时订阅；所有 HTTP 请求都在 Go 里发出 |
 | `inbox.go` | 对话搜索、重命名、归档、删除和 Markdown 导出；审批收件箱和系统通知 |
-| `harness/` | 无 UI 依赖的 `/v1` 客户端：认证头、幂等键、错误解析、带续传的 SSE |
+| `harness/` | 无 UI 依赖的 `/api` 客户端：认证头、幂等键、错误解析、带续传的 SSE |
 | `preview.go` | 浏览器预览桥（`/__call/<Method>`、`/__events`） |
 | `frontend/dist/` | 界面：纯 HTML/CSS/JS，无构建步骤；服务端数据只以文本渲染 |
 

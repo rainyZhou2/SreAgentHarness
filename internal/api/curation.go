@@ -19,8 +19,8 @@ func (m *MemoryAPI) curationRoutes() map[string]auth.Role {
 		return nil
 	}
 	return map[string]auth.Role{
-		"POST /v1/memory/curation/run":         auth.Operator,
-		"POST /v1/memory/curation/{id}/decide": auth.Approver,
+		"POST /api/memory/curation/run":         auth.Operator,
+		"POST /api/memory/curation/{id}/decide": auth.Approver,
 	}
 }
 
@@ -28,9 +28,9 @@ func (m *MemoryAPI) registerCuration(mux *http.ServeMux) {
 	if m.Curator == nil {
 		return
 	}
-	mux.HandleFunc("GET /v1/memory/curation", m.listCuration)
-	mux.HandleFunc("POST /v1/memory/curation/run", m.runCuration)
-	mux.HandleFunc("POST /v1/memory/curation/{id}/decide", m.decideCuration)
+	mux.HandleFunc("GET /api/memory/curation", m.listCuration)
+	mux.HandleFunc("POST /api/memory/curation/run", m.runCuration)
+	mux.HandleFunc("POST /api/memory/curation/{id}/decide", m.decideCuration)
 }
 
 func (m *MemoryAPI) listCuration(w http.ResponseWriter, r *http.Request) {

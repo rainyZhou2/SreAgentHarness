@@ -127,7 +127,7 @@ func strictJSON(raw json.RawMessage, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
-// TestLoadFileKeepsWorkSection guards the v2 section: templates and
+// TestLoadFileKeepsWorkSection guards the Work section: templates and
 // correlation rules in HARNESS_CONFIG must reach the work engine.
 func TestLoadFileKeepsWorkSection(t *testing.T) {
 	path := t.TempDir() + "/harness.json"

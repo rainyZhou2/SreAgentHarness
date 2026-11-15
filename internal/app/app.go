@@ -206,7 +206,7 @@ type App struct {
 	triggerCfgs []trigger.Config
 	triggers    *trigger.Service
 	envGatherer *envctx.Gatherer
-	// work is the v2 control plane (nil unless HARNESS_WORK_ENGINE_ENABLED).
+	// work is the control plane (nil unless HARNESS_WORK_ENGINE_ENABLED).
 	work *workengine.Engine
 }
 
@@ -326,7 +326,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, err
 	}
 	// tenant extensions: MCP servers, HTTP tools and skills managed through
-	// /v1/extensions are loaded per tenant and overlay the global registry.
+	// /api/extensions are loaded per tenant and overlay the global registry.
 	h.Extensions = &extensions.Runtime{Store: store, Log: log.With("component", "extensions"),
 		Options: extensions.Options{AllowStdio: e.bool("HARNESS_MCP_ALLOW_STDIO", false),
 			Network: h.Network},
@@ -672,7 +672,8 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		}
 		srv := &api.Server{Store: store, Artifacts: h.Artifacts, DefaultProfile: h.Settings.DefaultProfile,
 			DefaultVersion: h.Settings.DefaultProfileVersion,
-			AutoProfileID:  autoProfileID, AutoProfileVersion: autoProfileVersion, Log: log,
+			ReleaseVersion: Version, BuildRevision: buildRevision(),
+			AutoProfileID: autoProfileID, AutoProfileVersion: autoProfileVersion, Log: log,
 			Deltas: h.Deltas, BranchPolicy: domain.BranchPolicy(e.str("HARNESS_BRANCH_POLICY", string(domain.BranchQueue))),
 			MaxPendingTurn: e.int("HARNESS_MAX_PENDING_TURNS", 8), Tools: h.Tools, Policy: h.Policy,
 			Events: h.Events, StreamMode: streamMode, StreamTick: e.dur("HARNESS_SSE_TICK", 30*time.Second),
@@ -835,9 +836,9 @@ func (a *App) Run(ctx context.Context) error {
 	return g.Wait()
 }
 
-// buildWork assembles the v2 control plane when HARNESS_WORK_ENGINE_ENABLED
-// is set: it shares the PostgreSQL pool, mounts /v1/works, /v1/events,
-// /v1/world and /v1/actions on srv, and its loops run in the all and
+// buildWork assembles the control plane when HARNESS_WORK_ENGINE_ENABLED
+// is set: it shares the PostgreSQL pool, mounts /api/works, /api/events,
+// /api/world and /api/actions on srv, and its loops run in the all and
 // scheduler roles.
 func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server, specs map[string]plugin.Specs) error {
 	flags := workengine.FlagsFromEnv(a.env)

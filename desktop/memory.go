@@ -12,7 +12,7 @@ import (
 // caller's own, so these calls need no user argument.
 
 // MyMemories lists the user's personal memories.
-func (a *App) MyMemories() (map[string]any, error) { return a.get("/v1/me/memories") }
+func (a *App) MyMemories() (map[string]any, error) { return a.get("/api/me/memories") }
 
 // SetMyMemory creates or revises one personal memory. The server rejects
 // text that reads like instructions to the agent and redacts secrets; the
@@ -27,7 +27,7 @@ func (a *App) SetMyMemory(key, value string) (map[string]any, error) {
 		return nil, err
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPut, "/v1/me/memories/"+url.PathEscape(key), map[string]string{"value": value}, &out)
+	return out, c.Do(a.ctx, http.MethodPut, "/api/me/memories/"+url.PathEscape(key), map[string]string{"value": value}, &out)
 }
 
 // DeleteMyMemory removes (archives) one personal memory.
@@ -36,13 +36,13 @@ func (a *App) DeleteMyMemory(key string) error {
 	if err != nil {
 		return err
 	}
-	return c.Do(a.ctx, http.MethodDelete, "/v1/me/memories/"+url.PathEscape(strings.TrimSpace(key)), nil, nil)
+	return c.Do(a.ctx, http.MethodDelete, "/api/me/memories/"+url.PathEscape(strings.TrimSpace(key)), nil, nil)
 }
 
 // ---- learned (long-term) memory: review what the agent proposes ----
 
 func memoryList(a *App, status string) ([]map[string]any, error) {
-	out, err := a.get("/v1/memories?limit=200&status=" + url.QueryEscape(status))
+	out, err := a.get("/api/memories?limit=200&status=" + url.QueryEscape(status))
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func (a *App) LearnedMemories() (map[string]any, error) {
 	// Clean-up suggestions come from the memory curator; a server without it
 	// (404) simply has none.
 	suggestions := []any{}
-	if out, err := a.get("/v1/memory/curation?status=PENDING&limit=100"); err == nil {
+	if out, err := a.get("/api/memory/curation?status=PENDING&limit=100"); err == nil {
 		if l, ok := out["proposals"].([]any); ok && l != nil {
 			suggestions = l
 		}
@@ -118,7 +118,7 @@ func (a *App) RunCuration() (map[string]any, error) {
 		return nil, err
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/memory/curation/run", map[string]string{}, &out)
+	return out, c.Do(a.ctx, http.MethodPost, "/api/memory/curation/run", map[string]string{}, &out)
 }
 
 // DecideCuration applies (sets the memories aside, restorably) or dismisses
@@ -131,7 +131,7 @@ func (a *App) DecideCuration(id, decision, reason string) error {
 	if err != nil {
 		return err
 	}
-	return c.Do(a.ctx, http.MethodPost, "/v1/memory/curation/"+url.PathEscape(id)+"/decide",
+	return c.Do(a.ctx, http.MethodPost, "/api/memory/curation/"+url.PathEscape(id)+"/decide",
 		map[string]string{"decision": decision, "reason": reason}, nil)
 }
 
@@ -147,7 +147,7 @@ func (a *App) ReviewMemory(id, expectedStatus, decision, reason string) error {
 	if err != nil {
 		return err
 	}
-	return c.Do(a.ctx, http.MethodPost, "/v1/memories/"+url.PathEscape(id)+"/transition",
+	return c.Do(a.ctx, http.MethodPost, "/api/memories/"+url.PathEscape(id)+"/transition",
 		map[string]string{"expected_status": expectedStatus, "to": to, "reason": reason}, nil)
 }
 
@@ -160,5 +160,5 @@ func (a *App) ReviseMemory(id string, expectedVersion int64, title, content, rea
 	}
 	var out map[string]any
 	body := map[string]any{"expected_version": expectedVersion, "title": title, "content": content, "reason": reason}
-	return out, c.Do(a.ctx, http.MethodPatch, "/v1/memories/"+url.PathEscape(id), body, &out)
+	return out, c.Do(a.ctx, http.MethodPatch, "/api/memories/"+url.PathEscape(id), body, &out)
 }

@@ -57,7 +57,7 @@ func (a *App) localModelEnv() map[string]string {
 	return localruntime.ModelEnv(provider, baseURL, model, key)
 }
 
-// ConnectLocal starts the bundled runtime and points the normal /v1 client at
+// ConnectLocal starts the bundled runtime and points the normal /api client at
 // its loopback endpoint. It is safe to call from the UI after startup.
 func (a *App) ConnectLocal() (map[string]any, error) {
 	if a.ctx == nil {

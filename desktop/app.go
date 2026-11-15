@@ -128,7 +128,7 @@ func (a *App) Connected() bool {
 	return a.client != nil
 }
 
-// Connect validates the settings against the server (GET /v1/whoami) and,
+// Connect validates the settings against the server (GET /api/whoami) and,
 // on success, saves them and returns the principal.
 func (a *App) Connect(s Settings) (map[string]any, error) {
 	c, err := harness.New(s.ServerURL, s.Creds)
@@ -136,7 +136,7 @@ func (a *App) Connect(s Settings) (map[string]any, error) {
 		return nil, err
 	}
 	var who map[string]any
-	if err := c.Get(a.ctx, "/v1/whoami", &who); err != nil {
+	if err := c.Get(a.ctx, "/api/whoami", &who); err != nil {
 		a.logEvent("error", "sign in to %s failed: %v", s.ServerURL, err)
 		return nil, fmt.Errorf("cannot sign in: %w", err)
 	}
@@ -232,14 +232,14 @@ func (a *App) get(path string) (map[string]any, error) {
 }
 
 // Whoami returns the authenticated principal.
-func (a *App) Whoami() (map[string]any, error) { return a.get("/v1/whoami") }
+func (a *App) Whoami() (map[string]any, error) { return a.get("/api/whoami") }
 
 // ListSessions lists the tenant's conversations, most recently used first.
 func (a *App) ListSessions(limit int) (map[string]any, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	return a.get(fmt.Sprintf("/v1/sessions?limit=%d", limit))
+	return a.get(fmt.Sprintf("/api/sessions?limit=%d", limit))
 }
 
 // CreateSession starts a conversation; an empty profile lets the server
@@ -254,7 +254,7 @@ func (a *App) CreateSession(title, profileID string) (map[string]any, error) {
 		body["profile_id"] = profileID
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/sessions", body, &out)
+	return out, c.Do(a.ctx, http.MethodPost, "/api/sessions", body, &out)
 }
 
 // TurnView is one exchange in a conversation: the user's text and the run
@@ -274,7 +274,7 @@ func (a *App) Transcript(sessionID string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := "/v1/sessions/" + url.PathEscape(sessionID)
+	base := "/api/sessions/" + url.PathEscape(sessionID)
 	var view struct {
 		Session struct {
 			DefaultBranchID string `json:"default_branch_id"`
@@ -330,7 +330,7 @@ func (a *App) Transcript(sessionID string) (map[string]any, error) {
 		}
 		if tv.Text == "" && tv.RunID != "" { // queued turns have no message yet: read the run goal
 			var run map[string]any
-			if c.Get(a.ctx, "/v1/runs/"+url.PathEscape(tv.RunID), &run) == nil {
+			if c.Get(a.ctx, "/api/runs/"+url.PathEscape(tv.RunID), &run) == nil {
 				tv.Text, _ = run["goal"].(string)
 			}
 		}
@@ -347,13 +347,13 @@ func (a *App) SendMessage(sessionID, text string) (map[string]any, error) {
 	}
 	body := map[string]any{"text": text, "client_request_id": harness.NewKey()}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/turns", body, &out)
+	return out, c.Do(a.ctx, http.MethodPost, "/api/sessions/"+url.PathEscape(sessionID)+"/turns", body, &out)
 }
 
 // RunView gathers what the chat shows for one run: the run and result, its
 // steps with inputs and outputs, approvals and cost.
 func (a *App) RunView(runID string) (map[string]any, error) {
-	base := "/v1/runs/" + url.PathEscape(runID)
+	base := "/api/runs/" + url.PathEscape(runID)
 	parts := map[string]string{"run": base, "steps": base + "/steps?expand=io", "approvals": base + "/approvals", "cost": base + "/cost",
 		"flow": base + "/flow"}
 	out := map[string]any{}
@@ -392,7 +392,7 @@ type CommandRequest struct {
 	Payload         map[string]any `json:"payload"`
 }
 
-// Command sends POST /v1/runs/{id}/commands.
+// Command sends POST /api/runs/{id}/commands.
 func (a *App) Command(runID string, req CommandRequest) (map[string]any, error) {
 	c, err := a.c()
 	if err != nil {
@@ -409,7 +409,7 @@ func (a *App) Command(runID string, req CommandRequest) (map[string]any, error) 
 		body["reason"] = req.Reason
 	}
 	var out map[string]any
-	if err := c.Do(a.ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/commands", body, &out); err != nil {
+	if err := c.Do(a.ctx, http.MethodPost, "/api/runs/"+url.PathEscape(runID)+"/commands", body, &out); err != nil {
 		a.logEvent("warn", "command %s on run %s failed: %v", req.Type, runID, err)
 		return nil, err
 	}
@@ -423,7 +423,7 @@ func (a *App) ProvideInput(runID string, expectedVersion int64, value any) (map[
 }
 
 // Plugins returns the server's plugin inventory (admin only).
-func (a *App) Plugins() (map[string]any, error) { return a.get("/v1/admin/plugins") }
+func (a *App) Plugins() (map[string]any, error) { return a.get("/api/admin/plugins") }
 
 // WatchRun follows the run's event stream and emits every event to the UI
 // as "run:event" ({run_id, event}) and model deltas as "run:delta"
@@ -464,11 +464,11 @@ func (a *App) UnwatchRun() {
 
 // Extensions lists the tenant's MCP servers, HTTP tools and skills with
 // their load status. Header and env values come back blank (write-only).
-func (a *App) Extensions() (map[string]any, error) { return a.get("/v1/extensions") }
+func (a *App) Extensions() (map[string]any, error) { return a.get("/api/extensions") }
 
 // Tools lists the tools runs of this tenant can see, with whether the
 // default profile allows each.
-func (a *App) Tools() (map[string]any, error) { return a.get("/v1/tools") }
+func (a *App) Tools() (map[string]any, error) { return a.get("/api/tools") }
 
 // GraphSearch finds capability, memory, service, run and step nodes.
 func (a *App) GraphSearch(q string, kinds []string, limit int) (map[string]any, error) {
@@ -482,7 +482,7 @@ func (a *App) GraphSearch(q string, kinds []string, limit int) (map[string]any, 
 	if limit > 0 {
 		v.Set("limit", fmt.Sprint(limit))
 	}
-	return a.get("/v1/graph/search?" + v.Encode())
+	return a.get("/api/graph/search?" + v.Encode())
 }
 
 // GraphNeighborhood returns the nodes and edges within depth of ref.
@@ -491,7 +491,7 @@ func (a *App) GraphNeighborhood(ref string, depth int) (map[string]any, error) {
 	if depth > 0 {
 		v.Set("depth", fmt.Sprint(depth))
 	}
-	return a.get("/v1/graph/neighborhood?" + v.Encode())
+	return a.get("/api/graph/neighborhood?" + v.Encode())
 }
 
 // Capabilities lists the tenant's projected capabilities with recent usage.
@@ -500,7 +500,7 @@ func (a *App) Capabilities(days int) (map[string]any, error) {
 	if days > 0 {
 		v.Set("days", fmt.Sprint(days))
 	}
-	return a.get("/v1/capabilities?" + v.Encode())
+	return a.get("/api/capabilities?" + v.Encode())
 }
 
 // GraphRelate declares a relation between two graph nodes (admin).
@@ -514,7 +514,7 @@ func (a *App) GraphRelate(src, dst, relation string, weight float64) (map[string
 	if weight > 0 {
 		body["weight"] = weight
 	}
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/graph/relations", body, &out)
+	return out, c.Do(a.ctx, http.MethodPost, "/api/graph/relations", body, &out)
 }
 
 // GraphUnrelate removes a declared relation (admin).
@@ -524,7 +524,7 @@ func (a *App) GraphUnrelate(src, dst, relation string) error {
 		return err
 	}
 	v := url.Values{"src": {src}, "dst": {dst}, "relation": {relation}}
-	return c.Do(a.ctx, http.MethodDelete, "/v1/graph/relations?"+v.Encode(), nil, nil)
+	return c.Do(a.ctx, http.MethodDelete, "/api/graph/relations?"+v.Encode(), nil, nil)
 }
 
 // SetToolEnabled turns one tool on or off for the tenant (admin).
@@ -534,7 +534,7 @@ func (a *App) SetToolEnabled(name string, enabled bool) (map[string]any, error) 
 		return nil, err
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPut, "/v1/tools/"+url.PathEscape(name), map[string]any{"enabled": enabled}, &out)
+	return out, c.Do(a.ctx, http.MethodPut, "/api/tools/"+url.PathEscape(name), map[string]any{"enabled": enabled}, &out)
 }
 
 var extKinds = map[string]bool{"mcp-servers": true, "http-tools": true, "skills": true, "models": true}
@@ -552,7 +552,7 @@ func (a *App) PutExtension(kind, name string, spec map[string]any, enabled bool,
 	}
 	body := map[string]any{"spec": spec, "enabled": enabled, "expected_version": expectedVersion}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPut, "/v1/extensions/"+kind+"/"+url.PathEscape(name), body, &out)
+	return out, c.Do(a.ctx, http.MethodPut, "/api/extensions/"+kind+"/"+url.PathEscape(name), body, &out)
 }
 
 // DeleteExtension removes an extension (admin).
@@ -564,7 +564,7 @@ func (a *App) DeleteExtension(kind, name string) error {
 	if err != nil {
 		return err
 	}
-	return c.Do(a.ctx, http.MethodDelete, "/v1/extensions/"+kind+"/"+url.PathEscape(name), nil, nil)
+	return c.Do(a.ctx, http.MethodDelete, "/api/extensions/"+kind+"/"+url.PathEscape(name), nil, nil)
 }
 
 // ProbeMCP connects to an MCP server and lists its tools without saving
@@ -579,7 +579,7 @@ func (a *App) ProbeMCP(name string, spec map[string]any) (map[string]any, error)
 		body = map[string]any{"spec": spec}
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/extensions/mcp-servers/"+url.PathEscape(name)+"/probe", body, &out)
+	return out, c.Do(a.ctx, http.MethodPost, "/api/extensions/mcp-servers/"+url.PathEscape(name)+"/probe", body, &out)
 }
 
 // TestModel sends a one-line request through a model (admin): the stored
@@ -594,5 +594,5 @@ func (a *App) TestModel(name string, spec map[string]any) (map[string]any, error
 		body = map[string]any{"spec": spec}
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPost, "/v1/extensions/models/"+url.PathEscape(name)+"/test", body, &out)
+	return out, c.Do(a.ctx, http.MethodPost, "/api/extensions/models/"+url.PathEscape(name)+"/test", body, &out)
 }

@@ -1,5 +1,5 @@
-// Package workclient is a typed HTTP client for the v2 Work API
-// (/v1/works, /v1/events, /v1/world, /v1/actions).
+// Package workclient is a typed HTTP client for the Work API
+// (/api/works, /api/events, /api/world, /api/actions).
 //
 //	c := workclient.New("http://localhost:8080", token)
 //	w, err := c.CreateWork(ctx, "deploy-123", workclient.CreateWork{Kind: "incident", Title: "...",
@@ -34,24 +34,25 @@ import (
 
 // Re-exported wire types.
 type (
-	Work          = work.Work
-	Goal          = work.GoalSpec
-	Template      = work.Template
-	WorkEvent     = work.Event
-	RunLink       = work.RunLink
-	CreateWork    = orchestration.CreateRequest
-	Command       = orchestration.CommandRequest
-	CommandOpts   = orchestration.CommandPayload
-	Envelope      = eventing.Envelope
-	InboxRecord   = eventing.Record
-	Action        = action.Record
-	Evaluation    = outcome.Evaluation
-	SuccessSpec   = outcome.Spec
-	Objective     = outcome.Objective
-	Evidence      = evidence.Record
-	Hypothesis    = evidence.Hypothesis
-	Fact          = world.Fact
-	WorldSnapshot = world.Snapshot
+	Work             = work.Work
+	Goal             = work.GoalSpec
+	Template         = work.Template
+	WorkEvent        = work.Event
+	RunLink          = work.RunLink
+	CreateWork       = orchestration.CreateRequest
+	LinkCauseRequest = orchestration.LinkCauseRequest
+	Command          = orchestration.CommandRequest
+	CommandOpts      = orchestration.CommandPayload
+	Envelope         = eventing.Envelope
+	InboxRecord      = eventing.Record
+	Action           = action.Record
+	Evaluation       = outcome.Evaluation
+	SuccessSpec      = outcome.Spec
+	Objective        = outcome.Objective
+	Evidence         = evidence.Record
+	Hypothesis       = evidence.Hypothesis
+	Fact             = world.Fact
+	WorldSnapshot    = world.Snapshot
 )
 
 // Error is a non-2xx API response.
@@ -161,14 +162,14 @@ func esc(s string) string { return url.PathEscape(s) }
 // CreateWork creates a Work (idempotent on key).
 func (c *Client) CreateWork(ctx context.Context, key string, req CreateWork) (Work, error) {
 	var w Work
-	_, err := c.do(ctx, http.MethodPost, "/v1/works", map[string]string{"Idempotency-Key": key}, req, &w)
+	_, err := c.do(ctx, http.MethodPost, "/api/works", map[string]string{"Idempotency-Key": key}, req, &w)
 	return w, err
 }
 
 // GetWork reads a Work.
 func (c *Client) GetWork(ctx context.Context, id string) (Work, error) {
 	var w Work
-	_, err := c.do(ctx, http.MethodGet, "/v1/works/"+esc(id), nil, nil, &w)
+	_, err := c.do(ctx, http.MethodGet, "/api/works/"+esc(id), nil, nil, &w)
 	return w, err
 }
 
@@ -198,7 +199,7 @@ func (c *Client) ListWorks(ctx context.Context, f ListFilter) ([]Work, error) {
 	var out struct {
 		Items []Work `json:"items"`
 	}
-	_, err := c.do(ctx, http.MethodGet, "/v1/works?"+q.Encode(), nil, nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/api/works?"+q.Encode(), nil, nil, &out)
 	return out.Items, err
 }
 
@@ -216,7 +217,7 @@ func (c *Client) Command(ctx context.Context, workID, key, typ string, opts *Com
 		hdr["If-Match"] = fmt.Sprintf(`"%d"`, expectedVersion)
 	}
 	var w Work
-	_, err := c.do(ctx, http.MethodPost, "/v1/works/"+esc(workID)+"/commands", hdr, body, &w)
+	_, err := c.do(ctx, http.MethodPost, "/api/works/"+esc(workID)+"/commands", hdr, body, &w)
 	return w, err
 }
 
@@ -225,7 +226,7 @@ func (c *Client) Events(ctx context.Context, workID string, afterSeq int64, limi
 	var out struct {
 		Items []WorkEvent `json:"items"`
 	}
-	path := fmt.Sprintf("/v1/works/%s/events?after_seq=%d&limit=%d", esc(workID), afterSeq, limit)
+	path := fmt.Sprintf("/api/works/%s/events?after_seq=%d&limit=%d", esc(workID), afterSeq, limit)
 	_, err := c.do(ctx, http.MethodGet, path, nil, nil, &out)
 	return out.Items, err
 }
@@ -235,7 +236,7 @@ func (c *Client) Actions(ctx context.Context, workID string) ([]Action, error) {
 	var out struct {
 		Items []Action `json:"items"`
 	}
-	_, err := c.do(ctx, http.MethodGet, "/v1/works/"+esc(workID)+"/actions", nil, nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/api/works/"+esc(workID)+"/actions", nil, nil, &out)
 	return out.Items, err
 }
 
@@ -244,7 +245,7 @@ func (c *Client) Outcomes(ctx context.Context, workID string) ([]Evaluation, err
 	var out struct {
 		Items []Evaluation `json:"items"`
 	}
-	_, err := c.do(ctx, http.MethodGet, "/v1/works/"+esc(workID)+"/outcomes", nil, nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/api/works/"+esc(workID)+"/outcomes", nil, nil, &out)
 	return out.Items, err
 }
 
@@ -260,14 +261,14 @@ type IngestResult struct {
 // IngestEvent submits an event (deduplicated on source + event_id).
 func (c *Client) IngestEvent(ctx context.Context, e Envelope) (IngestResult, error) {
 	var out IngestResult
-	_, err := c.do(ctx, http.MethodPost, "/v1/events", nil, e, &out)
+	_, err := c.do(ctx, http.MethodPost, "/api/events", nil, e, &out)
 	return out, err
 }
 
 // GetAction reads an action.
 func (c *Client) GetAction(ctx context.Context, id string) (Action, error) {
 	var a Action
-	_, err := c.do(ctx, http.MethodGet, "/v1/actions/"+esc(id), nil, nil, &a)
+	_, err := c.do(ctx, http.MethodGet, "/api/actions/"+esc(id), nil, nil, &a)
 	return a, err
 }
 
@@ -275,7 +276,7 @@ func (c *Client) GetAction(ctx context.Context, id string) (Action, error) {
 // shown to the approver; a changed plan invalidates the decision.
 func (c *Client) DecideAction(ctx context.Context, id, decision, intentHash, comment string) (Action, error) {
 	var a Action
-	_, err := c.do(ctx, http.MethodPost, "/v1/actions/"+esc(id)+"/approve", nil,
+	_, err := c.do(ctx, http.MethodPost, "/api/actions/"+esc(id)+"/approve", nil,
 		map[string]string{"decision": decision, "intent_hash": intentHash, "comment": comment}, &a)
 	return a, err
 }
@@ -295,7 +296,7 @@ func (c *Client) Facts(ctx context.Context, subjects []string, asOf, knownAt tim
 	var out struct {
 		Items []Fact `json:"items"`
 	}
-	_, err := c.do(ctx, http.MethodGet, "/v1/world/facts?"+q.Encode(), nil, nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/api/world/facts?"+q.Encode(), nil, nil, &out)
 	return out.Items, err
 }
 
@@ -303,7 +304,7 @@ func (c *Client) Facts(ctx context.Context, subjects []string, asOf, knownAt tim
 // is an admin).
 func (c *Client) AssertFact(ctx context.Context, f Fact) (Fact, error) {
 	var out Fact
-	_, err := c.do(ctx, http.MethodPost, "/v1/world/facts", nil, f, &out)
+	_, err := c.do(ctx, http.MethodPost, "/api/world/facts", nil, f, &out)
 	return out, err
 }
 

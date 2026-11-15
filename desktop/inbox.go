@@ -29,7 +29,7 @@ func (a *App) SearchSessions(status, q string, limit int) (map[string]any, error
 	if q = strings.TrimSpace(q); q != "" {
 		v.Set("q", q)
 	}
-	return a.get("/v1/sessions?" + v.Encode())
+	return a.get("/api/sessions?" + v.Encode())
 }
 
 func (a *App) patchSession(id string, body map[string]any) (map[string]any, error) {
@@ -38,7 +38,7 @@ func (a *App) patchSession(id string, body map[string]any) (map[string]any, erro
 		return nil, err
 	}
 	var out map[string]any
-	return out, c.Do(a.ctx, http.MethodPatch, "/v1/sessions/"+url.PathEscape(id), body, &out)
+	return out, c.Do(a.ctx, http.MethodPatch, "/api/sessions/"+url.PathEscape(id), body, &out)
 }
 
 // RenameSession sets a chat's title.
@@ -236,7 +236,7 @@ func (a *App) ExportChat(sessionID string) (string, error) {
 // ---------- approvals inbox and notifications ----------
 
 // PendingApprovals lists the tenant's approvals waiting for a decision.
-func (a *App) PendingApprovals() (map[string]any, error) { return a.get("/v1/approvals?limit=100") }
+func (a *App) PendingApprovals() (map[string]any, error) { return a.get("/api/approvals?limit=100") }
 
 // ApproveFromInbox approves or rejects an approval without opening its
 // chat: it reads the run version and sends the command.
@@ -244,7 +244,7 @@ func (a *App) ApproveFromInbox(runID, approvalID, actionHash string, approve boo
 	if runID == "" || approvalID == "" {
 		return nil, errors.New(a.tr("run and approval are required", "缺少 Run 或审批"))
 	}
-	run, err := a.get("/v1/runs/" + url.PathEscape(runID))
+	run, err := a.get("/api/runs/" + url.PathEscape(runID))
 	if err != nil {
 		return nil, err
 	}

@@ -73,6 +73,9 @@ type Server struct {
 	Artifacts      artifact.Store
 	DefaultProfile string
 	DefaultVersion int64
+	// ReleaseVersion and BuildRevision identify this whole-service release.
+	ReleaseVersion string
+	BuildRevision  string
 	// AutoProfileID/Version are used for auto sessions (plan-first runs). The
 	// plan step may choose any tool this profile allows.
 	AutoProfileID      string
@@ -112,10 +115,10 @@ type Server struct {
 	Audit Auditor
 	// Metrics, when set, is exposed on GET /metrics.
 	Metrics *obs.Metrics
-	// Admin enables /v1/admin routes (role bindings, audit log).
+	// Admin enables /api/admin routes (role bindings, audit log).
 	Admin AdminStore
 
-	// Plugins, when set, backs GET /v1/admin/plugins.
+	// Plugins, when set, backs GET /api/admin/plugins.
 	Plugins func() any
 
 	extensions []Extension
@@ -131,7 +134,7 @@ type Extension interface {
 	RouteRoles() map[string]auth.Role
 }
 
-// AdminStore backs the /v1/admin routes.
+// AdminStore backs the /api/admin routes.
 type AdminStore interface {
 	BindRole(ctx context.Context, tenantID, principalID string, role auth.Role, actor string) error
 	UnbindRole(ctx context.Context, tenantID, principalID string, role auth.Role) error
@@ -153,51 +156,52 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
-	mux.HandleFunc("POST /v1/runs", s.createRun)
-	mux.HandleFunc("GET /v1/runs", s.listRuns)
-	mux.HandleFunc("GET /v1/runs/{run_id}", s.getRun)
-	mux.HandleFunc("GET /v1/runs/{run_id}/steps", s.listSteps)
-	mux.HandleFunc("GET /v1/runs/{run_id}/flow", s.getFlow)
-	mux.HandleFunc("GET /v1/runs/{run_id}/attachments/{index}", s.getAttachment)
-	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
-	mux.HandleFunc("GET /v1/runs/{run_id}/approvals", s.listApprovals)
-	mux.HandleFunc("GET /v1/runs/{run_id}/events", s.listEvents)
-	mux.HandleFunc("GET /v1/runs/{run_id}/events/stream", s.streamEvents)
-	mux.HandleFunc("POST /v1/runs/{run_id}/commands", s.postCommand)
-	mux.HandleFunc("GET /v1/runs/{run_id}/commands/{command_id}", s.getCommand)
-	mux.HandleFunc("GET /v1/runs/{run_id}/model-requests", s.listModelRequests)
-	mux.HandleFunc("GET /v1/runs/{run_id}/checkpoints", s.listCheckpoints)
-	mux.HandleFunc("POST /v1/runs/{run_id}/fork", s.forkRun)
-	mux.HandleFunc("GET /v1/runs/{run_id}/steps/{step_id}/revisions", s.stepRevisions)
-	mux.HandleFunc("GET /v1/runs/{run_id}/cost", s.runCost)
-	mux.HandleFunc("GET /v1/runs/{run_id}/stream-segments", s.listSegments)
-	mux.HandleFunc("GET /v1/graph/search", s.graphSearch)
-	mux.HandleFunc("GET /v1/graph/neighborhood", s.graphNeighborhood)
-	mux.HandleFunc("POST /v1/graph/relations", s.graphRelate)
-	mux.HandleFunc("DELETE /v1/graph/relations", s.graphUnrelate)
-	mux.HandleFunc("GET /v1/capabilities", s.capabilities)
-	mux.HandleFunc("GET /v1/usage", s.tenantUsage)
-	mux.HandleFunc("POST /v1/sessions", s.createSession)
-	mux.HandleFunc("GET /v1/sessions", s.listSessions)
-	mux.HandleFunc("GET /v1/sessions/{session_id}", s.getSession)
-	mux.HandleFunc("PATCH /v1/sessions/{session_id}", s.updateSession)
-	mux.HandleFunc("GET /v1/approvals", s.listPendingApprovals)
-	mux.HandleFunc("POST /v1/sessions/{session_id}/turns", s.submitTurn)
-	mux.HandleFunc("GET /v1/sessions/{session_id}/turns", s.listTurns)
-	mux.HandleFunc("GET /v1/sessions/{session_id}/turns/{turn_id}", s.getTurn)
-	mux.HandleFunc("POST /v1/sessions/{session_id}/branches", s.forkBranch)
-	mux.HandleFunc("GET /v1/sessions/{session_id}/branches/{branch_id}/messages", s.branchMessages)
+	mux.HandleFunc("GET /api/service", s.service)
+	mux.HandleFunc("POST /api/runs", s.createRun)
+	mux.HandleFunc("GET /api/runs", s.listRuns)
+	mux.HandleFunc("GET /api/runs/{run_id}", s.getRun)
+	mux.HandleFunc("GET /api/runs/{run_id}/steps", s.listSteps)
+	mux.HandleFunc("GET /api/runs/{run_id}/flow", s.getFlow)
+	mux.HandleFunc("GET /api/runs/{run_id}/attachments/{index}", s.getAttachment)
+	mux.HandleFunc("GET /api/profiles", s.listProfiles)
+	mux.HandleFunc("GET /api/runs/{run_id}/approvals", s.listApprovals)
+	mux.HandleFunc("GET /api/runs/{run_id}/events", s.listEvents)
+	mux.HandleFunc("GET /api/runs/{run_id}/events/stream", s.streamEvents)
+	mux.HandleFunc("POST /api/runs/{run_id}/commands", s.postCommand)
+	mux.HandleFunc("GET /api/runs/{run_id}/commands/{command_id}", s.getCommand)
+	mux.HandleFunc("GET /api/runs/{run_id}/model-requests", s.listModelRequests)
+	mux.HandleFunc("GET /api/runs/{run_id}/checkpoints", s.listCheckpoints)
+	mux.HandleFunc("POST /api/runs/{run_id}/fork", s.forkRun)
+	mux.HandleFunc("GET /api/runs/{run_id}/steps/{step_id}/revisions", s.stepRevisions)
+	mux.HandleFunc("GET /api/runs/{run_id}/cost", s.runCost)
+	mux.HandleFunc("GET /api/runs/{run_id}/stream-segments", s.listSegments)
+	mux.HandleFunc("GET /api/graph/search", s.graphSearch)
+	mux.HandleFunc("GET /api/graph/neighborhood", s.graphNeighborhood)
+	mux.HandleFunc("POST /api/graph/relations", s.graphRelate)
+	mux.HandleFunc("DELETE /api/graph/relations", s.graphUnrelate)
+	mux.HandleFunc("GET /api/capabilities", s.capabilities)
+	mux.HandleFunc("GET /api/usage", s.tenantUsage)
+	mux.HandleFunc("POST /api/sessions", s.createSession)
+	mux.HandleFunc("GET /api/sessions", s.listSessions)
+	mux.HandleFunc("GET /api/sessions/{session_id}", s.getSession)
+	mux.HandleFunc("PATCH /api/sessions/{session_id}", s.updateSession)
+	mux.HandleFunc("GET /api/approvals", s.listPendingApprovals)
+	mux.HandleFunc("POST /api/sessions/{session_id}/turns", s.submitTurn)
+	mux.HandleFunc("GET /api/sessions/{session_id}/turns", s.listTurns)
+	mux.HandleFunc("GET /api/sessions/{session_id}/turns/{turn_id}", s.getTurn)
+	mux.HandleFunc("POST /api/sessions/{session_id}/branches", s.forkBranch)
+	mux.HandleFunc("GET /api/sessions/{session_id}/branches/{branch_id}/messages", s.branchMessages)
 	if s.Metrics != nil {
 		mux.Handle("GET /metrics", s.Metrics.Reg.Handler())
 	}
 	if s.Admin != nil {
-		mux.HandleFunc("POST /v1/admin/role-bindings", s.bindRole)
-		mux.HandleFunc("DELETE /v1/admin/role-bindings", s.unbindRole)
-		mux.HandleFunc("GET /v1/admin/audit", s.listAudit)
+		mux.HandleFunc("POST /api/admin/role-bindings", s.bindRole)
+		mux.HandleFunc("DELETE /api/admin/role-bindings", s.unbindRole)
+		mux.HandleFunc("GET /api/admin/audit", s.listAudit)
 	}
-	mux.HandleFunc("GET /v1/whoami", s.whoami)
+	mux.HandleFunc("GET /api/whoami", s.whoami)
 	if s.Plugins != nil {
-		mux.HandleFunc("GET /v1/admin/plugins", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Plugins()) })
+		mux.HandleFunc("GET /api/admin/plugins", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Plugins()) })
 	}
 	s.extRoles = map[string]auth.Role{}
 	for _, ext := range s.extensions {
@@ -321,7 +325,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"run_id": run.ID, "status": run.DisplayStatus(), "created": created,
-		"version": run.Version, "stream_url": fmt.Sprintf("/v1/runs/%s/events/stream", run.ID)})
+		"version": run.Version, "stream_url": fmt.Sprintf("/api/runs/%s/events/stream", run.ID)})
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {

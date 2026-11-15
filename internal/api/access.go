@@ -197,7 +197,7 @@ func (s *Server) scopeMiddleware(next http.Handler) http.Handler {
 
 // scopedID extracts the run or session id a path addresses ("" if none).
 func scopedID(path string) (kind, id string) {
-	for prefix, k := range map[string]string{"/v1/runs/": "run", "/v1/reasoning/runs/": "run", "/v1/sessions/": "session"} {
+	for prefix, k := range map[string]string{"/api/runs/": "run", "/api/reasoning/runs/": "run", "/api/sessions/": "session"} {
 		if rest, ok := strings.CutPrefix(path, prefix); ok {
 			seg, _, _ := strings.Cut(rest, "/")
 			return k, seg

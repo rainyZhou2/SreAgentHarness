@@ -67,7 +67,7 @@ func (ch *Chat) Run(ctx context.Context) error {
 	var who struct {
 		Tenant, Subject string
 	}
-	if err := ch.C.Do(ctx, "GET", "/v1/whoami", nil, &who); err != nil {
+	if err := ch.C.Do(ctx, "GET", "/api/whoami", nil, &who); err != nil {
 		return fmt.Errorf("cannot reach the harness at %s: %w", ch.C.BaseURL, err)
 	}
 	fmt.Fprintf(ch.Out, "connected to %s as %s (/help for commands)\n", ch.C.BaseURL, who.Subject)
@@ -114,7 +114,7 @@ func (ch *Chat) newSession(ctx context.Context, title string) error {
 			ID string `json:"id"`
 		} `json:"session"`
 	}
-	if err := ch.C.Do(ctx, "POST", "/v1/sessions", map[string]any{"title": title}, &out); err != nil {
+	if err := ch.C.Do(ctx, "POST", "/api/sessions", map[string]any{"title": title}, &out); err != nil {
 		return err
 	}
 	ch.Session = out.Session.ID
@@ -140,7 +140,7 @@ func (ch *Chat) command(ctx context.Context, line string) error {
 			ID    string `json:"id"`
 			Title string `json:"title"`
 		}
-		if err := ch.C.Do(ctx, "GET", "/v1/sessions/"+url.PathEscape(f[1]), nil, &s); err != nil {
+		if err := ch.C.Do(ctx, "GET", "/api/sessions/"+url.PathEscape(f[1]), nil, &s); err != nil {
 			return err
 		}
 		ch.Session = f[1]
@@ -151,7 +151,7 @@ func (ch *Chat) command(ctx context.Context, line string) error {
 				ID, Title, Status string
 			} `json:"sessions"`
 		}
-		if err := ch.C.Do(ctx, "GET", "/v1/sessions?limit=15", nil, &out); err != nil {
+		if err := ch.C.Do(ctx, "GET", "/api/sessions?limit=15", nil, &out); err != nil {
 			return err
 		}
 		for _, s := range out.Sessions {
@@ -181,7 +181,7 @@ func (ch *Chat) listApprovals(ctx context.Context) error {
 	var out struct {
 		Approvals []approval `json:"approvals"`
 	}
-	if err := ch.C.Do(ctx, "GET", "/v1/approvals", nil, &out); err != nil {
+	if err := ch.C.Do(ctx, "GET", "/api/approvals", nil, &out); err != nil {
 		return err
 	}
 	ch.pending = ch.pending[:0]
@@ -207,7 +207,7 @@ func (ch *Chat) turn(ctx context.Context, text string) error {
 		} `json:"turn"`
 	}
 	body := map[string]any{"text": text, "client_request_id": newKey()}
-	if err := ch.C.Do(ctx, "POST", "/v1/sessions/"+url.PathEscape(ch.Session)+"/turns", body, &out); err != nil {
+	if err := ch.C.Do(ctx, "POST", "/api/sessions/"+url.PathEscape(ch.Session)+"/turns", body, &out); err != nil {
 		return err
 	}
 	runID := out.Turn.RunID
@@ -282,7 +282,7 @@ func (ch *Chat) askApprovals(ctx context.Context, runID string) error {
 	var out struct {
 		Approvals []approval `json:"approvals"`
 	}
-	if err := ch.C.Do(ctx, "GET", "/v1/runs/"+url.PathEscape(runID)+"/approvals", nil, &out); err != nil {
+	if err := ch.C.Do(ctx, "GET", "/api/runs/"+url.PathEscape(runID)+"/approvals", nil, &out); err != nil {
 		return err
 	}
 	for _, a := range out.Approvals {
@@ -322,7 +322,7 @@ func (ch *Chat) decide(ctx context.Context, a approval, approve bool, reason str
 			Version int64 `json:"version"`
 		} `json:"run"`
 	}
-	if err := ch.C.Do(ctx, "GET", "/v1/runs/"+url.PathEscape(a.RunID), nil, &run); err != nil {
+	if err := ch.C.Do(ctx, "GET", "/api/runs/"+url.PathEscape(a.RunID), nil, &run); err != nil {
 		return err
 	}
 	typ := "approve_tool"
@@ -334,7 +334,7 @@ func (ch *Chat) decide(ctx context.Context, a approval, approve bool, reason str
 	if reason != "" {
 		body["reason"] = reason
 	}
-	if err := ch.C.Do(ctx, "POST", "/v1/runs/"+url.PathEscape(a.RunID)+"/commands", body, nil); err != nil {
+	if err := ch.C.Do(ctx, "POST", "/api/runs/"+url.PathEscape(a.RunID)+"/commands", body, nil); err != nil {
 		return err
 	}
 	verb := "rejected"
@@ -358,7 +358,7 @@ func (ch *Chat) printResult(ctx context.Context, runID string) error {
 		} `json:"result"`
 		Error json.RawMessage `json:"error"`
 	}
-	if err := ch.C.Do(ctx, "GET", "/v1/runs/"+url.PathEscape(runID), nil, &run); err != nil {
+	if err := ch.C.Do(ctx, "GET", "/api/runs/"+url.PathEscape(runID), nil, &run); err != nil {
 		return err
 	}
 	if run.Result.Answer != "" {

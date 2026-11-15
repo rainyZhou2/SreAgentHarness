@@ -285,7 +285,7 @@ func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusOK
 	}
 	writeJSON(w, code, map[string]any{"turn": res,
-		"stream_url": fmt.Sprintf("/v1/runs/%s/events/stream?include_deltas=true", res.RunID)})
+		"stream_url": fmt.Sprintf("/api/runs/%s/events/stream?include_deltas=true", res.RunID)})
 }
 
 func (s *Server) listTurns(w http.ResponseWriter, r *http.Request) {

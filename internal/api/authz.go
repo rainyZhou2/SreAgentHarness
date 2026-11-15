@@ -20,19 +20,20 @@ type Auditor interface {
 // routeRoles maps "METHOD pattern" to the minimum role. GET routes default to
 // viewer; every other route must be listed (default deny for writes).
 var routeRoles = map[string]auth.Role{
-	"POST /v1/runs":                           auth.Operator,
-	"POST /v1/runs/{run_id}/commands":         auth.Viewer, // per-command role checked in the handler
-	"POST /v1/runs/{run_id}/fork":             auth.Operator,
-	"POST /v1/sessions":                       auth.Operator,
-	"POST /v1/sessions/{session_id}/turns":    auth.Operator,
-	"PATCH /v1/sessions/{session_id}":         auth.Operator,
-	"POST /v1/sessions/{session_id}/branches": auth.Operator,
-	"POST /v1/admin/role-bindings":            auth.Admin,
-	"DELETE /v1/admin/role-bindings":          auth.Admin,
-	"GET /v1/admin/audit":                     auth.Admin,
-	"GET /v1/admin/plugins":                   auth.Admin,
-	"POST /v1/graph/relations":                auth.Admin,
-	"DELETE /v1/graph/relations":              auth.Admin,
+	"GET /api/service":                         auth.Viewer,
+	"POST /api/runs":                           auth.Operator,
+	"POST /api/runs/{run_id}/commands":         auth.Viewer, // per-command role checked in the handler
+	"POST /api/runs/{run_id}/fork":             auth.Operator,
+	"POST /api/sessions":                       auth.Operator,
+	"POST /api/sessions/{session_id}/turns":    auth.Operator,
+	"PATCH /api/sessions/{session_id}":         auth.Operator,
+	"POST /api/sessions/{session_id}/branches": auth.Operator,
+	"POST /api/admin/role-bindings":            auth.Admin,
+	"DELETE /api/admin/role-bindings":          auth.Admin,
+	"GET /api/admin/audit":                     auth.Admin,
+	"GET /api/admin/plugins":                   auth.Admin,
+	"POST /api/graph/relations":                auth.Admin,
+	"DELETE /api/graph/relations":              auth.Admin,
 }
 
 var publicRoutes = map[string]bool{"GET /healthz": true, "GET /metrics": true}

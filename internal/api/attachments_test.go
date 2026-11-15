@@ -40,7 +40,7 @@ func TestGetAttachment(t *testing.T) {
 	resRef, _, _ := arts.Put(ctx, "t1", "result", res)
 	s := &Server{Store: runOnlyStore{run: domain.Run{ID: "r1", ResultRef: &resRef}}, Artifacts: arts}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/runs/{run_id}/attachments/{index}", s.getAttachment)
+	mux.HandleFunc("GET /api/runs/{run_id}/attachments/{index}", s.getAttachment)
 	get := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Tenant: "t1", Subject: "u"}))
@@ -49,7 +49,7 @@ func TestGetAttachment(t *testing.T) {
 		return rec
 	}
 
-	rec := get("/v1/runs/r1/attachments/0")
+	rec := get("/api/runs/r1/attachments/0")
 	if rec.Code != 200 || rec.Body.String() != `{"lines":["a"]}` {
 		t.Fatalf("file: %d %s", rec.Code, rec.Body)
 	}
@@ -59,13 +59,13 @@ func TestGetAttachment(t *testing.T) {
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "sandbox") {
 		t.Fatalf("headers: %v", rec.Header())
 	}
-	if rec = get("/v1/runs/r1/attachments/1"); rec.Header().Get("Content-Type") != "image/png" || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "inline") {
+	if rec = get("/api/runs/r1/attachments/1"); rec.Header().Get("Content-Type") != "image/png" || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "inline") {
 		t.Fatalf("png: %v", rec.Header())
 	}
-	if rec = get("/v1/runs/r1/attachments/2"); rec.Header().Get("Content-Type") != "application/octet-stream" || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
+	if rec = get("/api/runs/r1/attachments/2"); rec.Header().Get("Content-Type") != "application/octet-stream" || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
 		t.Fatalf("svg must download as bytes: %v", rec.Header())
 	}
-	for _, p := range []string{"/v1/runs/r1/attachments/3", "/v1/runs/r1/attachments/9", "/v1/runs/r1/attachments/-1", "/v1/runs/other/attachments/0"} {
+	for _, p := range []string{"/api/runs/r1/attachments/3", "/api/runs/r1/attachments/9", "/api/runs/r1/attachments/-1", "/api/runs/other/attachments/0"} {
 		if rec = get(p); rec.Code/100 == 2 {
 			t.Fatalf("%s: want error, got %d", p, rec.Code)
 		}

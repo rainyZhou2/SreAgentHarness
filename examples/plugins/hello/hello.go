@@ -43,7 +43,7 @@ func (f freezeWindow) Evaluate(desc *sdk.ToolDescriptor, target string) sdk.Poli
 type helloAPI struct{ greeting string }
 
 func (a helloAPI) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/example/hello", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /api/example/hello", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"message": a.greeting})
 	})
@@ -84,7 +84,7 @@ func init() {
 			}
 			return freezeWindow{Gate: sdk.DefaultPolicy(), deny: deny}, nil
 		})
-	sdk.Register(sdk.API, "hello", "GET /v1/example/hello",
+	sdk.Register(sdk.API, "hello", "GET /api/example/hello",
 		func(context.Context, *sdk.Host, sdk.Config) (sdk.APIExtension, error) {
 			return helloAPI{greeting: "hello from a plugin"}, nil
 		})

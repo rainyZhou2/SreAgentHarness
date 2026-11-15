@@ -19,7 +19,7 @@ const maxAttachmentBytes = 32 << 20
 
 var unsafeFileChars = regexp.MustCompile(`[^\p{L}\p{N}._ -]+`)
 
-// getAttachment serves GET /v1/runs/{run_id}/attachments/{index}: the stored
+// getAttachment serves GET /api/runs/{run_id}/attachments/{index}: the stored
 // tool output that attachment <index> of the run's result names. Only refs
 // the kernel accepted into the result can be read here, always as a
 // download (or an inline raster image), never as active content.

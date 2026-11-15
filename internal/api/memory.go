@@ -45,15 +45,15 @@ type MemoryAPI struct {
 
 func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
 	roles := map[string]auth.Role{
-		"POST /v1/memories":                              auth.Operator,
-		"POST /v1/memories/{memory_id}/transition":       auth.Approver,
-		"PATCH /v1/memories/{memory_id}":                 auth.Approver,
-		"PUT /v1/me/memories/{key}":                      auth.Viewer,
-		"DELETE /v1/me/memories/{key}":                   auth.Viewer,
-		"POST /v1/service-dependencies":                  auth.Admin,
-		"POST /v1/runs/{run_id}/feedback":                auth.Operator,
-		"POST /v1/incidents":                             auth.Operator,
-		"POST /v1/incidents/{incident_id}/memory-events": auth.Operator,
+		"POST /api/memories":                              auth.Operator,
+		"POST /api/memories/{memory_id}/transition":       auth.Approver,
+		"PATCH /api/memories/{memory_id}":                 auth.Approver,
+		"PUT /api/me/memories/{key}":                      auth.Viewer,
+		"DELETE /api/me/memories/{key}":                   auth.Viewer,
+		"POST /api/service-dependencies":                  auth.Admin,
+		"POST /api/runs/{run_id}/feedback":                auth.Operator,
+		"POST /api/incidents":                             auth.Operator,
+		"POST /api/incidents/{incident_id}/memory-events": auth.Operator,
 	}
 	for k, v := range m.curationRoutes() {
 		roles[k] = v
@@ -62,21 +62,21 @@ func (m *MemoryAPI) RouteRoles() map[string]auth.Role {
 }
 
 func (m *MemoryAPI) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/memories", m.create)
-	mux.HandleFunc("GET /v1/memories", m.list)
-	mux.HandleFunc("GET /v1/memories/{memory_id}", m.get)
-	mux.HandleFunc("POST /v1/memories/{memory_id}/transition", m.transition)
-	mux.HandleFunc("PATCH /v1/memories/{memory_id}", m.update)
-	mux.HandleFunc("GET /v1/me/memories", m.listMine)
-	mux.HandleFunc("PUT /v1/me/memories/{key}", m.putMine)
-	mux.HandleFunc("DELETE /v1/me/memories/{key}", m.deleteMine)
-	mux.HandleFunc("POST /v1/service-dependencies", m.putDependency)
-	mux.HandleFunc("POST /v1/runs/{run_id}/feedback", m.feedback)
-	mux.HandleFunc("GET /v1/runs/{run_id}/feedback", m.listFeedback)
-	mux.HandleFunc("GET /v1/experiences", m.experiences)
-	mux.HandleFunc("POST /v1/incidents", m.createIncident)
-	mux.HandleFunc("POST /v1/incidents/{incident_id}/memory-events", m.appendIncident)
-	mux.HandleFunc("GET /v1/incidents/{incident_id}/memory-events", m.listIncident)
+	mux.HandleFunc("POST /api/memories", m.create)
+	mux.HandleFunc("GET /api/memories", m.list)
+	mux.HandleFunc("GET /api/memories/{memory_id}", m.get)
+	mux.HandleFunc("POST /api/memories/{memory_id}/transition", m.transition)
+	mux.HandleFunc("PATCH /api/memories/{memory_id}", m.update)
+	mux.HandleFunc("GET /api/me/memories", m.listMine)
+	mux.HandleFunc("PUT /api/me/memories/{key}", m.putMine)
+	mux.HandleFunc("DELETE /api/me/memories/{key}", m.deleteMine)
+	mux.HandleFunc("POST /api/service-dependencies", m.putDependency)
+	mux.HandleFunc("POST /api/runs/{run_id}/feedback", m.feedback)
+	mux.HandleFunc("GET /api/runs/{run_id}/feedback", m.listFeedback)
+	mux.HandleFunc("GET /api/experiences", m.experiences)
+	mux.HandleFunc("POST /api/incidents", m.createIncident)
+	mux.HandleFunc("POST /api/incidents/{incident_id}/memory-events", m.appendIncident)
+	mux.HandleFunc("GET /api/incidents/{incident_id}/memory-events", m.listIncident)
 	m.registerCuration(mux)
 }
 
@@ -102,7 +102,7 @@ func (m *MemoryAPI) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Scope == "user" {
-		writeErr(w, http.StatusBadRequest, "invalid_scope", "personal memory is written with PUT /v1/me/memories/{key}")
+		writeErr(w, http.StatusBadRequest, "invalid_scope", "personal memory is written with PUT /api/me/memories/{key}")
 		return
 	}
 	nm := memory.NewMemory{TenantID: id.tenant, Scope: b.Scope, ScopeID: b.ScopeID, Type: b.Type, Subject: b.Subject,

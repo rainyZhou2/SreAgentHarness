@@ -1,5 +1,5 @@
 // Command sre-harness-desktop is the desktop client for the SRE harness:
-// a native window (Wails, system WebView) over the harness /v1 API.
+// a native window (Wails, system WebView) over the harness /api API.
 package main
 
 import (

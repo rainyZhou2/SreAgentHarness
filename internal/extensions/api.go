@@ -14,7 +14,7 @@ import (
 	"go-sre-harness/internal/tools"
 )
 
-// API serves /v1/extensions and /v1/tools. Reads need viewer; changes and
+// API serves /api/extensions and /api/tools. Reads need viewer; changes and
 // probes (which open outbound connections) need admin and are audited.
 type API struct {
 	Runtime  *Runtime
@@ -41,26 +41,26 @@ var pathKinds = map[string]Kind{"mcp-servers": KindMCP, "http-tools": KindHTTP, 
 
 func (a *API) RouteRoles() map[string]auth.Role {
 	return map[string]auth.Role{
-		"GET /v1/extensions":                           auth.Viewer,
-		"GET /v1/tools":                                auth.Viewer,
-		"PUT /v1/tools/{name}":                         auth.Admin,
-		"PUT /v1/extensions/{kind}/{name}":             auth.Admin,
-		"DELETE /v1/extensions/{kind}/{name}":          auth.Admin,
-		"POST /v1/extensions/mcp-servers/{name}/probe": auth.Admin,
-		"POST /v1/extensions/models/{name}/test":       auth.Admin,
-		"POST /v1/extensions/models/{name}/list":       auth.Admin,
+		"GET /api/extensions":                           auth.Viewer,
+		"GET /api/tools":                                auth.Viewer,
+		"PUT /api/tools/{name}":                         auth.Admin,
+		"PUT /api/extensions/{kind}/{name}":             auth.Admin,
+		"DELETE /api/extensions/{kind}/{name}":          auth.Admin,
+		"POST /api/extensions/mcp-servers/{name}/probe": auth.Admin,
+		"POST /api/extensions/models/{name}/test":       auth.Admin,
+		"POST /api/extensions/models/{name}/list":       auth.Admin,
 	}
 }
 
 func (a *API) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/extensions", a.list)
-	mux.HandleFunc("GET /v1/tools", a.listTools)
-	mux.HandleFunc("PUT /v1/tools/{name}", a.setTool)
-	mux.HandleFunc("PUT /v1/extensions/{kind}/{name}", a.put)
-	mux.HandleFunc("DELETE /v1/extensions/{kind}/{name}", a.del)
-	mux.HandleFunc("POST /v1/extensions/mcp-servers/{name}/probe", a.probe)
-	mux.HandleFunc("POST /v1/extensions/models/{name}/test", a.testModel)
-	mux.HandleFunc("POST /v1/extensions/models/{name}/list", a.listModels)
+	mux.HandleFunc("GET /api/extensions", a.list)
+	mux.HandleFunc("GET /api/tools", a.listTools)
+	mux.HandleFunc("PUT /api/tools/{name}", a.setTool)
+	mux.HandleFunc("PUT /api/extensions/{kind}/{name}", a.put)
+	mux.HandleFunc("DELETE /api/extensions/{kind}/{name}", a.del)
+	mux.HandleFunc("POST /api/extensions/mcp-servers/{name}/probe", a.probe)
+	mux.HandleFunc("POST /api/extensions/models/{name}/test", a.testModel)
+	mux.HandleFunc("POST /api/extensions/models/{name}/list", a.listModels)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

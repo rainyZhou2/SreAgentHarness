@@ -90,7 +90,7 @@ func localBanner(addr, data string, getenv func(string) string) string {
   model:  %[4]s
 
 try it:
-  curl -H "Authorization: Bearer $(cat %[3]s)" http://%[1]s/v1/whoami
+  curl -H "Authorization: Bearer $(cat %[3]s)" http://%[1]s/api/whoami
 
 `, addr, data, tokenPath, model)
 }

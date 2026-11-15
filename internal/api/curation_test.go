@@ -58,15 +58,15 @@ func TestMemoryCurationAPI(t *testing.T) {
 	}
 	viewer, approver := []auth.Role{auth.Viewer}, []auth.Role{auth.Viewer, auth.Operator, auth.Approver}
 
-	code, out := do(viewer, "GET", "/v1/memory/curation?status=PENDING", "")
+	code, out := do(viewer, "GET", "/api/memory/curation?status=PENDING", "")
 	if code != 200 || len(out["proposals"].([]any)) != 0 {
 		t.Fatalf("an empty list is [] not null: %d %v", code, out)
 	}
-	code, out = do(approver, "POST", "/v1/memory/curation/run", "{}")
+	code, out = do(approver, "POST", "/api/memory/curation/run", "{}")
 	if code != 200 || out["new_proposals"] != float64(1) {
 		t.Fatalf("%d %v", code, out)
 	}
-	code, out = do(viewer, "GET", "/v1/memory/curation?status=PENDING", "")
+	code, out = do(viewer, "GET", "/api/memory/curation?status=PENDING", "")
 	props := out["proposals"].([]any)
 	if code != 200 || len(props) != 1 {
 		t.Fatalf("%d %v", code, out)
@@ -77,26 +77,26 @@ func TestMemoryCurationAPI(t *testing.T) {
 	}
 	id := p["id"].(string)
 
-	if code, _ := do(approver, "POST", "/v1/memory/curation/"+id+"/decide", `{"decision":"nope"}`); code != 400 {
+	if code, _ := do(approver, "POST", "/api/memory/curation/"+id+"/decide", `{"decision":"nope"}`); code != 400 {
 		t.Fatalf("an unknown decision: %d", code)
 	}
-	if code, _ := do(approver, "POST", "/v1/memory/curation/"+id+"/decide", `{"decision":"apply","reason":"ok"}`); code != 200 {
+	if code, _ := do(approver, "POST", "/api/memory/curation/"+id+"/decide", `{"decision":"apply","reason":"ok"}`); code != 200 {
 		t.Fatalf("apply: %d", code)
 	}
 	got, _ := st.GetMemory(ctx, "t", oldID)
 	if got.Status != "STALE" {
 		t.Fatalf("applying sets the memory aside as STALE, got %s", got.Status)
 	}
-	if code, _ := do(approver, "POST", "/v1/memory/curation/"+id+"/decide", `{"decision":"apply"}`); code != 422 {
+	if code, _ := do(approver, "POST", "/api/memory/curation/"+id+"/decide", `{"decision":"apply"}`); code != 422 {
 		t.Fatalf("a decided proposal cannot be applied again: %d", code)
 	}
-	if code, _ := do(approver, "POST", "/v1/memory/curation/missing/decide", `{"decision":"dismiss"}`); code != 404 {
+	if code, _ := do(approver, "POST", "/api/memory/curation/missing/decide", `{"decision":"dismiss"}`); code != 404 {
 		t.Fatalf("%d", code)
 	}
 
 	// Roles: running is an operator action, deciding an approver action.
 	roles := m.RouteRoles()
-	if roles["POST /v1/memory/curation/run"] != auth.Operator || roles["POST /v1/memory/curation/{id}/decide"] != auth.Approver {
+	if roles["POST /api/memory/curation/run"] != auth.Operator || roles["POST /api/memory/curation/{id}/decide"] != auth.Approver {
 		t.Fatalf("%v", roles)
 	}
 
@@ -105,13 +105,13 @@ func TestMemoryCurationAPI(t *testing.T) {
 	mux2 := http.NewServeMux()
 	plain.Register(mux2)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v1/memory/curation", nil)
+	req := httptest.NewRequest("GET", "/api/memory/curation", nil)
 	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Tenant: "t", Subject: "a", Roles: viewer}))
 	mux2.ServeHTTP(rec, req)
 	if rec.Code != 404 {
 		t.Fatalf("a server without the curator must not serve its routes: %d", rec.Code)
 	}
-	if _, ok := plain.RouteRoles()["POST /v1/memory/curation/run"]; ok {
+	if _, ok := plain.RouteRoles()["POST /api/memory/curation/run"]; ok {
 		t.Fatal("no role entries for routes that are not served")
 	}
 }

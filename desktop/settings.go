@@ -70,7 +70,7 @@ func (a *App) ListModels(name string, spec map[string]any) (map[string]any, erro
 		body = map[string]any{"spec": spec}
 	}
 	var out map[string]any
-	if err := c.Do(a.ctx, http.MethodPost, "/v1/extensions/models/"+url.PathEscape(name)+"/list", body, &out); err != nil {
+	if err := c.Do(a.ctx, http.MethodPost, "/api/extensions/models/"+url.PathEscape(name)+"/list", body, &out); err != nil {
 		a.logEvent("warn", "listing models for %s failed: %v", name, err)
 		return nil, err
 	}

@@ -82,7 +82,7 @@ func TestReasoningPatternEndpoints(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		return rec
 	}
-	rec := do("GET", "/v1/reasoning/patterns", "")
+	rec := do("GET", "/api/reasoning/patterns", "")
 	var list struct {
 		Probe    float64       `json:"pattern_probe_rate"`
 		Patterns []patternView `json:"patterns"`
@@ -91,19 +91,19 @@ func TestReasoningPatternEndpoints(t *testing.T) {
 		list.Probe != 0.05 || list.Patterns[0].Stats == nil {
 		t.Fatalf("patterns: %d %s", rec.Code, rec.Body)
 	}
-	rec = do("POST", "/v1/reasoning/patterns/m1/reinstate", `{"note":"looks fine now"}`)
+	rec = do("POST", "/api/reasoning/patterns/m1/reinstate", `{"note":"looks fine now"}`)
 	if rec.Code != http.StatusCreated || evo.actor != "alice" || !strings.Contains(string(evo.patch), `"reasoning"`) ||
 		strings.Contains(string(evo.patch), `"m1"`) {
 		t.Fatalf("reinstate: %d %s patch=%s", rec.Code, rec.Body, evo.patch)
 	}
-	if rec = do("POST", "/v1/reasoning/patterns/m1/exclude", `{}`); rec.Code != http.StatusUnprocessableEntity {
+	if rec = do("POST", "/api/reasoning/patterns/m1/exclude", `{}`); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("already excluded: %d %s", rec.Code, rec.Body)
 	}
-	if rec = do("POST", "/v1/reasoning/patterns/nope/exclude", `{}`); rec.Code != http.StatusUnprocessableEntity {
+	if rec = do("POST", "/api/reasoning/patterns/nope/exclude", `{}`); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("unknown memory: %d %s", rec.Code, rec.Body)
 	}
 	roles := a.RouteRoles()
-	if roles["POST /v1/reasoning/patterns/{memory_id}/exclude"] != auth.Operator || roles["POST /v1/reasoning/improve"] != auth.Admin {
+	if roles["POST /api/reasoning/patterns/{memory_id}/exclude"] != auth.Operator || roles["POST /api/reasoning/improve"] != auth.Admin {
 		t.Fatalf("roles: %v", roles)
 	}
 }

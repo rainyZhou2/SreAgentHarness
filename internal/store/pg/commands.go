@@ -127,7 +127,7 @@ func (s *Store) applyCommand(ctx context.Context, r *runTx, cmd *domain.Command,
 	if run.Status.Terminal() {
 		return "run_terminal", nil
 	}
-	if reason, handled, err := s.applyV11(ctx, r, cmd, req); handled || err != nil {
+	if reason, handled, err := s.applyExtendedCommand(ctx, r, cmd, req); handled || err != nil {
 		return reason, err
 	}
 	hasLease := run.Status == domain.RunRunning && run.LeaseUntil != nil && run.LeaseUntil.After(r.now)

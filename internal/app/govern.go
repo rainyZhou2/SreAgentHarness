@@ -37,7 +37,7 @@ and evaluates the deployment gate for the tier. It connects to nothing and
 changes nothing; it exits 1 when the deployment would be refused or would
 run degraded. doctor checks a running deployment's dependencies
 (HARNESS_DATABASE_URL) and exits 1 when a check fails. release-gate
-compares two attestations (GET /v1/governance/attestation, or the JSON
+compares two attestations (GET /api/governance/attestation, or the JSON
 output of validate-config) and exits 1 on a regression. No command prints
 a token, a secret or an endpoint URL.`
 
@@ -58,7 +58,7 @@ func buildSHA() string {
 // of the enabled plugins — never plugin settings, which may hold secrets.
 func deploymentOf(cfg File, e Env, auditSink bool) workengine.Deployment {
 	flags := workengine.FlagsFromEnv(e)
-	d := workengine.Deployment{Tier: flags.Tier, BuildSHA: buildSHA(), StoreKind: "postgres", AuditSink: auditSink}
+	d := workengine.Deployment{Tier: flags.Tier, ReleaseVersion: Version, BuildSHA: buildSHA(), StoreKind: "postgres", AuditSink: auditSink}
 	names := map[string][]string{}
 	for kind, specs := range cfg.Plugins {
 		for _, s := range specs.Enabled() {
@@ -404,7 +404,7 @@ func doctor(ctx context.Context, cfg File, e Env, flags workengine.Flags, which 
 	if want["policy"] {
 		d := deploymentOf(cfg, e, true)
 		var err error
-		if flags.Tier == governance.TierProduction && flags.ActionV2 && !d.PolicyCustom {
+		if flags.Tier == governance.TierProduction && flags.Actions && !d.PolicyCustom {
 			err = errors.New("production actions are enabled under the built-in default policy")
 		}
 		add("policy", err, "policy "+d.PolicyVersion+" ("+string(policy.Default().Environment)+" defaults)", "configure a policy plugin")
@@ -451,7 +451,7 @@ func doctor(ctx context.Context, cfg File, e Env, flags workengine.Flags, which 
 					err = fmt.Errorf("%d watch(es) are overdue: the reconciler is not running", bl.OverdueWatches.Count)
 				}
 				add("events", err, fmt.Sprintf("inbox new=%d failed=%d", bl.Inbox["NEW"].Count, bl.Inbox["FAILED"].Count),
-					"inspect GET /v1/events/{id}; check the scheduler role is running")
+					"inspect GET /api/events/{id}; check the scheduler role is running")
 			}
 			if want["action"] {
 				var err error
@@ -464,7 +464,7 @@ func doctor(ctx context.Context, cfg File, e Env, flags workengine.Flags, which 
 						max(bl.Actions["EFFECT_UNKNOWN"].Oldest, bl.Actions["MANUAL_RECOVERY"].Oldest).Round(time.Second))
 				}
 				add("action", err, fmt.Sprintf("waiting approval=%d", bl.Actions["WAITING_APPROVAL"].Count),
-					"reconcile or resolve them: POST /v1/actions/{id}/reconcile | /resolve")
+					"reconcile or resolve them: POST /api/actions/{id}/reconcile | /resolve")
 			}
 		}
 	}

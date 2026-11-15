@@ -238,7 +238,7 @@ func (s *Store) RunCost(ctx context.Context, tenantID, runID string) (CostSummar
 	return s.costSummary(ctx, `r.tenant_id=$1 AND r.run_id=$2::uuid`, tenantID, runID)
 }
 
-// TenantCost aggregates usage since t (the /v1/usage endpoint).
+// TenantCost aggregates usage since t (the /api/usage endpoint).
 func (s *Store) TenantCost(ctx context.Context, tenantID string, since time.Time) (CostSummary, error) {
 	return s.costSummary(ctx, `r.tenant_id=$1 AND a.started_at >= $2::timestamptz`, tenantID, since)
 }

@@ -10,10 +10,10 @@ import (
 	"go-sre-harness/internal/domain"
 )
 
-// v1.1 commands (§29.5, §35.6). All run inside ApplyCommand's transaction with
+// Extended run commands (§29.5, §35.6). All run inside ApplyCommand's transaction with
 // the run row locked; none of them can act while a worker holds the lease.
 
-func (s *Store) applyV11(ctx context.Context, r *runTx, cmd *domain.Command, req domain.CommandRequest) (string, bool, error) {
+func (s *Store) applyExtendedCommand(ctx context.Context, r *runTx, cmd *domain.Command, req domain.CommandRequest) (string, bool, error) {
 	switch req.Type {
 	case domain.CmdOverrideResult:
 		reason, err := s.overrideResult(ctx, r, cmd, req)

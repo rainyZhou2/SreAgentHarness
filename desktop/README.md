@@ -2,7 +2,7 @@
 
 English | [中文](README.zh-CN.md)
 
-A native desktop client for the SRE harness, built with [Wails v2](https://wails.io): Go plus the operating system's WebView, so there is no bundled browser (~9 MB on macOS). It is a separate Go module and talks to the server only through the public `/v1` API, using the same authentication and roles as any other client.
+A native desktop client for the SRE harness, built with [Wails v2](https://wails.io): Go plus the operating system's WebView, so there is no bundled browser (~9 MB on macOS). It is a separate Go module and talks to the server only through the public `/api` API, using the same authentication and roles as any other client.
 
 <p align="center"><img src="../docs/images/desktop-diagnosis.png" alt="Desktop client: a diagnosis with its work log and hypotheses" width="860"></p>
 
@@ -67,7 +67,7 @@ The app starts in **Local runtime** mode by default:
     logs/
   ```
 - execution events, state changes and event cursors commit in one SQLite transaction. Schema v2 verifies and imports legacy JSONL events after taking a database snapshot; corrupt or incomplete histories stop the upgrade. Archives remain untouched, and new events are stored only in SQLite. `RebuildEventIndex` rebuilds SQLite lookup indexes without replaying archives. Older binaries refuse schema v2; downgrade requires stopping the runtime and restoring the pre-upgrade database plus its original archives, discarding post-backup changes.
-- **Models**, **MCP servers**, **HTTP tools**, **skills** and **tool toggles** use the same `/v1/extensions` API and settings UI as team mode. Specs keep the same provider/model/base URL/API key fields; they are stored in the local SQLite database.
+- **Models**, **MCP servers**, **HTTP tools**, **skills** and **tool toggles** use the same `/api/extensions` API and settings UI as team mode. Specs keep the same provider/model/base URL/API key fields; they are stored in the local SQLite database.
 - Local mode supports the full command set: pause/resume/cancel, approve/reject, provide input, retry, resolve unknown, replace pending input, override result, inject evidence and migrate profile. Version-guarded commands require `expected_version`; idempotency keys survive restarts; a rejected command leaves no partial state; cancel cascades to child runs and pending approvals.
 - The same state surface is available offline: compaction summaries and pinned memory hits feed later steps, checkpoints are recorded per committed step and can be forked, step output revisions are queryable, and the memory, graph and evaluation APIs are served by the local store.
 - stdio MCP servers stay disabled unless `HARNESS_MCP_ALLOW_STDIO=true`; loopback destinations are allowed by default, additional networks use `HARNESS_EXTENSIONS_ALLOW_NETWORKS`.
@@ -91,7 +91,7 @@ Then open http://127.0.0.1:34115/.
 | `main.go` | Wails window and options; switches to preview mode when `SRE_DESKTOP_PREVIEW` is set |
 | `app.go` | methods bound to the UI (`window.go.main.App.*`): sessions, transcript, send, run view, commands, live watch; all HTTP happens in Go |
 | `inbox.go` | chat search, rename, archive, delete and Markdown export; the approvals inbox and system notifications |
-| `harness/` | dependency-free `/v1` client: auth headers, idempotency keys, errors, SSE parsing with resume |
+| `harness/` | dependency-free `/api` client: auth headers, idempotency keys, errors, SSE parsing with resume |
 | `preview.go` | browser preview bridge (`/__call/<Method>`, `/__events`) |
 | `frontend/dist/` | the UI: plain HTML/CSS/JS, no build step; it renders server data as text only |
 

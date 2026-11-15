@@ -181,7 +181,7 @@ func WorkBench(ctx context.Context, args []string, getenv func(string) string, s
 	return 2
 }
 
-// openControlPlane opens the v2 store from HARNESS_DATABASE_URL (RLS on).
+// openControlPlane opens the control-plane store from HARNESS_DATABASE_URL (RLS on).
 func openControlPlane(ctx context.Context, getenv func(string) string) (*cpsql.Store, func(), error) {
 	url := getenv("HARNESS_DATABASE_URL")
 	if url == "" {

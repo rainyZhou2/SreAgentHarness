@@ -26,23 +26,23 @@ type fakeServer struct {
 func (f *fakeServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	js := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(v) }
-	mux.HandleFunc("GET /v1/whoami", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/whoami", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.auth = append(f.auth, r.Header.Get("Authorization"))
 		f.mu.Unlock()
 		js(w, map[string]any{"subject": "me"})
 	})
-	mux.HandleFunc("POST /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Idempotency-Key") == "" {
 			http.Error(w, `{"error":"idempotency_key_required"}`, 400)
 			return
 		}
 		js(w, map[string]any{"session": map[string]any{"id": "s1"}})
 	})
-	mux.HandleFunc("POST /v1/sessions/s1/turns", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/sessions/s1/turns", func(w http.ResponseWriter, r *http.Request) {
 		js(w, map[string]any{"turn": map[string]any{"run_id": "r1"}})
 	})
-	mux.HandleFunc("GET /v1/runs/r1/events/stream", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/runs/r1/events/stream", func(w http.ResponseWriter, r *http.Request) {
 		fl := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")
 		send := func(ev string, data any) {
@@ -67,15 +67,15 @@ func (f *fakeServer) handler() http.Handler {
 		fmt.Fprint(w, "event: stream.end\ndata: {\"status\":\"COMPLETED\"}\n\n")
 		fl.Flush()
 	})
-	mux.HandleFunc("GET /v1/runs/r1/approvals", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/runs/r1/approvals", func(w http.ResponseWriter, r *http.Request) {
 		js(w, map[string]any{"approvals": []map[string]any{{"id": "a1", "action_hash": "sha256:abc", "risk_class": "R2",
 			"tool_name": "demo.restart", "target": "checkout", "status": "PENDING"}}})
 	})
-	mux.HandleFunc("GET /v1/runs/r1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/runs/r1", func(w http.ResponseWriter, r *http.Request) {
 		js(w, map[string]any{"display_status": "COMPLETED", "run": map[string]any{"version": 7},
 			"result": map[string]any{"answer": "restarted checkout"}})
 	})
-	mux.HandleFunc("POST /v1/runs/r1/commands", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/runs/r1/commands", func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.mu.Lock()
@@ -193,7 +193,7 @@ func TestMemoryCommands(t *testing.T) {
 	}
 	out.Reset()
 	if err := MemorySet(context.Background(), c, &out, "answer language", "中文"); err != nil ||
-		gotPath != "/v1/me/memories/answer%20language" || !strings.Contains(out.String(), "2 sensitive") {
+		gotPath != "/api/me/memories/answer%20language" || !strings.Contains(out.String(), "2 sensitive") {
 		t.Fatalf("set: %v %s %q", err, gotPath, out.String())
 	}
 	if err := MemoryRemove(context.Background(), c, &out, "nope"); err == nil || !strings.Contains(err.Error(), `no personal memory "nope"`) || gotMethod != "DELETE" {
@@ -215,7 +215,7 @@ func reviewServer(t *testing.T, transitions *[]map[string]any) *httptest.Server 
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "GET" && r.URL.Path == "/v1/memories":
+		case r.Method == "GET" && r.URL.Path == "/api/memories":
 			body, ok := mems[r.URL.Query().Get("status")]
 			if !ok {
 				body = "[]"
@@ -263,7 +263,7 @@ func TestMemoryDecide(t *testing.T) {
 	if err := MemoryDecide(context.Background(), c, &out, "aaaa1", "approve", ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(tr) != 1 || tr[0]["to"] != "ACTIVE" || tr[0]["expected_status"] != "CANDIDATE" || tr[0]["path"] != "/v1/memories/aaaa1111-0/transition" {
+	if len(tr) != 1 || tr[0]["to"] != "ACTIVE" || tr[0]["expected_status"] != "CANDIDATE" || tr[0]["path"] != "/api/memories/aaaa1111-0/transition" {
 		t.Fatalf("approve must move CANDIDATE to ACTIVE: %+v", tr)
 	}
 	if err := MemoryDecide(context.Background(), c, &out, "aaaa", "approve", ""); err == nil || !strings.Contains(err.Error(), "matches 2") {
@@ -291,9 +291,9 @@ func TestCurationCommands(t *testing.T) {
 	var path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/v1/memory/curation/run":
+		case r.Method == "POST" && r.URL.Path == "/api/memory/curation/run":
 			_, _ = w.Write([]byte(`{"examined":12,"created":{"duplicate":2},"new_proposals":2,"already_proposed":1,"skipped":["history: no run history available"]}`))
-		case r.Method == "GET" && r.URL.Path == "/v1/memory/curation":
+		case r.Method == "GET" && r.URL.Path == "/api/memory/curation":
 			_, _ = w.Write([]byte(`{"proposals":[{"id":"abcd1234-x","signal":"refuted_by_history","status":"PENDING","reason":"Later runs refuted this lesson 2 times",
 				"targets":[{"memory_id":"mem00001-x","title":"root cause","content":"traffic spike"}],"evidence":["run:r1","run:r2","memory:mem00001-x@1"]},
 				{"id":"abcd9999-x","signal":"duplicate","status":"PENDING","reason":"dup","targets":[{"memory_id":"m2"}]}]}`))
@@ -320,7 +320,7 @@ func TestCurationCommands(t *testing.T) {
 	if err := MemorySuggestions(context.Background(), c, &out); err != nil || !strings.Contains(out.String(), "evidence  run:r1") || !strings.Contains(out.String(), "set aside mem00001") {
 		t.Fatalf("a reviewer must see the evidence runs: %v\n%s", err, out.String())
 	}
-	if err := DecideSuggestion(context.Background(), c, &out, "abcd1", "apply", "ok"); err != nil || decided["decision"] != "apply" || path != "/v1/memory/curation/abcd1234-x/decide" {
+	if err := DecideSuggestion(context.Background(), c, &out, "abcd1", "apply", "ok"); err != nil || decided["decision"] != "apply" || path != "/api/memory/curation/abcd1234-x/decide" {
 		t.Fatalf("%v %v %s", err, decided, path)
 	}
 	if err := DecideSuggestion(context.Background(), c, &out, "abcd", "apply", ""); err == nil || !strings.Contains(err.Error(), "matches 2") {

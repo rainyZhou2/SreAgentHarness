@@ -25,7 +25,7 @@ func MemoryList(ctx context.Context, c *Client, out io.Writer) error {
 	var r struct {
 		Memories []personalMemory `json:"memories"`
 	}
-	if err := c.Do(ctx, "GET", "/v1/me/memories", nil, &r); err != nil {
+	if err := c.Do(ctx, "GET", "/api/me/memories", nil, &r); err != nil {
 		return err
 	}
 	n := 0
@@ -57,7 +57,7 @@ func MemorySet(ctx context.Context, c *Client, out io.Writer, key, value string)
 		Created    bool `json:"created"`
 		Redactions int  `json:"redactions"`
 	}
-	if err := c.Do(ctx, "PUT", "/v1/me/memories/"+url.PathEscape(key), map[string]string{"value": value}, &r); err != nil {
+	if err := c.Do(ctx, "PUT", "/api/me/memories/"+url.PathEscape(key), map[string]string{"value": value}, &r); err != nil {
 		return err
 	}
 	verb := "updated"
@@ -76,7 +76,7 @@ func MemoryRemove(ctx context.Context, c *Client, out io.Writer, key string) err
 	if strings.TrimSpace(key) == "" {
 		return errors.New("a key is required")
 	}
-	if err := c.Do(ctx, "DELETE", "/v1/me/memories/"+url.PathEscape(key), nil, nil); err != nil {
+	if err := c.Do(ctx, "DELETE", "/api/me/memories/"+url.PathEscape(key), nil, nil); err != nil {
 		var ae *APIError
 		if errors.As(err, &ae) && ae.Status == 404 {
 			return fmt.Errorf("no personal memory %q", key)
@@ -117,7 +117,7 @@ func ListLearned(ctx context.Context, c *Client, status string) ([]Learned, erro
 	var r struct {
 		Memories []Learned `json:"memories"`
 	}
-	if err := c.Do(ctx, "GET", "/v1/memories?limit=200&status="+url.QueryEscape(status), nil, &r); err != nil {
+	if err := c.Do(ctx, "GET", "/api/memories?limit=200&status="+url.QueryEscape(status), nil, &r); err != nil {
 		return nil, err
 	}
 	out := r.Memories[:0]
@@ -282,7 +282,7 @@ func MemoryDecide(ctx context.Context, c *Client, out io.Writer, prefix, action,
 		return err
 	}
 	body := map[string]string{"expected_status": m.Status, "to": to, "reason": reason}
-	if err := c.Do(ctx, "POST", "/v1/memories/"+url.PathEscape(m.ID)+"/transition", body, nil); err != nil {
+	if err := c.Do(ctx, "POST", "/api/memories/"+url.PathEscape(m.ID)+"/transition", body, nil); err != nil {
 		return err
 	}
 	verb := map[string]string{"approve": "approved", "reject": "rejected", "archive": "archived"}[action]
@@ -323,7 +323,7 @@ func MemoryCurate(ctx context.Context, c *Client, out io.Writer) error {
 		Existing int            `json:"already_proposed"`
 		Skipped  []string       `json:"skipped"`
 	}
-	if err := c.Do(ctx, "POST", "/v1/memory/curation/run", map[string]string{}, &r); err != nil {
+	if err := c.Do(ctx, "POST", "/api/memory/curation/run", map[string]string{}, &r); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "examined %d memories: %d new suggestion(s)", r.Examined, r.New)
@@ -348,7 +348,7 @@ func Suggestions(ctx context.Context, c *Client) ([]Suggestion, error) {
 	var r struct {
 		Proposals []Suggestion `json:"proposals"`
 	}
-	if err := c.Do(ctx, "GET", "/v1/memory/curation?status=PENDING&limit=200", nil, &r); err != nil {
+	if err := c.Do(ctx, "GET", "/api/memory/curation?status=PENDING&limit=200", nil, &r); err != nil {
 		return nil, err
 	}
 	return r.Proposals, nil
@@ -406,7 +406,7 @@ func DecideSuggestion(ctx context.Context, c *Client, out io.Writer, prefix, dec
 		return fmt.Errorf("%q matches %d suggestions: use more characters", prefix, len(found))
 	}
 	var p Suggestion
-	err = c.Do(ctx, "POST", "/v1/memory/curation/"+url.PathEscape(found[0].ID)+"/decide", map[string]string{"decision": decision, "reason": reason}, &p)
+	err = c.Do(ctx, "POST", "/api/memory/curation/"+url.PathEscape(found[0].ID)+"/decide", map[string]string{"decision": decision, "reason": reason}, &p)
 	var ae *APIError
 	if errors.As(err, &ae) && ae.Status == 409 && ae.Code == "proposal_outdated" {
 		return fmt.Errorf("a memory in this suggestion changed since it was made, so nothing was done; run `harness memory curate` again")
