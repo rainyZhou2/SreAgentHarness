@@ -162,15 +162,15 @@ func TestWindowContains(t *testing.T) {
 	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	w := Window{From: &from, To: &to}
-	if err := w.compile(); err != nil {
+	if err := w.Compile(); err != nil {
 		t.Fatal(err)
 	}
-	if !w.contains(from.Add(time.Hour)) || w.contains(to) || w.contains(from.Add(-time.Second)) {
+	if !w.Contains(from.Add(time.Hour)) || w.Contains(to) || w.Contains(from.Add(-time.Second)) {
 		t.Fatal("absolute window bounds")
 	}
 	bad := []Window{{Start: "25:00", End: "01:00"}, {Days: []string{"someday"}}, {Timezone: "Nowhere/City"}, {Start: "10:00"}}
 	for i := range bad {
-		if err := bad[i].compile(); err == nil {
+		if err := bad[i].Compile(); err == nil {
 			t.Errorf("window %+v should not compile", bad[i])
 		}
 	}

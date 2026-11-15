@@ -15,6 +15,7 @@ import (
 	gw "go-sre-harness/internal/gateway"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/untrusted"
@@ -451,9 +452,7 @@ func (w *Worker) invokeReadOnly(ctx context.Context, lease domain.Lease, t tools
 		base.Outcome, base.Content = "error", mustJSON(map[string]string{"error": ctx.Err().Error()})
 		return base
 	}
-	callCtx := tools.WithCallInfo(ctx, tools.CallInfo{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
-		AttemptID: lease.AttemptID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
-		InputRef: lease.InputRef, Deadline: lease.Deadline})
+	callCtx := security.WithDecisionSlot(tools.WithCallInfo(ctx, newToolCallInfo(lease)))
 	key := lease.IdempotencyKey
 	if base.Part > 0 {
 		key = fmt.Sprintf("%s#%d", key, base.Part)

@@ -29,6 +29,7 @@ import (
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/untrusted"
 	"go-sre-harness/internal/verify"
@@ -689,6 +690,12 @@ func (w *Worker) startHeartbeat(lease domain.Lease, cancel context.CancelFunc, v
 // ---------- executors ----------
 
 func (w *Worker) execute(ctx context.Context, lease domain.Lease, st *execState) (domain.StepSuccess, error) {
+	subject := lease.Subject
+	if subject == "" {
+		subject = "run:" + lease.RunID
+	}
+	ctx = security.WithCaller(ctx, security.Caller{TenantID: lease.TenantID, Subject: subject,
+		WorkID: lease.WorkID, RunID: lease.RunID, Environment: lease.Environment})
 	switch lease.Kind {
 	case domain.StepReason:
 		return w.executeReason(ctx, lease, st)
@@ -821,7 +828,8 @@ func (w *Worker) executeReason(ctx context.Context, lease domain.Lease, st *exec
 	}
 	canon, _ := json.Marshal(in)
 	contextHash := artifact.Hash(canon)
-	in.Call = cognitive.CallScope{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
+	in.Call = cognitive.CallScope{TenantID: lease.TenantID, RunID: lease.RunID, WorkID: lease.WorkID,
+		Subject: lease.Subject, Environment: lease.Environment, StepID: lease.StepID,
 		AttemptID: lease.AttemptID, WorkerID: lease.WorkerID, FenceToken: lease.FenceToken}
 
 	select {
@@ -1425,6 +1433,7 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		return w.verifyStepResult(ctx, lease, rules, call, desc, vo, lc, plan)
 	}
 
+	callCtx := security.WithDecisionSlot(tools.WithCallInfo(ctx, newToolCallInfo(lease)))
 	if sideEffect {
 		// Dispatch only with a provably live lease: a worker that cannot
 		// renew must not start an effect another holder might repeat.
@@ -1437,6 +1446,14 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 			return domain.StepSuccess{}, err // ErrUnknownEffect: do not call the tool again
 		}
 		if state == domain.EffectConfirmed {
+			binding, secured, err := tools.AuthorizeCall(callCtx, tool, call.Args)
+			if err != nil {
+				return domain.StepSuccess{}, err
+			}
+			decisionID := ""
+			if secured {
+				decisionID = binding.DecisionID
+			}
 			// Already applied by an earlier attempt whose commit was lost: reuse.
 			thoughts, caps := toolTrace(call.Name, desc, true)
 			summary := map[string]any{"tool": call.Name, "reused": true}
@@ -1452,7 +1469,7 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 				}
 			}
 			return domain.StepSuccess{OutputRef: priorRef, OutputHash: "", ArtifactKind: "observation",
-				Plan: plan, SideEffect: true, Thoughts: thoughts, Capabilities: caps,
+				Plan: plan, SideEffect: true, SecurityDecisionID: decisionID, Thoughts: thoughts, Capabilities: caps,
 				Summary: mustJSON(summary)}, nil
 		}
 		st.dispatched = true
@@ -1464,9 +1481,6 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		st.dispatched = false // not sent yet
 		return domain.StepSuccess{}, ctx.Err()
 	}
-	callCtx := tools.WithCallInfo(ctx, tools.CallInfo{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
-		AttemptID: lease.AttemptID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
-		InputRef: lease.InputRef, Deadline: lease.Deadline})
 	callCtx, span := obsTracer().Start(callCtx, "tool "+call.Name, trace.WithAttributes(
 		attribute.String("tool", call.Name), attribute.String("risk", string(desc.Risk)), attribute.String("source", desc.Source)))
 	toolStart := time.Now()
@@ -1554,8 +1568,9 @@ func (w *Worker) executeTool(ctx context.Context, lease domain.Lease, st *execSt
 		plan = w.withTokenCompaction(ctx, lease, plan, len(obs.Content))
 	}
 	thoughts, caps := toolTrace(call.Name, desc, true)
+	binding, _ := security.DecisionFrom(callCtx)
 	return domain.StepSuccess{OutputRef: ref, OutputHash: h, ArtifactKind: "observation", SideEffect: sideEffect,
-		Plan: plan, Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(summary)}, nil
+		SecurityDecisionID: binding.DecisionID, Plan: plan, Thoughts: thoughts, Capabilities: caps, Summary: mustJSON(summary)}, nil
 }
 
 // recordEffect confirms an applied side effect before the step commit, so

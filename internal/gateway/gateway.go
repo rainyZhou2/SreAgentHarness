@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"go-sre-harness/internal/security"
 )
 
 // Ledger persists the model request / attempt / usage records (§34). The
@@ -120,6 +122,7 @@ type Gateway struct {
 	scorer    Scorer
 	admission Admission
 	log       *slog.Logger
+	security  security.Authorizer
 
 	inflightMu sync.Mutex
 	inflight   map[string]int
@@ -285,6 +288,11 @@ func (g *Gateway) Generate(ctx context.Context, sc Scope, req Request, sink Sink
 	if err != nil {
 		return Response{}, err
 	}
+	ctx = g.withSecurityCaller(ctx, sc)
+	modelSecurity, err := g.authorizeModel(ctx, sc, req, canon)
+	if err != nil {
+		return Response{}, err
+	}
 	reqRef, reqHash, err := g.artifacts.Put(ctx, sc.TenantID, "model-request", canon)
 	if err != nil {
 		return Response{}, errf(ErrProviderUnavailable, false, "store request artifact: %v", err)
@@ -330,7 +338,7 @@ func (g *Gateway) Generate(ctx context.Context, sc Scope, req Request, sink Sink
 		if i >= policy.MaxAttempts {
 			break
 		}
-		resp, err := g.attempt(ctx, sc, rec, i+1, cand, req, estimate, sink, unreserve)
+		resp, err := g.attempt(ctx, sc, rec, i+1, cand, req, estimate, sink, unreserve, modelSecurity)
 		if err == nil {
 			resp.ModelRequestID = rec.ID
 			finish(RequestResult{Status: "SUCCEEDED", ResponseRef: resp.respRef, Endpoint: cand.Endpoint.ID,
@@ -362,7 +370,7 @@ func (g *Gateway) Generate(ctx context.Context, sc Scope, req Request, sink Sink
 // attempt calls estimated once the attempt's ESTIMATED usage is in the
 // ledger, which from then on counts it against the budget.
 func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no int, cand Candidate, req Request,
-	estimate int64, sink Sink, estimated func()) (Response, error) {
+	estimate int64, sink Sink, estimated func(), modelSecurity *modelSecurity) (Response, error) {
 	ep := cand.Endpoint
 	prov, ok := g.provider(ep.ProviderID)
 	if !ok {
@@ -395,7 +403,10 @@ func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no i
 			sink(ev)
 		}
 	}
-	err := prov.Stream(ctx, ep, req, emit)
+	err := modelSecurity.recheck(ctx)
+	if err == nil {
+		err = prov.Stream(ctx, ep, req, emit)
+	}
 	var resp Response
 	if err == nil {
 		resp, err = agg.Result()
@@ -416,8 +427,13 @@ func (g *Gateway) attempt(ctx context.Context, sc Scope, rec RequestRecord, no i
 	if err != nil {
 		ge, ok := AsError(err)
 		if !ok {
-			ge = errf(ErrStreamInterrupted, true, "%v", err)
-			err = ge
+			var securityErr *security.Error
+			if errors.As(err, &securityErr) {
+				ge = errf(ErrRejectedByPolicy, false, "%v", err)
+			} else {
+				ge = errf(ErrStreamInterrupted, true, "%v", err)
+				err = ge
+			}
 		}
 		status := "FAILED"
 		switch ge.Code {

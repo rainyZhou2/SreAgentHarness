@@ -154,7 +154,8 @@ func (w *Worker) executePlan(ctx context.Context, lease domain.Lease) (domain.St
 	}
 	exemplars, hits := w.planExemplars(ctx, lease, rules, g.Goal, services)
 	scope := gw.Scope{
-		TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID, StepAttemptID: lease.AttemptID,
+		TenantID: lease.TenantID, RunID: lease.RunID, WorkID: lease.WorkID, Subject: lease.Subject, Environment: lease.Environment,
+		StepID: lease.StepID, StepAttemptID: lease.AttemptID,
 		WorkerID: lease.WorkerID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
 	}
 	res, err := w.cfg.Planner.Plan(ctx, scope, planner.Input{

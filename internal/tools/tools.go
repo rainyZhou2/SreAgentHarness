@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/security"
 )
 
 type Descriptor struct {
@@ -67,6 +68,11 @@ func CapabilityRef(d Descriptor) string {
 type CallInfo struct {
 	TenantID          string
 	RunID             string
+	WorkID            string
+	Subject           string
+	Environment       string
+	ActionID          string
+	ActionInputHash   string
 	StepID            string
 	AttemptID         string
 	FenceToken        int64
@@ -94,10 +100,25 @@ type Tool interface {
 }
 
 type Registry struct {
-	mu       sync.RWMutex
-	tools    map[string]Tool
-	tenant   TenantSource
-	overlays map[string]Overlay
+	mu          sync.RWMutex
+	tools       map[string]Tool
+	tenant      TenantSource
+	overlays    map[string]Overlay
+	security    security.Authorizer
+	environment string
+}
+
+func (r *Registry) SetSecurity(authorizer security.Authorizer, environment string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.security = authorizer
+	r.environment = environment
+}
+
+func (r *Registry) SecurityEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.security != nil
 }
 
 // SetOverlays attaches operator metadata to tools by name. Overlays apply to
@@ -118,11 +139,16 @@ func (r *Registry) Overlays() map[string]Overlay {
 func (r *Registry) wrap(t Tool) Tool {
 	r.mu.RLock()
 	ov, ok := r.overlays[t.Descriptor().Name]
+	authorizer := r.security
+	environment := r.environment
 	r.mu.RUnlock()
-	if !ok {
-		return t
+	if ok {
+		t = overlaid{Tool: t, ov: ov}
 	}
-	return overlaid{Tool: t, ov: ov}
+	if authorizer != nil {
+		t = WithSecurity(t, authorizer, environment)
+	}
+	return t
 }
 
 // TenantSource supplies tools that exist for one tenant only (MCP servers

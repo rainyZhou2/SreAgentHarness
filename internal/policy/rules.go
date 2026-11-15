@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/tools"
 )
 
@@ -63,21 +64,7 @@ type Match struct {
 	Rate        *Rate             `json:"rate,omitempty"`
 }
 
-// Window is a time range. From/To bound an absolute range; Days, Start and
-// End describe a recurring range in Timezone (default UTC). A window with
-// both kinds of fields must satisfy both.
-type Window struct {
-	From     *time.Time `json:"from,omitempty"`
-	To       *time.Time `json:"to,omitempty"`
-	Days     []string   `json:"days,omitempty"`  // mon..sun
-	Start    string     `json:"start,omitempty"` // HH:MM
-	End      string     `json:"end,omitempty"`   // HH:MM, may wrap past midnight
-	Timezone string     `json:"timezone,omitempty"`
-
-	loc        *time.Location
-	days       map[time.Weekday]bool
-	start, end int // minutes after midnight; -1 = unset
-}
+type Window = security.Window
 
 // BlastRadius matches calls whose argument names more than Over targets
 // (array length, or comma-separated values).
@@ -115,9 +102,6 @@ var (
 	_ ContextGate         = RuleEngine{}
 	_ EnvironmentResolver = RuleEngine{}
 )
-
-var weekdays = map[string]time.Weekday{"sun": time.Sunday, "mon": time.Monday, "tue": time.Tuesday,
-	"wed": time.Wednesday, "thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday}
 
 // NewRuleEngine validates a configuration and compiles it.
 func NewRuleEngine(cfg RuleConfig, counter ActionCounter) (RuleEngine, error) {
@@ -172,7 +156,7 @@ func NewRuleEngine(cfg RuleConfig, counter ActionCounter) (RuleEngine, error) {
 			}
 		}
 		for j := range r.Match.Windows {
-			if err := r.Match.Windows[j].compile(); err != nil {
+			if err := r.Match.Windows[j].Compile(); err != nil {
 				return e, fmt.Errorf("policy rule %q windows[%d]: %w", r.Name, j, err)
 			}
 		}
@@ -195,99 +179,6 @@ func NewRuleEngine(cfg RuleConfig, counter ActionCounter) (RuleEngine, error) {
 }
 
 var riskRank = map[domain.RiskClass]int{domain.RiskR0: 0, domain.RiskR1: 1, domain.RiskR2: 2, domain.RiskR3: 3}
-
-func (w *Window) compile() error {
-	w.loc = time.UTC
-	if w.Timezone != "" {
-		loc, err := time.LoadLocation(w.Timezone)
-		if err != nil {
-			return fmt.Errorf("timezone %q: %w", w.Timezone, err)
-		}
-		w.loc = loc
-	}
-	if w.From != nil && w.To != nil && !w.To.After(*w.From) {
-		return fmt.Errorf("to must be after from")
-	}
-	w.start, w.end = -1, -1
-	if (w.Start == "") != (w.End == "") {
-		return fmt.Errorf("start and end must be set together")
-	}
-	if w.Start != "" {
-		var err error
-		if w.start, err = clock(w.Start); err != nil {
-			return err
-		}
-		if w.end, err = clock(w.End); err != nil {
-			return err
-		}
-	}
-	if len(w.Days) > 0 {
-		w.days = map[time.Weekday]bool{}
-		for _, d := range w.Days {
-			name := strings.ToLower(strings.TrimSpace(d))
-			if len(name) > 3 {
-				name = name[:3]
-			}
-			wd, ok := weekdays[name]
-			if !ok {
-				return fmt.Errorf("unknown day %q", d)
-			}
-			w.days[wd] = true
-		}
-	}
-	if w.From == nil && w.To == nil && w.start < 0 && len(w.days) == 0 {
-		return fmt.Errorf("window needs from/to, days or start/end")
-	}
-	return nil
-}
-
-func clock(s string) (int, error) {
-	h, m, ok := strings.Cut(strings.TrimSpace(s), ":")
-	hh, err1 := strconv.Atoi(h)
-	mm, err2 := strconv.Atoi(m)
-	if !ok || err1 != nil || err2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
-		return 0, fmt.Errorf("invalid time of day %q (use HH:MM)", s)
-	}
-	return hh*60 + mm, nil
-}
-
-func (w Window) contains(t time.Time) bool {
-	if w.From != nil && t.Before(*w.From) {
-		return false
-	}
-	if w.To != nil && !t.Before(*w.To) {
-		return false
-	}
-	loc := w.loc
-	if loc == nil {
-		loc = time.UTC
-	}
-	lt := t.In(loc)
-	if w.start >= 0 {
-		minute := lt.Hour()*60 + lt.Minute()
-		day := lt.Weekday()
-		var in bool
-		if w.start <= w.end {
-			in = minute >= w.start && minute < w.end
-		} else { // wraps past midnight: the day is the one the window started on
-			in = minute >= w.start || minute < w.end
-			if minute < w.end {
-				day = (day + 6) % 7
-			}
-		}
-		if !in {
-			return false
-		}
-		if len(w.days) > 0 && !w.days[day] {
-			return false
-		}
-		return true
-	}
-	if len(w.days) > 0 && !w.days[lt.Weekday()] {
-		return false
-	}
-	return true
-}
 
 // Evaluate implements Gate for callers without request context. Rate rules
 // cannot count without a tenant and fail closed.
@@ -423,7 +314,7 @@ func (e RuleEngine) matches(ctx context.Context, m Match, req Request, desc tool
 	if len(m.Windows) > 0 {
 		in := false
 		for _, w := range m.Windows {
-			if w.contains(now) {
+			if w.Contains(now) {
 				in = true
 				break
 			}

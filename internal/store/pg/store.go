@@ -49,7 +49,12 @@ const (
 	EffectConfirmed   = domain.EffectConfirmed
 )
 
+type CommitGuard interface {
+	CheckCommit(ctx context.Context, tx pgx.Tx, lease domain.Lease, decisionID string) error
+}
+
 type Config struct {
+	CommitGuard CommitGuard
 	// MemoryRetrieval plans a retrieve_memory step before the first reason
 	// step of every new run (§11.2).
 	MemoryRetrieval   bool
@@ -96,8 +101,18 @@ type Store struct {
 }
 
 func New(pool *pgxpool.Pool, cfg Config) *Store {
+	defaults := DefaultConfig()
 	if cfg.MaxStepsPerRun == 0 {
-		cfg = DefaultConfig()
+		cfg.MaxStepsPerRun = defaults.MaxStepsPerRun
+	}
+	if cfg.MaxAttempts == 0 {
+		cfg.MaxAttempts = defaults.MaxAttempts
+	}
+	if cfg.DefaultRetryDelay == 0 {
+		cfg.DefaultRetryDelay = defaults.DefaultRetryDelay
+	}
+	if cfg.ApprovalTTL == 0 {
+		cfg.ApprovalTTL = defaults.ApprovalTTL
 	}
 	if cfg.LockTimeout == 0 {
 		cfg.LockTimeout = DefaultLockTimeout

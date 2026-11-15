@@ -237,6 +237,9 @@ type Lease struct {
 	// WorkOwned is resolved by the claiming store from immutable Run ancestry.
 	// It confines direct tool execution; it does not grant current Work authority.
 	WorkOwned         bool
+	WorkID            string
+	Subject           string
+	Environment       string
 	TenantID          string
 	RunID             string
 	StepID            string

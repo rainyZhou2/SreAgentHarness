@@ -67,7 +67,7 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 	if r.run.NotBefore != nil && r.run.NotBefore.After(r.now) {
 		return domain.Lease{}, noWork, nil
 	}
-	workOwned, err := domain.ResolveRunWorkOwnership(r.run, func(id string) (domain.Run, error) {
+	workOwned, workID, err := domain.ResolveRunWorkContext(r.run, func(id string) (domain.Run, error) {
 		return scanRun(r.tx.QueryRow(ctx, `SELECT `+runCols+` FROM agent_runs WHERE tenant_id=$1 AND id=$2`, r.run.TenantID, id))
 	})
 	if err != nil {
@@ -186,9 +186,17 @@ func (s *Store) claim(ctx context.Context, r *runTx, workerID string, ttl time.D
 		return domain.Lease{}, nil, err
 	}
 
+	subject := "run:" + r.run.ID
+	if workID != "" {
+		subject = "work:" + workID
+	}
+	environment := ""
+	if intent != nil {
+		environment = intent.Environment
+	}
 	return domain.Lease{
-		WorkOwned: workOwned,
-		TenantID:  r.run.TenantID, RunID: r.run.ID, StepID: step.ID, StepSeq: step.Seq, AttemptID: attemptID,
+		WorkOwned: workOwned, WorkID: workID, Subject: subject, Environment: environment,
+		TenantID: r.run.TenantID, RunID: r.run.ID, StepID: step.ID, StepSeq: step.Seq, AttemptID: attemptID,
 		AttemptNo: attemptNo, WorkerID: workerID, FenceToken: r.run.FenceToken, Kind: step.Kind,
 		ExecutorName: step.ExecutorName, FlowNodeID: step.FlowNodeID, InputRef: step.InputRef, InputHash: step.InputHash,
 		GoalRef: r.run.GoalRef, ContextSnapshotID: snapshotID, IdempotencyKey: idemKey, Intent: intent,

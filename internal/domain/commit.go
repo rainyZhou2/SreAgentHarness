@@ -68,18 +68,19 @@ type EmittedEvent struct {
 // StepSuccess is everything a worker commits for a successful attempt. All
 // artifacts referenced here must already be durably uploaded.
 type StepSuccess struct {
-	OutputRef    string
-	OutputHash   string
-	ArtifactKind string          // decision | observation
-	ContextHash  string          // phase ③ binding of the context snapshot
-	Summary      json.RawMessage // event payload (no sensitive content)
-	Plan         []PlannedStep   // steps appended after this one
-	Complete     bool            // run completes with ResultRef
-	ResultRef    string
-	Wait         WaitState
-	Flow         *FlowCommit
-	KVWrites     []KVWrite // run-private only, applied atomically with the step
-	SideEffect   bool      // confirm the external effect ledger entry
+	OutputRef          string
+	OutputHash         string
+	ArtifactKind       string          // decision | observation
+	ContextHash        string          // phase ③ binding of the context snapshot
+	Summary            json.RawMessage // event payload (no sensitive content)
+	Plan               []PlannedStep   // steps appended after this one
+	Complete           bool            // run completes with ResultRef
+	ResultRef          string
+	Wait               WaitState
+	Flow               *FlowCommit
+	KVWrites           []KVWrite // run-private only, applied atomically with the step
+	SideEffect         bool      // confirm the external effect ledger entry
+	SecurityDecisionID string    // unified decision bound to this exact action
 	// Checkpoint manifest uploaded by the worker (§29.4). Empty = none.
 	CheckpointRef  string
 	CheckpointHash string

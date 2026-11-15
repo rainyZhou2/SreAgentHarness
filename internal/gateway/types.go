@@ -85,6 +85,9 @@ type Request struct {
 type Scope struct {
 	TenantID          string
 	RunID             string
+	WorkID            string
+	Subject           string
+	Environment       string
 	StepID            string
 	StepAttemptID     string
 	WorkerID          string

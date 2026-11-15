@@ -32,7 +32,8 @@ func (l *LLM) Name() string { return "llm:" + l.Alias }
 
 func (l *LLM) Decide(ctx context.Context, in ReasoningInput) (domain.Decision, error) {
 	req, man := l.Assembler.Build(in, l.Alias)
-	scope := gw.Scope{TenantID: in.Call.TenantID, RunID: in.Call.RunID, StepID: in.Call.StepID,
+	scope := gw.Scope{TenantID: in.Call.TenantID, RunID: in.Call.RunID, WorkID: in.Call.WorkID,
+		Subject: in.Call.Subject, Environment: in.Call.Environment, StepID: in.Call.StepID,
 		StepAttemptID: in.Call.AttemptID, WorkerID: in.Call.WorkerID, FenceToken: in.Call.FenceToken,
 		ContextSnapshotID: in.ContextSnapshotID, Priority: in.Call.Priority}
 	if ep, err := l.Gateway.Resolve(req, scope); err == nil {

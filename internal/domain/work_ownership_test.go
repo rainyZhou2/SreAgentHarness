@@ -57,3 +57,29 @@ func TestResolveRunWorkOwnershipRejectsBrokenAncestry(t *testing.T) {
 		t.Fatalf("unbounded ancestry: calls=%d err=%v", calls, err)
 	}
 }
+
+func TestResolveRunWorkContext(t *testing.T) {
+	parentID := "parent"
+	actor := "work:legacy"
+	for _, test := range []struct {
+		name   string
+		root   Run
+		workID string
+		owned  bool
+	}{
+		{"reserved", Run{WorkOwner: &WorkRunOwner{WorkID: "work-1", Generation: 1, StageID: "mitigate"}}, "work-1", true},
+		{"legacy", Run{InitiatorType: "work", InitiatorID: &actor}, "legacy", true},
+		{"legacy without id", Run{InitiatorType: "work"}, "", true},
+		{"standalone", Run{InitiatorType: "user"}, "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := test.root
+			root.ID, root.TenantID = parentID, "tenant"
+			child := Run{ID: "child", TenantID: "tenant", ParentRunID: &parentID}
+			owned, workID, err := ResolveRunWorkContext(child, func(string) (Run, error) { return root, nil })
+			if err != nil || owned != test.owned || workID != test.workID {
+				t.Fatalf("owned=%v work=%q err=%v", owned, workID, err)
+			}
+		})
+	}
+}

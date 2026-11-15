@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/kernel"
 	"go-sre-harness/internal/memory"
@@ -198,6 +197,11 @@ func (s *Store) SnapshotContext(ctx context.Context, tenantID, runID, snapshotID
 	if !ok || tenantID == "" || r.TenantID != tenantID {
 		return kernel.SnapshotContext{}, domain.ErrNotFound
 	}
+	userID := ""
+	if r.InitiatorType == "user" && r.InitiatorID != nil {
+		userID = *r.InitiatorID
+	}
+	ctx = runMemoryAccess(ctx, tenantID, runID, userID)
 	out := kernel.SnapshotContext{CompactionEpoch: r.CompactionEpoch}
 	var latest compactRec
 	found := false
@@ -229,7 +233,7 @@ func (s *Store) SnapshotContext(ctx context.Context, tenantID, runID, snapshotID
 	at := time.Now().UTC()
 	for _, h := range hits {
 		m, ok := s.memories[h.MemoryID]
-		if !ok || m.Mem.Version != h.Version {
+		if !ok || m.Mem.Version != h.Version || !s.memoryReadableLocked(ctx, m) {
 			continue
 		}
 		if m.Mem.Scope == "user" {
@@ -242,9 +246,11 @@ func (s *Store) SnapshotContext(ctx context.Context, tenantID, runID, snapshotID
 		if valid, _ := m.Mem.Recallable(tenantID, env, at); !valid {
 			continue
 		}
-		out.Memories = append(out.Memories, cognitive.MemoryRef{ID: h.MemoryID, Version: h.Version,
-			Kind: m.Mem.Type, Title: m.Mem.Title, Content: m.Mem.Content, Trust: m.Mem.Trust, Score: h.Score,
-			Scope: m.Mem.Scope})
+		ref := memorySnapshotRef(m, h)
+		for _, shard := range s.shards[h.MemoryID] {
+			ref.Shards = append(ref.Shards, shard.ShardKey)
+		}
+		out.Memories = append(out.Memories, ref)
 	}
 	return out, nil
 }

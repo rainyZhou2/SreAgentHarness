@@ -9,6 +9,7 @@ import (
 
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/domain"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/store/pg"
 )
 
@@ -118,7 +119,8 @@ func (s *Server) authMiddleware(mux *http.ServeMux) http.Handler {
 		}
 		ctx := auth.WithPrincipal(r.Context(), p)
 		ctx = pg.WithTenant(ctx, p.Tenant)
-		scoped.ServeHTTP(rec, r.WithContext(ctx))
+		ctx = security.WithCaller(ctx, security.Caller{TenantID: p.Tenant, Subject: p.Subject, RunID: r.PathValue("run_id")})
+		withMemoryAccess(scoped.ServeHTTP).ServeHTTP(rec, r.WithContext(ctx))
 	})
 }
 

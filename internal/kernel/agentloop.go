@@ -15,6 +15,7 @@ import (
 	"go-sre-harness/internal/outsum"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/tools/artifactq"
 	"go-sre-harness/internal/untrusted"
@@ -320,10 +321,9 @@ func (w *Worker) executeVerify(ctx context.Context, lease domain.Lease, call dom
 		out.detail = "no time left in the step for the verification delay"
 		return out, lc
 	}
-	callCtx := tools.WithCallInfo(ctx, tools.CallInfo{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
-		AttemptID: lease.AttemptID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
-		InputRef: lease.InputRef, Deadline: lease.Deadline})
+	callInfo := newToolCallInfo(lease)
 	for i := 1; i <= attempts; i++ {
+		callCtx := security.WithDecisionSlot(tools.WithCallInfo(ctx, callInfo))
 		if i > 1 && !sleep(interval) {
 			out.detail += "; stopped polling before the step deadline"
 			break

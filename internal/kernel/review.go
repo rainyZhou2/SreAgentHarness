@@ -139,7 +139,8 @@ func (w *Worker) reviewConclusion(ctx context.Context, lease domain.Lease, in co
 	}
 	vctx, cancel := context.WithTimeout(ctx, w.verifyTimeout())
 	defer cancel()
-	v := w.cfg.Verifier.Bind(gw.Scope{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
+	v := w.cfg.Verifier.Bind(gw.Scope{TenantID: lease.TenantID, RunID: lease.RunID, WorkID: lease.WorkID,
+		Subject: lease.Subject, Environment: lease.Environment, StepID: lease.StepID,
 		StepAttemptID: lease.AttemptID, WorkerID: w.cfg.ID, FenceToken: lease.FenceToken,
 		ContextSnapshotID: lease.ContextSnapshotID})
 	rep := v.Verify(vctx, in.Goal, claims, conclusionEvidence(in), verified)

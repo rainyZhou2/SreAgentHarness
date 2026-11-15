@@ -147,8 +147,8 @@ func (c *LLMCompactor) summarize(ctx context.Context, in CompactInput, digest st
 	user := "Investigation goal (data):\n" + untrusted.Wrap("source=goal", in.Goal).Text +
 		"\n\nHistory to compress:\n" + body.Text + "\n\nWrite the summary now."
 	l := in.Lease
-	sc := gw.Scope{TenantID: in.TenantID, RunID: in.RunID, StepID: l.StepID, StepAttemptID: l.AttemptID,
-		WorkerID: l.WorkerID, FenceToken: l.FenceToken, ContextSnapshotID: l.ContextSnapshotID}
+	sc := gw.Scope{TenantID: in.TenantID, RunID: in.RunID, WorkID: l.WorkID, Subject: l.Subject, Environment: l.Environment,
+		StepID: l.StepID, StepAttemptID: l.AttemptID, WorkerID: l.WorkerID, FenceToken: l.FenceToken, ContextSnapshotID: l.ContextSnapshotID}
 	resp, err := c.Gateway.Generate(ctx, sc, gw.Request{
 		ModelAlias:      c.Alias,
 		System:          []gw.SystemBlock{{Text: llmCompactSystem}},

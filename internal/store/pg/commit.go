@@ -20,6 +20,14 @@ func (s *Store) CommitSuccess(ctx context.Context, lease domain.Lease, res StepS
 		if err != nil {
 			return err
 		}
+		if res.SideEffect && s.cfg.CommitGuard != nil {
+			if res.SecurityDecisionID == "" {
+				return errors.New("side-effect commit requires a security decision")
+			}
+			if err := s.cfg.CommitGuard.CheckCommit(ctx, tx, lease, res.SecurityDecisionID); err != nil {
+				return err
+			}
+		}
 		if err := s.finishAttempt(ctx, r, lease, domain.AttemptSucceeded, "", ""); err != nil {
 			return err
 		}

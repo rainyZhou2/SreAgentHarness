@@ -16,6 +16,7 @@ import (
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/profile"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/tools"
 	"go-sre-harness/internal/verify"
 )
@@ -285,9 +286,9 @@ func (w *Worker) speculator(ctx context.Context, lease domain.Lease, rules profi
 			}
 			defer func() { <-w.toolSem }()
 			sctx = domain.WithMemoryExclude(sctx, rules.MemoryExcludeFor(lease.RunID))
-			sctx = tools.WithCallInfo(sctx, tools.CallInfo{TenantID: lease.TenantID, RunID: lease.RunID, StepID: lease.StepID,
-				AttemptID: lease.AttemptID, FenceToken: lease.FenceToken, ContextSnapshotID: lease.ContextSnapshotID,
-				InputRef: lease.InputRef, Deadline: time.Now().Add(w.cfg.StepTimeout)})
+			callLease := lease
+			callLease.Deadline = time.Now().Add(w.cfg.StepTimeout)
+			sctx = security.WithDecisionSlot(tools.WithCallInfo(sctx, newToolCallInfo(callLease)))
 			out, err := t.Invoke(sctx, "spec:"+artifact.Hash([]byte(key)), args)
 			outcome := "speculative_ok"
 			if err != nil {

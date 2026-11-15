@@ -40,7 +40,8 @@ type File struct {
 	ToolOverlays map[string]tools.Overlay `json:"tool_overlays,omitempty"`
 	// Work configures the control plane (templates, correlation rules);
 	// it is used only with HARNESS_WORK_ENGINE_ENABLED.
-	Work workengine.Config `json:"work,omitempty"`
+	Work     workengine.Config `json:"work,omitempty"`
+	Security SecurityConfig    `json:"security,omitempty"`
 }
 
 type ModelSettings struct {
@@ -262,6 +263,9 @@ func merge(base, f File) (File, error) {
 	if f.Work.Pools != nil {
 		out.Work.Pools = f.Work.Pools
 	}
+	if f.Security.Constraints != nil {
+		out.Security.Constraints = f.Security.Constraints
+	}
 	return out, nil
 }
 
@@ -315,6 +319,9 @@ func one(name string, cfg any) plugin.Specs { return plugin.Specs{plugin.NewSpec
 // FromEnv derives the plugin configuration from the legacy environment
 // variables, so existing deployments keep working without a config file.
 func FromEnv(e Env) (File, error) {
+	if _, err := securityMode(e); err != nil {
+		return File{}, err
+	}
 	f := File{Plugins: map[string]plugin.Specs{}}
 	f.Settings = plugin.Settings{ModelAlias: e.str("HARNESS_MODEL_ALIAS", "sre-reasoning"), ModelEffort: e("HARNESS_MODEL_EFFORT"),
 		DefaultTenant: e.str("HARNESS_DEFAULT_TENANT", "tenant-a"), DefaultProfile: "sre-diagnosis", DefaultProfileVersion: 7}

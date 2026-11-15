@@ -7,30 +7,41 @@ import "strings"
 // readParent must read persisted Runs in the caller's transaction. Ownership is
 // never inferred from goal labels or tool arguments. Broken ancestry fails closed.
 func ResolveRunWorkOwnership(run Run, readParent func(string) (Run, error)) (bool, error) {
+	owned, _, err := ResolveRunWorkContext(run, readParent)
+	return owned, err
+}
+
+func ResolveRunWorkContext(run Run, readParent func(string) (Run, error)) (bool, string, error) {
 	tenant := run.TenantID
 	seen := map[string]bool{}
 	for depth := 0; depth < 64; depth++ {
 		if run.TenantID != tenant || seen[run.ID] {
-			return false, &RejectedError{Reason: "invalid_run_ancestry"}
+			return false, "", &RejectedError{Reason: "invalid_run_ancestry"}
 		}
 		seen[run.ID] = true
-		if run.WorkOwner != nil || run.InitiatorType == "work" || (run.InitiatorID != nil && strings.HasPrefix(*run.InitiatorID, "work:")) {
-			return true, nil
+		if run.WorkOwner != nil {
+			return true, strings.TrimSpace(run.WorkOwner.WorkID), nil
+		}
+		if run.InitiatorID != nil && strings.HasPrefix(*run.InitiatorID, "work:") {
+			return true, strings.TrimSpace(strings.TrimPrefix(*run.InitiatorID, "work:")), nil
+		}
+		if run.InitiatorType == "work" {
+			return true, "", nil
 		}
 		if run.ParentRunID == nil {
-			return false, nil
+			return false, "", nil
 		}
 		parentID := *run.ParentRunID
 		parent, err := readParent(parentID)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		if parent.ID != parentID {
-			return false, &RejectedError{Reason: "invalid_run_ancestry"}
+			return false, "", &RejectedError{Reason: "invalid_run_ancestry"}
 		}
 		run = parent
 	}
-	return false, &RejectedError{Reason: "run_ancestry_limit"}
+	return false, "", &RejectedError{Reason: "run_ancestry_limit"}
 }
 
 // ValidateWorkRunReservation checks the reservation boundary before any write.
