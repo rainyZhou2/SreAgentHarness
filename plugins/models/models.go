@@ -61,7 +61,8 @@ type OpenAIConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.ModelProvider, "scripted", "deterministic rule-based model; keeps the harness runnable without keys",
+	plugin.Register(plugin.ModelProvider, plugin.StaticDefinition("scripted", "v1.0.0", "deterministic rule-based model; keeps the harness runnable without keys",
+		plugin.StrictConfig[Common](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ModelBackend, error) {
 			var cfg Common
 			if err := c.Decode(&cfg); err != nil {
@@ -71,8 +72,9 @@ func init() {
 				Endpoints: []gw.Endpoint{gw.ScriptedEndpoint()},
 				Aliases: map[string][]string{"sre-reasoning": {"local-scripted"}, "sre-fast": {"local-scripted"},
 					"local": {"local-scripted"}}}), nil
-		})
-	plugin.Register(plugin.ModelProvider, "anthropic", "Claude via the Anthropic Messages API",
+		}))
+	plugin.Register(plugin.ModelProvider, plugin.StaticDefinition("anthropic", "v1.0.0", "Claude via the Anthropic Messages API",
+		plugin.StrictConfig[AnthropicConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ModelBackend, error) {
 			var cfg AnthropicConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -85,8 +87,9 @@ func init() {
 			return cfg.apply(plugin.ModelBackend{Provider: p, Endpoints: gw.AnthropicEndpoints(),
 				Aliases: map[string][]string{"sre-reasoning": {"anthropic-opus-5-5", "anthropic-sonnet-5-5"},
 					"sre-fast": {"anthropic-haiku-5-5"}}}), nil
-		})
-	plugin.Register(plugin.ModelProvider, "gemini", "Google Gemini via the generativelanguage API",
+		}))
+	plugin.Register(plugin.ModelProvider, plugin.StaticDefinition("gemini", "v1.0.0", "Google Gemini via the generativelanguage API",
+		plugin.StrictConfig[GeminiConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ModelBackend, error) {
 			var cfg GeminiConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -102,8 +105,9 @@ func init() {
 			return cfg.apply(plugin.ModelBackend{Provider: p,
 				Endpoints: []gw.Endpoint{gw.GeminiEndpoint(cfg.Model, cfg.ContextWindow, cfg.MaxOutput)},
 				Aliases:   map[string][]string{"sre-reasoning": {"gemini"}, "sre-fast": {"gemini"}}}), nil
-		})
-	plugin.Register(plugin.ModelProvider, "openai", "OpenAI-compatible chat completions (vLLM, SGLang, ...)",
+		}))
+	plugin.Register(plugin.ModelProvider, plugin.StaticDefinition("openai", "v1.0.0", "OpenAI-compatible chat completions (vLLM, SGLang, ...)",
+		plugin.StrictConfig[OpenAIConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ModelBackend, error) {
 			var cfg OpenAIConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -116,5 +120,5 @@ func init() {
 			return cfg.apply(plugin.ModelBackend{Provider: p,
 				Endpoints: []gw.Endpoint{gw.OpenAICompatibleEndpoint(cfg.Model, cfg.ContextWindow, cfg.MaxOutput)},
 				Aliases:   map[string][]string{"sre-reasoning": {"openai-compatible"}, "sre-fast": {"openai-compatible"}}}), nil
-		})
+		}))
 }

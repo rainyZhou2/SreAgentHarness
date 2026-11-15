@@ -57,7 +57,8 @@ type Config struct {
 }
 
 func init() {
-	plugin.Register(plugin.WorkExt, "sre", "SRE domain pack: Prometheus/Alertmanager, Kubernetes, OTel, GitOps/Argo CD, Istio traffic, CMDB, Jira, AI infra",
+	plugin.Register(plugin.WorkExt, plugin.StaticDefinition("sre", "v1.0.0", "SRE domain pack: Prometheus/Alertmanager, Kubernetes, OTel, GitOps/Argo CD, Istio traffic, CMDB, Jira, AI infra",
+		plugin.StrictConfig[Config](),
 		func(ctx context.Context, h *plugin.Host, c plugin.Config) (plugin.WorkExtension, error) {
 			var cfg Config
 			if err := c.Decode(&cfg); err != nil {
@@ -71,9 +72,6 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			// Read tools join the shared registry so agents can call them
-			// from stage runs; an existing tool of the same name wins only
-			// by failing the boot (no silent shadowing).
 			if h != nil && h.Tools != nil {
 				for _, t := range set.Tools() {
 					if _, dup := h.Tools.Lookup(t.Descriptor().Name); dup {
@@ -85,7 +83,7 @@ func init() {
 				}
 			}
 			return set, nil
-		})
+		}))
 }
 
 // Build assembles the configured capabilities. opts.Tenant, RiskFloor,

@@ -23,6 +23,7 @@ import (
 	"go-sre-harness/internal/orchestration"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/policy"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/workengine"
 )
@@ -119,6 +120,8 @@ func checkConfig(cfg File) []governance.Check {
 	add("config.correlation_rules", err, "fix the work.correlation_rules section")
 	_, err = orchestration.ValidateQueueLimits(cfg.Work.Queues)
 	add("config.queues", err, "fix the work.queues section")
+	_, err = security.CompileConstraints(cfg.Security.Constraints)
+	add("config.security", err, "fix the security.constraints section")
 	var oerr error
 	if o := cfg.Work.Observability; o != nil {
 		seen := map[string]bool{}
@@ -156,21 +159,7 @@ func checkConfig(cfg File) []governance.Check {
 		}
 	}
 	add("config.observability", oerr, "fix the work.observability section")
-	var perr error
-	for kind, specs := range cfg.Plugins {
-		known := map[string]bool{}
-		for _, p := range plugin.Registered() {
-			if p.Kind == kind {
-				known[p.Name] = true
-			}
-		}
-		for _, s := range specs.Enabled() {
-			if !known[s.Name] {
-				perr = errors.Join(perr, fmt.Errorf("plugin %s/%s is not compiled into this binary", kind, s.Name))
-			}
-		}
-	}
-	add("config.plugins", perr, "run: harness plugins")
+	add("config.plugins", plugin.ValidateSpecs(cfg.Plugins, Version), "run: harness plugins")
 	return out
 }
 

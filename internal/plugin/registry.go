@@ -1,131 +1,272 @@
-// Package plugin is the harness extension framework: everything outside the
-// kernel (state machine, fencing/leases, transactional commit, outbox) is a
-// plugin of some Kind. Plugins register a named Factory at init time; the
-// application config selects which instances are built and with what config.
-//
-//	func init() {
-//		plugin.Register(plugin.Tools, "hello", "greets", func(ctx context.Context, h *plugin.Host, c plugin.Config) (plugin.ToolSource, error) { ... })
-//	}
-//
-// Compile a plugin in with a blank import; enable it in the config file.
 package plugin
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 )
 
-// Kind is a typed extension point. T is the interface (or value type) every
-// plugin of this kind produces.
+var ErrComponentInvalid = errors.New("plugin component invalid")
+
 type Kind[T any] struct {
 	name string
 }
 
 func (k Kind[T]) Name() string { return k.name }
 
-// KindInfo describes an extension point.
 type KindInfo struct {
-	Name  string `json:"name"`
-	Multi bool   `json:"multi"` // several instances may be active at once
-	Doc   string `json:"doc"`
+	Name            string   `json:"name"`
+	Multi           bool     `json:"multi"`
+	Doc             string   `json:"doc"`
+	ContractVersion string   `json:"contract_version"`
+	AllowedServices []string `json:"allowed_services,omitempty"`
 }
 
-// NewKind declares an extension point. Kinds are declared once, at package
-// level; plugins of external modules may declare their own kinds too.
-func NewKind[T any](name string, multi bool, doc string) Kind[T] {
-	mu.Lock()
-	defer mu.Unlock()
-	if _, dup := kinds[name]; dup {
-		panic("plugin: duplicate kind " + name)
-	}
-	kinds[name] = KindInfo{Name: name, Multi: multi, Doc: doc}
-	return Kind[T]{name: name}
-}
-
-// Factory builds one plugin instance from its config.
-type Factory[T any] func(ctx context.Context, h *Host, cfg Config) (T, error)
-
-// Info describes a registered plugin.
-type Info struct {
-	Kind string `json:"kind"`
-	Name string `json:"name"`
-	Doc  string `json:"doc"`
+type registry struct {
+	mu    sync.RWMutex
+	kinds map[string]KindInfo
+	reg   map[string]map[string]entry
 }
 
 type entry struct {
-	info  Info
-	build func(ctx context.Context, h *Host, cfg Config) (any, error)
+	descriptor Descriptor
+	validate   func(Config) error
+	build      func(context.Context, *Host, Config) (untypedComponent, error)
 }
 
-var (
-	mu    sync.RWMutex
-	kinds = map[string]KindInfo{}
-	reg   = map[string]map[string]entry{}
-)
+type untypedComponent struct {
+	value     any
+	lifecycle Lifecycle
+	tasks     []NamedTask
+}
 
-// Register adds a plugin factory. It panics on a duplicate (kind, name):
-// registration happens in init functions, so this fails fast at startup.
-func Register[T any](k Kind[T], name, doc string, f Factory[T]) {
-	if name == "" || f == nil {
-		panic("plugin: empty name or nil factory for kind " + k.name)
+var defaultRegistry = newRegistry()
+
+func newRegistry() *registry {
+	return &registry{kinds: map[string]KindInfo{}, reg: map[string]map[string]entry{}}
+}
+
+func NewKind[T any](info KindInfo) Kind[T] {
+	return newKindOn[T](defaultRegistry, info)
+}
+
+func newKindOn[T any](r *registry, info KindInfo) Kind[T] {
+	if !pluginNamePattern.MatchString(info.Name) {
+		panic("plugin: invalid kind " + info.Name)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if _, ok := kinds[k.name]; !ok {
+	if _, err := parseSemanticVersion(info.ContractVersion); err != nil {
+		panic("plugin: invalid kind contract " + info.Name)
+	}
+	if err := uniqueNames("allowed_service", info.AllowedServices); err != nil {
+		panic("plugin: " + err.Error())
+	}
+	info.AllowedServices = append([]string(nil), info.AllowedServices...)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, duplicate := r.kinds[info.Name]; duplicate {
+		panic("plugin: duplicate kind " + info.Name)
+	}
+	r.kinds[info.Name] = info
+	return Kind[T]{name: info.Name}
+}
+
+func Register[T any](k Kind[T], definition Definition[T]) {
+	registerDefinition(defaultRegistry, k, definition)
+}
+
+func registerDefinition[T any](r *registry, k Kind[T], definition Definition[T]) {
+	if definition.Initialize == nil || definition.ValidateConfig == nil {
+		panic("plugin: nil definition callback for kind " + k.name)
+	}
+	descriptor := cloneDescriptor(definition.Descriptor)
+	descriptor.Kind = k.name
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kind, ok := r.kinds[k.name]
+	if !ok {
 		panic("plugin: unknown kind " + k.name)
 	}
-	if reg[k.name] == nil {
-		reg[k.name] = map[string]entry{}
+	if err := descriptor.Validate(); err != nil {
+		panic("plugin: " + err.Error())
 	}
-	if _, dup := reg[k.name][name]; dup {
-		panic(fmt.Sprintf("plugin: duplicate %s plugin %q", k.name, name))
+	allowed := map[string]bool{}
+	for _, service := range kind.AllowedServices {
+		allowed[service] = true
 	}
-	reg[k.name][name] = entry{info: Info{Kind: k.name, Name: name, Doc: doc},
-		build: func(ctx context.Context, h *Host, cfg Config) (any, error) { return f(ctx, h, cfg) }}
+	for _, service := range descriptor.PermissionScope.Services {
+		if !allowed[service] {
+			panic(fmt.Sprintf("plugin: %s/%s service %q is not allowed", k.name, descriptor.Name, service))
+		}
+	}
+	if r.reg[k.name] == nil {
+		r.reg[k.name] = map[string]entry{}
+	}
+	if _, duplicate := r.reg[k.name][descriptor.Name]; duplicate {
+		panic(fmt.Sprintf("plugin: duplicate %s plugin %q", k.name, descriptor.Name))
+	}
+	validate := definition.ValidateConfig
+	initialize := definition.Initialize
+	r.reg[k.name][descriptor.Name] = entry{
+		descriptor: descriptor,
+		validate:   validate,
+		build: func(ctx context.Context, h *Host, cfg Config) (untypedComponent, error) {
+			component, err := initialize(ctx, h, cfg)
+			return untypedComponent{value: component.Value, lifecycle: component.Lifecycle, tasks: component.Tasks}, err
+		},
+	}
 }
 
-// Has reports whether a plugin is compiled in.
 func Has[T any](k Kind[T], name string) bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	_, ok := reg[k.name][name]
+	defaultRegistry.mu.RLock()
+	defer defaultRegistry.mu.RUnlock()
+	_, ok := defaultRegistry.reg[k.name][name]
 	return ok
 }
 
-// Build instantiates one plugin. The instance is recorded on the host, and
-// its Close/Shutdown method (if any) is scheduled for shutdown.
 func Build[T any](ctx context.Context, k Kind[T], h *Host, s Spec) (T, error) {
+	return build(defaultRegistry, ctx, k, h, s)
+}
+
+func build[T any](r *registry, ctx context.Context, k Kind[T], h *Host, s Spec) (T, error) {
 	var zero T
-	mu.RLock()
-	e, ok := reg[k.name][s.Name]
-	mu.RUnlock()
-	if !ok {
+	r.mu.RLock()
+	kind, kindOK := r.kinds[k.name]
+	e, ok := r.reg[k.name][s.Name]
+	r.mu.RUnlock()
+	if !kindOK || !ok {
 		return zero, fmt.Errorf("%s plugin %q is not compiled in (registered: %v)", k.name, s.Name, Names(k))
+	}
+	coreVersion := h.CoreVersion
+	if coreVersion == "" {
+		coreVersion = "dev"
+	}
+	if err := e.descriptor.CheckCompatibility(coreVersion, kind.ContractVersion); err != nil {
+		return zero, fmt.Errorf("%s plugin %q: %w", k.name, s.Name, err)
 	}
 	instance := s.Instance
 	if instance == "" {
 		instance = s.Name
 	}
+	if !pluginNamePattern.MatchString(instance) {
+		return zero, fmt.Errorf("%s plugin %q: invalid instance %q", k.name, s.Name, instance)
+	}
 	cfg := Config{Raw: s.Config, kind: k.name, name: s.Name}
-	v, err := e.build(ctx, h.scoped(k.name, instance), cfg)
+	if err := e.validate(cfg); err != nil {
+		return zero, fmt.Errorf("%s plugin %q config: %w", k.name, s.Name, err)
+	}
+	initCtx, cancel := context.WithTimeout(ctx, e.descriptor.ResourceBudget.StartTimeout)
+	component, err := e.build(initCtx, h.scoped(k.name, instance, e.descriptor.PermissionScope), cfg)
+	cancel()
 	if err != nil {
+		if component.lifecycle != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), e.descriptor.ResourceBudget.StopTimeout)
+			_ = component.lifecycle.Stop(stopCtx)
+			stopCancel()
+		}
+		return zero, fmt.Errorf("%s plugin %q initialize: %w", k.name, s.Name, err)
+	}
+	value, ok := component.value.(T)
+	if !ok {
+		return zero, fmt.Errorf("%w: %s plugin %q returned %T", ErrComponentInvalid, k.name, s.Name, component.value)
+	}
+	if err := validateUntypedComponent(component, e.descriptor.ResourceBudget); err != nil {
+		if component.lifecycle != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), e.descriptor.ResourceBudget.StopTimeout)
+			_ = component.lifecycle.Stop(stopCtx)
+			stopCancel()
+		}
 		return zero, fmt.Errorf("%s plugin %q: %w", k.name, s.Name, err)
 	}
-	t, ok := v.(T)
-	if !ok {
-		return zero, fmt.Errorf("%s plugin %q returned %T", k.name, s.Name, v)
+	active := Active{Kind: k.name, Name: s.Name, Instance: instance, Descriptor: cloneDescriptor(e.descriptor), State: Initialized}
+	if err := h.trackComponent(active, component); err != nil {
+		return zero, err
 	}
-	h.track(k.name, s.Name, instance, v)
-	return t, nil
+	return value, nil
 }
 
-// BuildAll instantiates every enabled spec of a multi kind, in order.
+func validateUntypedComponent(component untypedComponent, budget ResourceBudget) error {
+	if component.lifecycle == nil {
+		return fmt.Errorf("%w: nil lifecycle", ErrComponentInvalid)
+	}
+	if len(component.tasks) > budget.MaxTasks {
+		return fmt.Errorf("%w: %d tasks exceed budget %d", ErrComponentInvalid, len(component.tasks), budget.MaxTasks)
+	}
+	seen := map[string]bool{}
+	for _, task := range component.tasks {
+		if !pluginNamePattern.MatchString(task.Name) || task.Task == nil || seen[task.Name] {
+			return fmt.Errorf("%w: invalid task %q", ErrComponentInvalid, task.Name)
+		}
+		seen[task.Name] = true
+	}
+	return nil
+}
+
+func ValidateSpecs(specs map[string]Specs, coreVersion string) error {
+	return validateSpecs(defaultRegistry, specs, coreVersion)
+}
+
+func validateSpecs(r *registry, specs map[string]Specs, coreVersion string) error {
+	if coreVersion == "" {
+		coreVersion = "dev"
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	kinds := make([]string, 0, len(specs))
+	for kind := range specs {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	var errs []error
+	for _, kindName := range kinds {
+		kind, ok := r.kinds[kindName]
+		if !ok {
+			errs = append(errs, fmt.Errorf("plugin kind %q is not compiled in", kindName))
+			continue
+		}
+		enabled := specs[kindName].Enabled()
+		if !kind.Multi && len(enabled) > 1 {
+			errs = append(errs, fmt.Errorf("%s: at most one plugin can be enabled, got %d", kindName, len(enabled)))
+		}
+		seen := map[string]bool{}
+		for _, spec := range enabled {
+			e, ok := r.reg[kindName][spec.Name]
+			if !ok {
+				errs = append(errs, fmt.Errorf("plugin %s/%s is not compiled into this binary", kindName, spec.Name))
+				continue
+			}
+			instance := spec.Instance
+			if instance == "" {
+				instance = spec.Name
+			}
+			if !pluginNamePattern.MatchString(instance) {
+				errs = append(errs, fmt.Errorf("plugin %s/%s: invalid instance %q", kindName, spec.Name, instance))
+				continue
+			}
+			if seen[instance] {
+				errs = append(errs, fmt.Errorf("%s: duplicate instance %q", kindName, instance))
+			}
+			seen[instance] = true
+			if err := e.descriptor.CheckCompatibility(coreVersion, kind.ContractVersion); err != nil {
+				errs = append(errs, fmt.Errorf("plugin %s/%s: %w", kindName, spec.Name, err))
+				continue
+			}
+			if err := e.validate(Config{Raw: spec.Config, kind: kindName, name: spec.Name}); err != nil {
+				errs = append(errs, fmt.Errorf("plugin %s/%s config: %w", kindName, spec.Name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func BuildAll[T any](ctx context.Context, k Kind[T], h *Host, specs Specs) ([]T, error) {
-	// Validate the whole list before building anything.
+	return buildAll(defaultRegistry, ctx, k, h, specs)
+}
+
+func buildAll[T any](r *registry, ctx context.Context, k Kind[T], h *Host, specs Specs) ([]T, error) {
 	seen := map[string]bool{}
 	for _, s := range specs.Enabled() {
 		id := s.Instance
@@ -137,18 +278,18 @@ func BuildAll[T any](ctx context.Context, k Kind[T], h *Host, specs Specs) ([]T,
 		}
 		seen[id] = true
 	}
+	mark := h.mark()
 	var out []T
 	for _, s := range specs.Enabled() {
-		v, err := Build(ctx, k, h, s)
+		v, err := build(r, ctx, k, h, s)
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, h.rollbackStartTo(mark))
 		}
 		out = append(out, v)
 	}
 	return out, nil
 }
 
-// BuildOne instantiates the single enabled spec of a single-instance kind.
 func BuildOne[T any](ctx context.Context, k Kind[T], h *Host, specs Specs) (T, error) {
 	var zero T
 	en := specs.Enabled()
@@ -158,26 +299,28 @@ func BuildOne[T any](ctx context.Context, k Kind[T], h *Host, specs Specs) (T, e
 	return Build(ctx, k, h, en[0])
 }
 
-// Names lists the plugins registered for a kind.
 func Names[T any](k Kind[T]) []string {
-	mu.RLock()
-	defer mu.RUnlock()
+	defaultRegistry.mu.RLock()
+	defer defaultRegistry.mu.RUnlock()
 	var out []string
-	for n := range reg[k.name] {
-		out = append(out, n)
+	for name := range defaultRegistry.reg[k.name] {
+		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// Registered lists every compiled-in plugin.
-func Registered() []Info {
-	mu.RLock()
-	defer mu.RUnlock()
+type Info = Descriptor
+
+func Registered() []Info { return defaultRegistry.registered() }
+
+func (r *registry) registered() []Info {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var out []Info
-	for _, m := range reg {
-		for _, e := range m {
-			out = append(out, e.info)
+	for _, plugins := range r.reg {
+		for _, e := range plugins {
+			out = append(out, cloneDescriptor(e.descriptor))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -189,86 +332,91 @@ func Registered() []Info {
 	return out
 }
 
-// Kinds lists every declared extension point.
 func Kinds() []KindInfo {
-	mu.RLock()
-	defer mu.RUnlock()
+	defaultRegistry.mu.RLock()
+	defer defaultRegistry.mu.RUnlock()
 	var out []KindInfo
-	for _, k := range kinds {
-		out = append(out, k)
+	for _, kind := range defaultRegistry.kinds {
+		kind.AllowedServices = append([]string(nil), kind.AllowedServices...)
+		out = append(out, kind)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-// Config is a plugin's raw configuration.
+func cloneDescriptor(d Descriptor) Descriptor {
+	d.Capabilities = append([]string(nil), d.Capabilities...)
+	d.ConfigurationSchema = append(json.RawMessage(nil), d.ConfigurationSchema...)
+	d.PermissionScope.Services = append([]string(nil), d.PermissionScope.Services...)
+	d.DataClasses = append([]DataClass(nil), d.DataClasses...)
+	d.ErrorContract.RetryableCodes = append([]string(nil), d.ErrorContract.RetryableCodes...)
+	d.ErrorContract.PublicCodes = append([]string(nil), d.ErrorContract.PublicCodes...)
+	d.ErrorContract.UnhealthyCodes = append([]string(nil), d.ErrorContract.UnhealthyCodes...)
+	d.Observability.Metrics = append([]string(nil), d.Observability.Metrics...)
+	d.Observability.LogFields = append([]string(nil), d.Observability.LogFields...)
+	return d
+}
+
 type Config struct {
 	Raw        json.RawMessage
 	kind, name string
 }
 
-// Empty reports whether no configuration was given.
 func (c Config) Empty() bool {
-	t := bytes.TrimSpace(c.Raw)
-	return len(t) == 0 || bytes.Equal(t, []byte("null")) || bytes.Equal(t, []byte("{}"))
+	trimmed := bytes.TrimSpace(c.Raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("{}"))
 }
 
-// Decode strictly decodes the config into v (unknown fields are errors). An
-// empty config leaves v unchanged, so callers set defaults first.
 func (c Config) Decode(v any) error {
 	if len(bytes.TrimSpace(c.Raw)) == 0 || bytes.Equal(bytes.TrimSpace(c.Raw), []byte("null")) {
 		return nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(c.Raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(c.Raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(v); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	return nil
 }
 
-// Spec selects a plugin and configures one instance of it.
 type Spec struct {
-	Name string `json:"name"`
-	// Instance distinguishes several instances of the same plugin (default: Name).
+	Name     string          `json:"name"`
 	Instance string          `json:"instance,omitempty"`
-	Enabled  *bool           `json:"enabled,omitempty"` // default true
+	Enabled  *bool           `json:"enabled,omitempty"`
 	Config   json.RawMessage `json:"config,omitempty"`
 }
 
-// Specs is an ordered list of plugin specs. In config files it may be
-// written as one object, a list of objects, a bare name or a list of names.
 type Specs []Spec
 
-func (s *Specs) UnmarshalJSON(b []byte) error {
-	b = bytes.TrimSpace(b)
+func (s *Specs) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
 	switch {
-	case len(b) == 0 || bytes.Equal(b, []byte("null")):
+	case len(data) == 0 || bytes.Equal(data, []byte("null")):
 		*s = nil
 		return nil
-	case b[0] == '"':
-		var n string
-		if err := json.Unmarshal(b, &n); err != nil {
+	case data[0] == '"':
+		var name string
+		if err := json.Unmarshal(data, &name); err != nil {
 			return err
 		}
-		*s = Specs{{Name: n}}
+		*s = Specs{{Name: name}}
 		return nil
-	case b[0] == '{':
+	case data[0] == '{':
 		var one Spec
-		if err := strictUnmarshal(b, &one); err != nil {
+		if err := strictUnmarshal(data, &one); err != nil {
 			return err
 		}
 		*s = Specs{one}
 		return nil
 	}
 	var raw []json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	out := Specs{}
-	for _, r := range raw {
+	for _, item := range raw {
 		var one Specs
-		if err := one.UnmarshalJSON(r); err != nil {
+		if err := one.UnmarshalJSON(item); err != nil {
 			return err
 		}
 		out = append(out, one...)
@@ -277,31 +425,29 @@ func (s *Specs) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Enabled drops specs with enabled: false.
 func (s Specs) Enabled() []Spec {
 	var out []Spec
-	for _, x := range s {
-		if x.Enabled == nil || *x.Enabled {
-			out = append(out, x)
+	for _, spec := range s {
+		if spec.Enabled == nil || *spec.Enabled {
+			out = append(out, spec)
 		}
 	}
 	return out
 }
 
-// Spec is a convenience constructor for code-built configs.
 func NewSpec(name string, cfg any) Spec {
 	if cfg == nil {
 		return Spec{Name: name}
 	}
-	b, err := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
 	if err != nil {
 		panic(err)
 	}
-	return Spec{Name: name, Config: b}
+	return Spec{Name: name, Config: data}
 }
 
-func strictUnmarshal(b []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+func strictUnmarshal(data []byte, v any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(v)
 }

@@ -4,8 +4,8 @@
 // Enable it in the harness config:
 //
 //	plugins:
-//	  tools:  [demo, {name: hello, config: {greeting: "Hi"}}]
-//	  policy: {name: freeze_window, config: {deny: ["demo.restart"]}}
+//	  tools:  [{name: hello, config: {greeting: "Hi"}}]
+//	  policy: {name: freeze_window, config: {deny: ["example.hello"]}}
 //	  api:    [memory, eval, hello]
 package hello
 
@@ -53,7 +53,8 @@ func (a helloAPI) Register(mux *http.ServeMux) {
 func (helloAPI) RouteRoles() map[string]sdk.Role { return nil }
 
 func init() {
-	sdk.Register(sdk.Tools, "hello", "example.hello: greets a service (R0)",
+	sdk.Register(sdk.Tools, sdk.StaticDefinition("hello", "v1.0.0", "example.hello: greets a service (R0)",
+		sdk.StrictConfig[ToolConfig](),
 		func(_ context.Context, _ *sdk.Host, c sdk.Config) (sdk.ToolSource, error) {
 			cfg := ToolConfig{Greeting: "Hello"}
 			if err := c.Decode(&cfg); err != nil {
@@ -71,8 +72,9 @@ func init() {
 					return json.Marshal(map[string]string{"message": cfg.Greeting + ", " + in.Service})
 				},
 			}), nil
-		})
-	sdk.Register(sdk.Policy, "freeze_window", "built-in policy plus a deny list (change freeze)",
+		}))
+	sdk.Register(sdk.Policy, sdk.StaticDefinition("freeze_window", "v1.0.0", "built-in policy plus a deny list (change freeze)",
+		sdk.StrictConfig[FreezeConfig](),
 		func(_ context.Context, _ *sdk.Host, c sdk.Config) (sdk.Gate, error) {
 			var cfg FreezeConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -83,9 +85,9 @@ func init() {
 				deny[n] = true
 			}
 			return freezeWindow{Gate: sdk.DefaultPolicy(), deny: deny}, nil
-		})
-	sdk.Register(sdk.API, "hello", "GET /api/example/hello",
+		}))
+	sdk.Register(sdk.API, sdk.StaticDefinition("hello", "v1.0.0", "GET /api/example/hello", nil,
 		func(context.Context, *sdk.Host, sdk.Config) (sdk.APIExtension, error) {
 			return helloAPI{greeting: "hello from a plugin"}, nil
-		})
+		}))
 }

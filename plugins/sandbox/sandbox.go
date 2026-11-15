@@ -27,7 +27,8 @@ type ContainerConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.Sandbox, "container", "commands in a fresh container per call (docker/podman; gVisor via extra_args), no network, run workspace mounted",
+	plugin.Register(plugin.Sandbox, plugin.StaticDefinition("container", "v1.0.0", "commands in a fresh container per call (docker/podman; gVisor via extra_args), no network, run workspace mounted",
+		plugin.StrictConfig[ContainerConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (sandbox.Backend, error) {
 			var cfg ContainerConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -41,5 +42,5 @@ func init() {
 				Limits: sandbox.Limits{CPUs: cfg.CPUs, MemoryMB: cfg.MemoryMB, Pids: cfg.Pids, TmpMB: cfg.TmpMB,
 					Timeout: cfg.Timeout.D(), MaxOutputBytes: cfg.MaxOutputBytes},
 				Log: h.Log.With("component", "sandbox")})
-		})
+		}))
 }

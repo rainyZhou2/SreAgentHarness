@@ -12,6 +12,7 @@ import (
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/reasoning"
+	"go-sre-harness/internal/security"
 )
 
 type HashingConfig struct {
@@ -52,15 +53,17 @@ type ReasoningConfig struct {
 func on(b *bool) bool { return b == nil || *b }
 
 func init() {
-	plugin.Register(plugin.Embedder, "hashing", "dependency-free uni/bigram hashing embedder",
+	plugin.Register(plugin.Embedder, plugin.StaticDefinition("hashing", "v1.0.0", "dependency-free uni/bigram hashing embedder",
+		plugin.StrictConfig[HashingConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (memory.Embedder, error) {
 			var cfg HashingConfig
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
 			}
 			return memory.HashingEmbedder{Dims: cfg.Dims}, nil
-		})
-	plugin.Register(plugin.Embedder, "http", "OpenAI-compatible embeddings endpoint (OpenAI, Azure, vLLM, Ollama, LiteLLM, …)",
+		}))
+	plugin.Register(plugin.Embedder, plugin.StaticDefinition("http", "v1.0.0", "OpenAI-compatible embeddings endpoint (OpenAI, Azure, vLLM, Ollama, LiteLLM, …)",
+		plugin.StrictConfig[HTTPConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (memory.Embedder, error) {
 			var cfg HTTPConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -75,8 +78,9 @@ func init() {
 			}
 			return &memory.HTTPEmbedder{BaseURL: cfg.BaseURL, ModelName: cfg.Model, APIKey: key,
 				Dimensions: cfg.Dimensions, Timeout: cfg.Timeout.D(), Log: h.Log.With("component", "embedder")}, nil
-		})
-	plugin.Register(plugin.MemoryRetriever, "hybrid", "lexical + vector retrieval with RRF, scope filters and conflict resolution",
+		}))
+	plugin.Register(plugin.MemoryRetriever, plugin.StaticDefinition("hybrid", "v1.0.0", "lexical + vector retrieval with RRF, scope filters and conflict resolution",
+		plugin.StrictConfig[RetrieverConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (kernel.MemoryRetriever, error) {
 			cfg := RetrieverConfig{TopK: 5}
 			if err := c.Decode(&cfg); err != nil {
@@ -86,16 +90,21 @@ func init() {
 				return nil, errors.New("no embedder plugin is enabled")
 			}
 			return &memory.Retriever{Store: h.Store, Embedder: h.Embedder, Artifacts: h.Artifacts, TopK: cfg.TopK}, nil
-		})
-	plugin.Register(plugin.Job, "consolidator", "turns finished runs into candidate memories and experiences",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {
+		}))
+	plugin.Register(plugin.Job, plugin.BackgroundDefinition("consolidator", "v1.0.0", "turns finished runs into candidate memories and experiences",
+		plugin.StrictConfig[JobConfig](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Task, error) {
 			cfg := JobConfig{Interval: plugin.Duration(10 * time.Second)}
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
 			}
 			reg := h.Tools
 			writer := memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts}
-			cons := &memory.Consolidator{Store: h.Store, Artifacts: h.Artifacts, Writer: writer,
+			var store memory.ConsolidationStore = h.Store
+			if service, ok := h.Security.(*security.Service); ok && service.Mode != security.ModeLegacy {
+				store = memory.WithSecurityConsolidationStore(store, h.Security)
+			}
+			cons := &memory.Consolidator{Store: store, Artifacts: h.Artifacts, Writer: writer,
 				SideEffecting: func(name string) bool {
 					t, ok := reg.Lookup(name)
 					return !ok || t.Descriptor().Risk.HasSideEffects()
@@ -110,5 +119,5 @@ func init() {
 				cons.Hooks = append(cons.Hooks, rec)
 			}
 			return cons, nil
-		})
+		}))
 }

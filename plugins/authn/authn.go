@@ -23,7 +23,8 @@ type TokenConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.Authenticator, "dev", "trusts X-Tenant-ID / X-Actor-ID / X-Roles headers (development only)",
+	plugin.Register(plugin.Authenticator, plugin.StaticDefinition("dev", "v1.0.0", "trusts X-Tenant-ID / X-Actor-ID / X-Roles headers (development only)",
+		plugin.StrictConfig[DevConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (auth.Authenticator, error) {
 			var cfg DevConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -38,8 +39,9 @@ func init() {
 			}
 			h.Log.Warn("DEV AUTH MODE: X-Tenant-ID / X-Actor-ID headers are trusted; do not expose this server")
 			return auth.DevHeaders{}, nil
-		})
-	plugin.Register(plugin.Authenticator, "token", "static bearer tokens (SHA-256 hashed)",
+		}))
+	plugin.Register(plugin.Authenticator, plugin.StaticDefinition("token", "v1.0.0", "static bearer tokens (SHA-256 hashed)",
+		plugin.StrictConfig[TokenConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (auth.Authenticator, error) {
 			var cfg TokenConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -54,13 +56,14 @@ func init() {
 				return auth.NewStaticTokens(cfg.Tokens)
 			}
 			return nil, errors.New("tokens_file or tokens is required")
-		})
-	plugin.Register(plugin.Authenticator, "oidc", "OIDC/JWT bearer tokens (RS256/ES256, JWKS)",
+		}))
+	plugin.Register(plugin.Authenticator, plugin.StaticDefinition("oidc", "v1.0.0", "OIDC/JWT bearer tokens (RS256/ES256, JWKS)",
+		plugin.StrictConfig[auth.OIDCConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (auth.Authenticator, error) {
 			var cfg auth.OIDCConfig
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
 			}
 			return auth.NewOIDC(cfg)
-		})
+		}))
 }

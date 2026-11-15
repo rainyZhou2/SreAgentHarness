@@ -1,6 +1,6 @@
 // Package srework registers "sre-sim", a work_extension that simulates a
-// small production estate for demos and end-to-end tests of the control
-// plane without real infrastructure:
+// small production estate for end-to-end tests of the control plane without
+// real infrastructure:
 //
 //   - deployments with an image and a generation, published as world facts
 //     (source "sim-k8s", trust T2) and refreshed periodically;
@@ -16,7 +16,7 @@
 //     -owns-> pod -runs_on-> node; a rollout replaces the pods;
 //   - with state_file, the simulated downstream keeps its state across
 //     harness restarts (a real cluster outlives the control plane), so
-//     crash-recovery demos see the effects that were really applied.
+//     crash-recovery tests observe the effects that were really applied.
 //
 // Config (plugins.work_extension / local work_extensions):
 //
@@ -91,14 +91,15 @@ type depState struct {
 }
 
 func init() {
-	plugin.Register(plugin.WorkExt, "sre-sim", "simulated deployments, metrics and rollback/traffic actions for the Work demo",
+	plugin.Register(plugin.WorkExt, plugin.StaticDefinition("sre-sim", "v1.0.0", "simulated deployments, metrics and rollback/traffic actions for isolated Work validation",
+		plugin.StrictConfig[Config](),
 		func(ctx context.Context, h *plugin.Host, c plugin.Config) (plugin.WorkExtension, error) {
 			var cfg Config
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
 			}
 			return New(cfg)
-		})
+		}))
 }
 
 type deployment struct {

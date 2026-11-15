@@ -20,8 +20,9 @@ type Config struct {
 }
 
 func init() {
-	plugin.Register(plugin.Job, "event_relay", "publishes committed run events to the event bus (single active replica, leased cursor)",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {
+	plugin.Register(plugin.Job, plugin.BackgroundDefinition("event_relay", "v1.0.0", "publishes committed run events to the event bus (single active replica, leased cursor)",
+		plugin.StrictConfig[Config](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Task, error) {
 			cfg := Config{Interval: plugin.Duration(250 * time.Millisecond), Batch: 1000,
 				LeaseTTL: plugin.Duration(15 * time.Second), StartFrom: "latest"}
 			if err := c.Decode(&cfg); err != nil {
@@ -29,7 +30,7 @@ func init() {
 			}
 			if h.Events == nil {
 				h.Log.Warn("event relay disabled: no event_bus plugin is enabled")
-				return plugin.RunnerFunc(func(ctx context.Context) error {
+				return plugin.TaskFunc(func(ctx context.Context) error {
 					<-ctx.Done()
 					return ctx.Err()
 				}), nil
@@ -52,5 +53,5 @@ func init() {
 				LeaseTTL:  cfg.LeaseTTL.D(),
 				StartFrom: cfg.StartFrom,
 			}, nil
-		})
+		}))
 }

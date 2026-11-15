@@ -40,7 +40,8 @@ type WebhookConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.EventSink, "log", "writes matching events to the process log",
+	plugin.Register(plugin.EventSink, plugin.StaticDefinition("log", "v1.0.0", "writes matching events to the process log",
+		plugin.StrictConfig[LogConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (eventsink.Sink, error) {
 			var cfg LogConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -50,15 +51,16 @@ func init() {
 				return nil, err
 			}
 			return &logSink{opts: cfg.Options, log: h.Log}, nil
-		})
-	plugin.Register(plugin.EventSink, "webhook", "HTTP POST per event (JSON or Slack format, optional HMAC signature)",
+		}))
+	plugin.Register(plugin.EventSink, plugin.StaticDefinition("webhook", "v1.0.0", "HTTP POST per event (JSON or Slack format, optional HMAC signature)",
+		plugin.StrictConfig[WebhookConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (eventsink.Sink, error) {
 			var cfg WebhookConfig
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
 			}
 			return NewWebhook(cfg)
-		})
+		}))
 }
 
 type logSink struct {

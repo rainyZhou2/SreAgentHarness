@@ -24,13 +24,14 @@ type LLMConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.Strategy, "rule_based", "deterministic rules; no model calls",
+	plugin.Register(plugin.Strategy, plugin.StaticDefinition("rule_based", "v1.0.0", "deterministic rules; no model calls", nil,
 		func(context.Context, *plugin.Host, plugin.Config) (plugin.StrategyBuilder, error) {
 			return plugin.StrategyBuilderFunc(func(profile.Spec, plugin.StrategyRuntime) (cognitive.Strategy, error) {
 				return cognitive.RuleBased{}, nil
 			}), nil
-		})
-	plugin.Register(plugin.Strategy, "llm", "model-driven ReAct loop through the model gateway",
+		}))
+	plugin.Register(plugin.Strategy, plugin.StaticDefinition("llm", "v1.0.0", "model-driven ReAct loop through the model gateway",
+		plugin.StrictConfig[LLMConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.StrategyBuilder, error) {
 			var cfg LLMConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -60,7 +61,7 @@ func init() {
 				}
 				return &cognitive.LLM{Gateway: rt.Gateway, Artifacts: rt.Artifacts, Assembler: asm, Alias: alias, Deltas: rt.Deltas}, nil
 			}), nil
-		})
+		}))
 }
 
 // SectionedAssembler is the built-in context assembler: four prefix-cache
@@ -99,7 +100,8 @@ type CompactorConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.ContextAssembler, "sectioned", "system/tools/history/dynamic sections ordered for prefix caching; optional custom instructions",
+	plugin.Register(plugin.ContextAssembler, plugin.StaticDefinition("sectioned", "v1.0.0", "system/tools/history/dynamic sections ordered for prefix caching; optional custom instructions",
+		plugin.StrictConfig[SectionedConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (cognitive.ContextAssembler, error) {
 			var cfg SectionedConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -123,16 +125,18 @@ func init() {
 			base = base.Apply(cognitive.AssemblerOptions{PromptPrefixVersion: cfg.PromptPrefixVersion,
 				MaxContextTokens: cfg.MaxContextTokens, MaxOutputTokens: cfg.MaxOutputTokens})
 			return SectionedAssembler{Base: base}, nil
-		})
-	plugin.Register(plugin.Compactor, "deterministic", "one line per folded observation with truncated bodies; reproducible on retry",
+		}))
+	plugin.Register(plugin.Compactor, plugin.StaticDefinition("deterministic", "v1.0.0", "one line per folded observation with truncated bodies; reproducible on retry",
+		plugin.StrictConfig[CompactorConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (kernel.Compactor, error) {
 			var cfg CompactorConfig
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
 			}
 			return kernel.DeterministicCompactor{Keep: cfg.Keep, MaxBytes: cfg.MaxBytes}, nil
-		})
-	plugin.Register(plugin.Compactor, "llm", "model-written summaries of folded observations; citations kept, deterministic fallback on any failure",
+		}))
+	plugin.Register(plugin.Compactor, plugin.StaticDefinition("llm", "v1.0.0", "model-written summaries of folded observations; citations kept, deterministic fallback on any failure",
+		plugin.StrictConfig[LLMCompactorConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (kernel.Compactor, error) {
 			var cfg LLMCompactorConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -146,7 +150,7 @@ func init() {
 			}
 			return &kernel.LLMCompactor{Gateway: h.Gateway, Alias: cfg.Alias, Keep: cfg.Keep, MaxBytes: cfg.MaxBytes,
 				MaxSummaryBytes: cfg.MaxSummaryBytes, Log: h.Log}, nil
-		})
+		}))
 }
 
 func contains(xs []string, x string) bool {

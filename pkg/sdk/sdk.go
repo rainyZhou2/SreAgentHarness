@@ -1,22 +1,4 @@
-// Package sdk is the public plugin API. Code outside this module cannot
-// import go-sre-harness/internal/..., so every type a plugin needs is
-// re-exported here as an alias, together with the extension points (Kinds)
-// and Register.
-//
-// A plugin is an ordinary Go package that registers factories in init:
-//
-//	package hello
-//
-//	import "go-sre-harness/pkg/sdk"
-//
-//	func init() {
-//		sdk.Register(sdk.Tools, "hello", "greeting tool", func(ctx context.Context, h *sdk.Host, c sdk.Config) (sdk.ToolSource, error) {
-//			return sdk.StaticTools(&sdk.FuncTool{...}), nil
-//		})
-//	}
-//
-// Compile it in with a blank import next to pkg/harness and enable it in the
-// config file under plugins.<kind>.
+// Package sdk exposes versioned plugin definitions, explicit lifecycles and extension points.
 package sdk
 
 import (
@@ -48,25 +30,69 @@ import (
 // ---- framework ----
 
 type (
-	Kind[T any]    = plugin.Kind[T]
-	Factory[T any] = plugin.Factory[T]
-	Host           = plugin.Host
-	Config         = plugin.Config
-	Spec           = plugin.Spec
-	Settings       = plugin.Settings
-	Duration       = plugin.Duration
-	Runner         = plugin.Runner
-	RunnerFunc     = plugin.RunnerFunc
-	Info           = plugin.Info
-	KindInfo       = plugin.KindInfo
+	Kind[T any]         = plugin.Kind[T]
+	Definition[T any]   = plugin.Definition[T]
+	Component[T any]    = plugin.Component[T]
+	Descriptor          = plugin.Descriptor
+	PermissionScope     = plugin.PermissionScope
+	ResourceBudget      = plugin.ResourceBudget
+	ErrorContract       = plugin.ErrorContract
+	CompatibilityPolicy = plugin.CompatibilityPolicy
+	DataClass           = plugin.DataClass
+	Lifecycle           = plugin.Lifecycle
+	LifecycleFuncs      = plugin.LifecycleFuncs
+	Task                = plugin.Task
+	TaskFunc            = plugin.TaskFunc
+	NamedTask           = plugin.NamedTask
+	Health              = plugin.Health
+	HealthStatus        = plugin.HealthStatus
+	State               = plugin.State
+	Host                = plugin.Host
+	Config              = plugin.Config
+	Spec                = plugin.Spec
+	Settings            = plugin.Settings
+	Duration            = plugin.Duration
+	Info                = plugin.Info
+	KindInfo            = plugin.KindInfo
 )
 
-// Register adds a plugin factory for a kind (call from init).
-func Register[T any](k Kind[T], name, doc string, f Factory[T]) { plugin.Register(k, name, doc, f) }
+const (
+	ExactContract    = plugin.ExactContract
+	CompatibleMajor  = plugin.CompatibleMajor
+	Healthy          = plugin.Healthy
+	Degraded         = plugin.Degraded
+	Unhealthy        = plugin.Unhealthy
+	DataPublic       = plugin.DataPublic
+	DataInternal     = plugin.DataInternal
+	DataConfidential = plugin.DataConfidential
+	DataRestricted   = plugin.DataRestricted
+)
 
-// NewKind declares a new extension point owned by an external module.
-func NewKind[T any](name string, multi bool, doc string) Kind[T] {
-	return plugin.NewKind[T](name, multi, doc)
+func Register[T any](k Kind[T], definition Definition[T]) { plugin.Register(k, definition) }
+
+func Define[T any](name, version, doc string, validate func(Config) error,
+	initialize func(context.Context, *Host, Config) (Component[T], error)) Definition[T] {
+	return plugin.Define(name, version, doc, validate, initialize)
+}
+
+func StaticDefinition[T any](name, version, doc string, validate func(Config) error,
+	initialize func(context.Context, *Host, Config) (T, error)) Definition[T] {
+	return plugin.StaticDefinition(name, version, doc, validate, initialize)
+}
+
+func BackgroundDefinition(name, version, doc string, validate func(Config) error,
+	initialize func(context.Context, *Host, Config) (Task, error)) Definition[Task] {
+	return plugin.BackgroundDefinition(name, version, doc, validate, initialize)
+}
+
+func StrictConfig[C any]() func(Config) error { return plugin.StrictConfig[C]() }
+
+func Static[T any](value T) Component[T] { return plugin.Static(value) }
+
+func Background(task Task, name string) Component[Task] { return plugin.Background(task, name) }
+
+func NewKind[T any](info KindInfo) Kind[T] {
+	return plugin.NewKind[T](info)
 }
 
 // Build instantiates a plugin of a custom kind (for plugins that host their

@@ -17,11 +17,12 @@ import (
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning/improve"
 	"go-sre-harness/internal/runsearch"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/store/pg"
 )
 
 func init() {
-	plugin.Register(plugin.API, "memory", "/api/memories, feedback, experiences, incidents, service dependencies",
+	plugin.Register(plugin.API, plugin.StaticDefinition("memory", "v1.0.0", "/api/memories, feedback, experiences, incidents, service dependencies", nil,
 		func(_ context.Context, h *plugin.Host, _ plugin.Config) (api.Extension, error) {
 			if h.Server == nil || h.Embedder == nil {
 				return nil, errors.New("requires the API server and an embedder")
@@ -30,16 +31,23 @@ func init() {
 			// run record as ground truth. It only proposes; approvers decide.
 			cur := &curate.Curator{Memories: curatewire.Memories(h.Store), Store: h.Store,
 				History: &runsearch.Searcher{Runs: h.Store, Artifacts: h.Artifacts}}
-			return &api.MemoryAPI{Store: h.Store, Writer: memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts}, Server: h.Server, Curator: cur}, nil
-		})
-	plugin.Register(plugin.API, "eval", "/api/eval, /api/profiles, /api/evolution (datasets, gates, canary rollouts)",
+			var store api.MemoryStore = h.Store
+			if service, ok := h.Security.(*security.Service); ok && service.Mode != security.ModeLegacy {
+				store = api.WithMemorySecurity(store, h.Security)
+			}
+			governance := &memory.GovernanceService{Store: store, Authority: h.MemoryAuthority}
+			return &api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: h.Embedder, Artifacts: h.Artifacts}, Server: h.Server,
+				Curator: cur, Governance: governance}, nil
+		}))
+	plugin.Register(plugin.API, plugin.StaticDefinition("eval", "v1.0.0", "/api/eval, /api/profiles, /api/evolution (datasets, gates, canary rollouts)", nil,
 		func(_ context.Context, h *plugin.Host, _ plugin.Config) (api.Extension, error) {
 			if h.Server == nil || h.Eval == nil {
 				return nil, errors.New("requires the API server and the evaluation service")
 			}
 			return &api.EvalAPI{Service: h.Eval, Store: h.Store, Server: h.Server}, nil
-		})
-	plugin.Register(plugin.API, "reasoning", "/api/reasoning (quality metrics, pattern library, on-demand improvement)",
+		}))
+	plugin.Register(plugin.API, plugin.StaticDefinition("reasoning", "v1.0.0", "/api/reasoning (quality metrics, pattern library, on-demand improvement)",
+		plugin.StrictConfig[improve.Config](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (api.Extension, error) {
 			if h.Server == nil {
 				return nil, errors.New("requires the API server")
@@ -56,8 +64,8 @@ func init() {
 				a.Evolution = h.Eval
 			}
 			return a, nil
-		})
-	plugin.Register(plugin.API, "extensions", "/api/extensions (tenant MCP servers, HTTP tools, skills) and /api/tools",
+		}))
+	plugin.Register(plugin.API, plugin.StaticDefinition("extensions", "v1.0.0", "/api/extensions (tenant MCP servers, HTTP tools, skills) and /api/tools", nil,
 		func(_ context.Context, h *plugin.Host, _ plugin.Config) (api.Extension, error) {
 			if h.Server == nil || h.Extensions == nil {
 				return nil, errors.New("requires the API server and the extensions runtime")
@@ -84,5 +92,5 @@ func init() {
 					_ = h.Store.Audit(ctx, pg.AuditEntry{TenantID: tenant, ActorType: "user", ActorID: actor, Action: action,
 						ResourceType: "extension", ResourceID: resource, Outcome: "applied", Details: details})
 				}}, nil
-		})
+		}))
 }

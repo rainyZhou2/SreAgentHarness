@@ -57,11 +57,12 @@ func (s remoteSource) Tools(ctx context.Context) ([]tools.Tool, error) {
 func (s remoteSource) Close() error { return s.c.Close() }
 
 func init() {
-	plugin.Register(plugin.Tools, "demo", "demo.metrics (R0) and demo.restart (R2) for local runs",
+	plugin.Register(plugin.Tools, plugin.StaticDefinition("demo", "v1.0.0", "local metrics (R0) and restart (R2) tools", nil,
 		func(context.Context, *plugin.Host, plugin.Config) (plugin.ToolSource, error) {
 			return static(tools.DemoTools()), nil
-		})
-	plugin.Register(plugin.Tools, "web", "web.fetch (R0): read a public page as text; untrusted output",
+		}))
+	plugin.Register(plugin.Tools, plugin.StaticDefinition("web", "v1.0.0", "web.fetch (R0): read a public page as text; untrusted output",
+		plugin.StrictConfig[WebConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {
 			var cfg WebConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -69,8 +70,9 @@ func init() {
 			}
 			return static([]tools.Tool{web.NewFetchTool(web.FetchConfig{
 				MaxBytes: cfg.MaxBytes, Timeout: cfg.Timeout.D(), Policy: h.Network})}), nil
-		})
-	plugin.Register(plugin.Tools, "prometheus", "prom.query / prom.alerts (read-only, R0)",
+		}))
+	plugin.Register(plugin.Tools, plugin.StaticDefinition("prometheus", "v1.0.0", "prom.query / prom.alerts (read-only, R0)",
+		plugin.StrictConfig[sretools.PrometheusConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {
 			var cfg sretools.PrometheusConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -81,8 +83,9 @@ func init() {
 				return nil, err
 			}
 			return static(p.Tools()), nil
-		})
-	plugin.Register(plugin.Tools, "kubernetes", "k8s.deployment_status (R0), k8s.rollout_restart (R2, dry-run by default)",
+		}))
+	plugin.Register(plugin.Tools, plugin.StaticDefinition("kubernetes", "v1.0.0", "k8s.deployment_status (R0), k8s.rollout_restart (R2, dry-run by default)",
+		plugin.StrictConfig[KubernetesConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {
 			var cfg KubernetesConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -98,32 +101,45 @@ func init() {
 			}
 			h.Log.Info("kubernetes tools", "dry_run", k.DryRun(), "namespaces", kc.Namespaces)
 			return static(k.Tools()), nil
-		})
-	plugin.Register(plugin.Tools, "mcp", "one MCP server (stdio or streamable HTTP); allowlisted tools only",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {
+		}))
+	plugin.Register(plugin.Tools, plugin.Define("mcp", "v1.0.0", "one MCP server (stdio or streamable HTTP); allowlisted tools only",
+		plugin.StrictConfig[mcpexec.ServerConfig](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Component[plugin.ToolSource], error) {
 			var cfg mcpexec.ServerConfig
 			if err := c.Decode(&cfg); err != nil {
-				return nil, err
+				return plugin.Component[plugin.ToolSource]{}, err
 			}
 			s, err := mcpexec.New(cfg, nil, h.Log)
 			if err != nil {
-				return nil, err
+				return plugin.Component[plugin.ToolSource]{}, err
 			}
-			return mcpSource{&mcpexec.Manager{Servers: []*mcpexec.Server{s}, Registry: h.Tools, Log: h.Log}}, nil
-		})
-	plugin.Register(plugin.Tools, "remote", "one remote gRPC executor (mTLS); allowlisted capabilities only",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.ToolSource, error) {
+			source := mcpSource{&mcpexec.Manager{Servers: []*mcpexec.Server{s}, Registry: h.Tools, Log: h.Log}}
+			component := plugin.Static[plugin.ToolSource](source)
+			component.Lifecycle = plugin.LifecycleFuncs{OnStop: func(context.Context) error {
+				source.Close()
+				return nil
+			}}
+			return component, nil
+		}))
+	plugin.Register(plugin.Tools, plugin.Define("remote", "v1.0.0", "one remote gRPC executor (mTLS); allowlisted capabilities only",
+		plugin.StrictConfig[remote.Config](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Component[plugin.ToolSource], error) {
 			var cfg remote.Config
 			if err := c.Decode(&cfg); err != nil {
-				return nil, err
+				return plugin.Component[plugin.ToolSource]{}, err
 			}
 			if cfg.Name == "" {
-				return nil, errors.New("name is required")
+				return plugin.Component[plugin.ToolSource]{}, errors.New("name is required")
 			}
-			cl, err := remote.Dial(cfg, nil, h.Log)
+			client, err := remote.Dial(cfg, nil, h.Log)
 			if err != nil {
-				return nil, err
+				return plugin.Component[plugin.ToolSource]{}, err
 			}
-			return remoteSource{c: cl, name: cfg.Name, h: h}, nil
-		})
+			source := remoteSource{c: client, name: cfg.Name, h: h}
+			component := plugin.Static[plugin.ToolSource](source)
+			component.Lifecycle = plugin.LifecycleFuncs{OnStop: func(context.Context) error {
+				return source.Close()
+			}}
+			return component, nil
+		}))
 }

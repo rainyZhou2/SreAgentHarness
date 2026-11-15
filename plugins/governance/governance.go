@@ -44,7 +44,8 @@ type RetentionConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.Policy, "default", "risk-class policy: R0 allow, R1 allow outside production, R2 approval, R3 deny",
+	plugin.Register(plugin.Policy, plugin.StaticDefinition("default", "v1.0.0", "risk-class policy: R0 allow, R1 allow outside production, R2 approval, R3 deny",
+		plugin.StrictConfig[PolicyConfig](),
 		func(_ context.Context, _ *plugin.Host, c plugin.Config) (policy.Gate, error) {
 			d := policy.Default()
 			cfg := PolicyConfig{Version: d.Version, Environment: d.Environment, ApprovalTTL: plugin.Duration(d.ApprovalTTL)}
@@ -53,8 +54,9 @@ func init() {
 			}
 			return policy.Engine{Version: cfg.Version, Environment: cfg.Environment, ApprovalTTL: cfg.ApprovalTTL.D(),
 				AllowR1WithoutApproval: cfg.AllowR1WithoutApproval}, nil
-		})
-	plugin.Register(plugin.Policy, "rules", "rule-based policy: matchers over tool, source, labels, target, environment, time window, rate and blast radius; the most restrictive matching rule decides, the framework floor always applies",
+		}))
+	plugin.Register(plugin.Policy, plugin.StaticDefinition("rules", "v1.0.0", "rule-based policy: matchers over tool, source, labels, target, environment, time window, rate and blast radius; the most restrictive matching rule decides, the framework floor always applies",
+		plugin.StrictConfig[policy.RuleConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (policy.Gate, error) {
 			var cfg policy.RuleConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -73,13 +75,14 @@ func init() {
 					"default_environment", e.Base.Environment)
 			}
 			return e, nil
-		})
-	plugin.Register(plugin.Grader, "substring", "root cause hit = answer contains a ground-truth label (case-insensitive)",
+		}))
+	plugin.Register(plugin.Grader, plugin.StaticDefinition("substring", "v1.0.0", "root cause hit = answer contains a ground-truth label (case-insensitive)", nil,
 		func(context.Context, *plugin.Host, plugin.Config) (eval.Grader, error) {
 			return eval.SubstringGrader, nil
-		})
-	plugin.Register(plugin.Job, "rollout_monitor", "auto-rolls back canaries that breach guardrails",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {
+		}))
+	plugin.Register(plugin.Job, plugin.BackgroundDefinition("rollout_monitor", "v1.0.0", "auto-rolls back canaries that breach guardrails",
+		plugin.StrictConfig[IntervalConfig](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Task, error) {
 			cfg := IntervalConfig{Interval: plugin.Duration(time.Minute)}
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
@@ -88,10 +91,11 @@ func init() {
 				return nil, errors.New("evaluation service unavailable")
 			}
 			svc, every := h.Eval, cfg.Interval.D()
-			return plugin.RunnerFunc(func(ctx context.Context) error { return svc.Run(ctx, every) }), nil
-		})
-	plugin.Register(plugin.Job, "reasoning_improver", "proposes reasoning-layer profile candidates from measured reasoning quality; never approves or promotes",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {
+			return plugin.TaskFunc(func(ctx context.Context) error { return svc.Run(ctx, every) }), nil
+		}))
+	plugin.Register(plugin.Job, plugin.BackgroundDefinition("reasoning_improver", "v1.0.0", "proposes reasoning-layer profile candidates from measured reasoning quality; never approves or promotes",
+		plugin.StrictConfig[ImproverConfig](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Task, error) {
 			cfg := ImproverConfig{Interval: plugin.Duration(6 * time.Hour), Window: plugin.Duration(7 * 24 * time.Hour)}
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
@@ -112,10 +116,11 @@ func init() {
 				im.Inducer = &improve.ModelInducer{Gateway: h.OfflineGateway, Alias: cfg.InducerModelAlias}
 			}
 			every := cfg.Interval.D()
-			return plugin.RunnerFunc(func(ctx context.Context) error { return im.Run(ctx, every) }), nil
-		})
-	plugin.Register(plugin.Job, "retention", "deletes published outbox rows, expired segments/memories and old audit entries",
-		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Runner, error) {
+			return plugin.TaskFunc(func(ctx context.Context) error { return im.Run(ctx, every) }), nil
+		}))
+	plugin.Register(plugin.Job, plugin.BackgroundDefinition("retention", "v1.0.0", "deletes published outbox rows, expired segments/memories and old audit entries",
+		plugin.StrictConfig[RetentionConfig](),
+		func(_ context.Context, h *plugin.Host, c plugin.Config) (plugin.Task, error) {
 			cfg := RetentionConfig{Interval: plugin.Duration(5 * time.Minute), OutboxRetention: plugin.Duration(24 * time.Hour)}
 			if err := c.Decode(&cfg); err != nil {
 				return nil, err
@@ -123,5 +128,5 @@ func init() {
 			return &retention.Cleaner{Store: h.Store, Artifacts: h.Artifacts, Log: h.Log, Observer: h.Metrics,
 				Cfg: retention.Config{Interval: cfg.Interval.D(), OutboxRetention: cfg.OutboxRetention.D(),
 					AuditRetention: cfg.AuditRetention.D(), ReasoningRetention: cfg.ReasoningRetention.D(), Batch: cfg.Batch}}, nil
-		})
+		}))
 }

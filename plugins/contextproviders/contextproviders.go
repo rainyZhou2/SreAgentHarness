@@ -25,7 +25,8 @@ func init() {
 }
 
 func register(kind, doc string) {
-	plugin.Register(plugin.ContextProvider, kind, doc,
+	plugin.Register(plugin.ContextProvider, plugin.StaticDefinition(kind, "v1.0.0", doc,
+		plugin.StrictConfig[envctx.Config](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (envctx.Provider, error) {
 			var cfg envctx.Config
 			if err := c.Decode(&cfg); err != nil {
@@ -37,5 +38,5 @@ func register(kind, doc string) {
 				d.Dependencies = h.Store
 			}
 			return envctx.Build(cfg, d)
-		})
+		}))
 }

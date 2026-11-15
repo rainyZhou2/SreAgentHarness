@@ -820,7 +820,7 @@ func InferenceLatencyTemplate() work.Template {
 }
 
 // TTFTSuccess is the success spec of a TTFT Work: p95 TTFT under the SLO
-// for 10 minutes, queue drained (used by the demo and as the API example).
+// for 10 minutes with the work queue drained.
 func TTFTSuccess(ref string, slo float64) outcome.Spec {
 	return outcome.Spec{Version: 1, StableFor: cpkit.Duration(10 * time.Minute), AllOf: []outcome.Objective{
 		{ID: "ttft", Kind: outcome.KindMetric, TargetRef: ref, Window: cpkit.Duration(10 * time.Minute), MinSamples: 3,

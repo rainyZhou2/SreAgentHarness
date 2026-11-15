@@ -20,17 +20,21 @@ type shutdown func(context.Context) error
 func (s shutdown) Shutdown(ctx context.Context) error { return s(ctx) }
 
 func init() {
-	plugin.Register(plugin.Telemetry, "otlp", "OpenTelemetry traces over OTLP/HTTP",
-		func(ctx context.Context, h *plugin.Host, c plugin.Config) (plugin.TelemetryExporter, error) {
+	plugin.Register(plugin.Telemetry, plugin.Define("otlp", "v1.0.0", "OpenTelemetry traces over OTLP/HTTP",
+		plugin.StrictConfig[OTLPConfig](),
+		func(ctx context.Context, h *plugin.Host, c plugin.Config) (plugin.Component[plugin.TelemetryExporter], error) {
 			cfg := OTLPConfig{ServiceName: "go-sre-harness-" + h.Mode}
 			if err := c.Decode(&cfg); err != nil {
-				return nil, err
+				return plugin.Component[plugin.TelemetryExporter]{}, err
 			}
 			stop, enabled, err := obs.SetupTracing(ctx, cfg.ServiceName)
 			if err != nil {
-				return nil, err
+				return plugin.Component[plugin.TelemetryExporter]{}, err
 			}
 			h.Log.Info("tracing", "enabled", enabled, "service", cfg.ServiceName)
-			return shutdown(stop), nil
-		})
+			return plugin.Component[plugin.TelemetryExporter]{
+				Value:     shutdown(stop),
+				Lifecycle: plugin.LifecycleFuncs{OnStop: stop},
+			}, nil
+		}))
 }

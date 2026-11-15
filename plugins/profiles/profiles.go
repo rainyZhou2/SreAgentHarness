@@ -17,7 +17,7 @@ import (
 	"go-sre-harness/internal/profile"
 )
 
-// DemoSpec is the profile the harness has always seeded for local runs.
+// Default local profile seeded by the built-in source.
 const DemoSpec = `{"strategy":"llm","tools":["demo.metrics","demo.restart"],"max_steps":12}`
 
 // ExtensionsSpec (sre-diagnosis@2, the default) also allows the tenant's
@@ -45,9 +45,9 @@ const MCPDeepSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*
 // capability map to the prompt.
 const CapabilityMapSpec = `{"strategy":"llm","tools":["demo.*","mcp.*","http.*","web.*"],"max_steps":30,"prompt_prefix_version":"sre-prefix-v6","capability_map":true}`
 
-// FlowSpec (sre-diagnosis@8) demonstrates the orchestration DSL: a triage
-// agent, parallel metrics/log branches, a join, a human approval gate and a
-// remediation tool. The flow can only use tools the profile allows.
+// FlowSpec (sre-diagnosis@8) uses the orchestration DSL for triage, parallel
+// metrics/log branches, a join, a human approval gate and remediation. The
+// flow can only use tools the profile allows.
 const FlowSpec = `{
   "strategy":"flow",
   "tools":["demo.*","mcp.*","http.*","web.*"],
@@ -121,7 +121,7 @@ const InteractiveFlowSpec = `{
 type BuiltinConfig struct {
 	ID      string          `json:"id,omitempty"`      // default sre-diagnosis
 	Version int64           `json:"version,omitempty"` // default 1
-	Spec    json.RawMessage `json:"spec,omitempty"`    // default DemoSpec
+	Spec    json.RawMessage `json:"spec,omitempty"`    // default local profile
 	Tenants []string        `json:"tenants,omitempty"` // default settings.default_tenant
 }
 
@@ -136,7 +136,8 @@ type FileConfig struct {
 }
 
 func init() {
-	plugin.Register(plugin.ProfileSource, "builtin", "the demo sre-diagnosis@1 and @2 (extensions) profiles (or one profile given inline)",
+	plugin.Register(plugin.ProfileSource, plugin.StaticDefinition("builtin", "v1.0.0", "built-in versioned SRE diagnosis profiles (or one profile given inline)",
+		plugin.StrictConfig[BuiltinConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (profile.Source, error) {
 			cfg := BuiltinConfig{ID: "sre-diagnosis", Version: 1, Spec: json.RawMessage(DemoSpec)}
 			if err := c.Decode(&cfg); err != nil {
@@ -165,8 +166,9 @@ func init() {
 					Origin: "builtin", Seed: true}, cfg.Tenants, h.Settings.DefaultTenant)...)
 			}
 			return profile.SourceFunc(func(context.Context) ([]profile.Definition, error) { return defs, nil }), nil
-		})
-	plugin.Register(plugin.ProfileSource, "file", "profile definitions from a YAML/JSON file or directory",
+		}))
+	plugin.Register(plugin.ProfileSource, plugin.StaticDefinition("file", "v1.0.0", "profile definitions from a YAML/JSON file or directory",
+		plugin.StrictConfig[FileConfig](),
 		func(_ context.Context, h *plugin.Host, c plugin.Config) (profile.Source, error) {
 			var cfg FileConfig
 			if err := c.Decode(&cfg); err != nil {
@@ -178,7 +180,7 @@ func init() {
 			return profile.SourceFunc(func(context.Context) ([]profile.Definition, error) {
 				return LoadPath(cfg.Path, cfg.Tenants, h.Settings.DefaultTenant)
 			}), nil
-		})
+		}))
 }
 
 // LoadPath reads definitions from a file or directory.
