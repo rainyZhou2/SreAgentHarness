@@ -1,5 +1,5 @@
 // Package srework registers "sre-sim", a work_extension that simulates a
-// small production estate for demos and end-to-end tests of the v2 control
+// small production estate for demos and end-to-end tests of the control
 // plane without real infrastructure:
 //
 //   - deployments with an image and a generation, published as world facts
@@ -91,7 +91,7 @@ type depState struct {
 }
 
 func init() {
-	plugin.Register(plugin.WorkExt, "sre-sim", "simulated deployments, metrics and rollback/traffic actions for the v2 demo",
+	plugin.Register(plugin.WorkExt, "sre-sim", "simulated deployments, metrics and rollback/traffic actions for the Work demo",
 		func(ctx context.Context, h *plugin.Host, c plugin.Config) (plugin.WorkExtension, error) {
 			var cfg Config
 			if err := c.Decode(&cfg); err != nil {
@@ -279,6 +279,7 @@ func (s *Sim) publish(ctx context.Context) {
 	assert, env := s.world, s.env
 	var facts []world.Fact
 	var rels []world.Relation
+	var entities []world.Entity
 	type gone struct{ from, typ, to string }
 	var retract []gone
 	now := s.clock.Now()
@@ -297,6 +298,8 @@ func (s *Sim) publish(ctx context.Context) {
 	slices.Sort(refs)
 	for _, ref := range refs {
 		d := s.deps[ref]
+		entities = append(entities, world.Entity{TenantID: s.cfg.Tenant, Ref: d.Ref, Kind: "deployment", Source: "sim-k8s",
+			Attributes: map[string]string{action.AttrUID: d.Ref}})
 		for p, v := range map[string]string{"image": d.Image, "generation": strconv.Itoa(d.generation),
 			"replicas": strconv.Itoa(d.Replicas), "traffic_percent": strconv.Itoa(d.traffic), "changes_applied": strconv.Itoa(d.changes)} {
 			fact(d.Ref, p, v)
@@ -326,6 +329,11 @@ func (s *Sim) publish(ctx context.Context) {
 	if assert != nil {
 		for _, f := range facts {
 			_ = assert(ctx, f)
+		}
+	}
+	if env.UpsertEntity != nil {
+		for _, ent := range entities {
+			_ = env.UpsertEntity(ctx, ent)
 		}
 	}
 	if env.AssertRelation != nil {

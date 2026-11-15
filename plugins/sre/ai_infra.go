@@ -112,7 +112,7 @@ var inferenceQueries = []string{"ttft_p95", "ttft_p99", "queue_depth", "running"
 	"tokens_per_gpu_second", "hourly_cost_usd"}
 
 func (s InferenceService) expr(query string) (string, error) {
-	if e, ok, err := s.exprV3(query); ok || err != nil {
+	if e, ok, err := s.exprDiagnosis(query); ok || err != nil {
 		return e, err
 	}
 	m := engines[s.Engine]
@@ -262,7 +262,7 @@ func newAIInfra(cfg AIInfraConfig, k *kubernetes) ([]capability.Capability, erro
 			if s.QueueLimit <= 0 {
 				s.QueueLimit = 16
 			}
-			if err := s.validateV3(); err != nil {
+			if err := s.validateDiagnosis(); err != nil {
 				return nil, fmt.Errorf("ai_infra: %s: %w", ref, err)
 			}
 			if _, dup := inf.byRef[ref]; dup {
@@ -642,7 +642,7 @@ func (i *inference) snapshot(ctx context.Context, s InferenceService) (snapshot,
 			*q.dst = &v
 		}
 	}
-	i.snapshotV3(ctx, s, &snap)
+	i.snapshotDiagnosis(ctx, s, &snap)
 	return snap, nil
 }
 

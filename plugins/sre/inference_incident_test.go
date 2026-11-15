@@ -16,12 +16,12 @@ func TestInferenceIncidentTemplatesRegistered(t *testing.T) {
 		}
 		byID[tpl.ID] = tpl
 	}
-	for _, id := range []string{"inference-latency", "inference-continuous", "inference-incident-v2", "inference-mitigation-v2", "inference-rca-v2"} {
+	for _, id := range []string{"inference-latency", "inference-continuous", "inference-incident", "inference-mitigation", "inference-rca"} {
 		if _, ok := byID[id]; !ok {
 			t.Fatalf("missing registered template %s", id)
 		}
 	}
-	parent := byID["inference-incident-v2"]
+	parent := byID["inference-incident"]
 	if parent.Graph == nil || len(parent.Graph.Children) != 2 || parent.Stages[0].Type != work.StageChildren || parent.Stages[len(parent.Stages)-1].Type != work.StageVerify {
 		t.Fatalf("not a machine-verified parallel parent: %+v", parent)
 	}
@@ -33,7 +33,7 @@ func TestInferenceIncidentTemplatesRegistered(t *testing.T) {
 			t.Fatal("RCA blocks recovery or permits writes")
 		}
 	}
-	mit := byID["inference-mitigation-v2"]
+	mit := byID["inference-mitigation"]
 	if mit.Stages[1].Action == nil || mit.Stages[1].Action.FromProposal != "investigate" || len(mit.Stages[1].Action.Allowed) == 0 || mit.Stages[len(mit.Stages)-1].Type != work.StageVerify {
 		t.Fatalf("missing controlled mitigation: %+v", mit)
 	}
@@ -41,7 +41,7 @@ func TestInferenceIncidentTemplatesRegistered(t *testing.T) {
 
 func TestInferenceMitigationRequiresMachineGoalWhenStandalone(t *testing.T) {
 	for _, tpl := range InferenceIncidentTemplates() {
-		if tpl.ID == "inference-rca-v2" {
+		if tpl.ID == "inference-rca" {
 			continue
 		}
 		for _, spec := range []*outcome.Spec{nil, {AllOf: []outcome.Objective{{ID: "ack", Kind: outcome.KindHuman}}}, {AllOf: []outcome.Objective{{ID: "ready", Kind: outcome.KindState, Optional: true, State: &outcome.StateExpr{Predicate: "ready", Equals: "yes"}}}}} {

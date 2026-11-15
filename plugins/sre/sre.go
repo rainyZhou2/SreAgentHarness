@@ -1,4 +1,4 @@
-// Package sre is the production SRE domain pack for the v2 control plane:
+// Package sre is the production SRE domain pack for the control plane:
 // real adapters for Prometheus/Alertmanager, Kubernetes, OpenTelemetry,
 // GitOps (GitHub + Argo CD), Istio traffic, a CMDB and a Jira-compatible
 // tracker, plus the AI-infrastructure capabilities. Each adapter is a

@@ -47,7 +47,7 @@ func (c *CostModel) HourlyUSD(gpus float64) float64 {
 	return gpus * c.GPUHourUSD
 }
 
-// v3 metric keys and their default series per engine. Engines rename
+// Inference metric keys and their default series per engine. Engines rename
 // metrics between versions: the service's "metrics" map overrides any key.
 var engineExtra = map[string]map[string]string{
 	"vllm": {"tpot": "vllm:time_per_output_token_seconds_bucket", "e2e": "vllm:e2e_request_latency_seconds_bucket",
@@ -72,7 +72,7 @@ func (s InferenceService) metric(key string) string {
 	return engineExtra[s.Engine][key]
 }
 
-func (s InferenceService) validateV3() error {
+func (s InferenceService) validateDiagnosis() error {
 	for k, v := range s.Metrics {
 		if !metricNameRe.MatchString(v) {
 			return fmt.Errorf("metrics.%s is not a metric name", k)
@@ -120,8 +120,8 @@ func (s InferenceService) podSelector() string {
 	return `namespace="` + labelValue(ns) + `",pod=~"` + regexp.QuoteMeta(name) + `-.*"`
 }
 
-// exprV3 renders the v3 queries; ok is false for a query it does not own.
-func (s InferenceService) exprV3(query string) (string, bool, error) {
+// exprDiagnosis renders the inference diagnosis queries; ok is false for a query it does not own.
+func (s InferenceService) exprDiagnosis(query string) (string, bool, error) {
 	sel := "{" + s.Selector + "}"
 	need := func(key string) (string, error) {
 		m := s.metric(key)
@@ -199,9 +199,9 @@ func (s InferenceService) exprV3(query string) (string, bool, error) {
 	return "", false, nil
 }
 
-// snapshotV3 reads the optional signals. A signal that cannot be read is
+// snapshotDiagnosis reads the optional signals. A signal that cannot be read is
 // left out: the diagnosis then says less, it does not guess.
-func (i *inference) snapshotV3(ctx context.Context, s InferenceService, snap *snapshot) {
+func (i *inference) snapshotDiagnosis(ctx context.Context, s InferenceService, snap *snapshot) {
 	read := func(query string, dst **float64) {
 		expr, err := s.expr(query)
 		if err != nil {

@@ -90,7 +90,7 @@ func TestIncidentLoopOnSimulator(t *testing.T) {
 		}
 	}
 	rt := &action.Runtime{Store: store, Registry: reg, World: ws, Outcomes: ev, Clock: c.now, Log: quiet,
-		Policy: policy.Default(), RequireKnownTarget: false}
+		Policy: policy.Default(), RequireKnownTarget: true}
 	tpl := work.Template{ID: "incident-mitigate", Version: 1, Kind: work.KindIncident, Stages: []work.Stage{
 		{ID: "investigate", Type: work.StageRun, Phase: "investigate", Run: &work.RunSpec{Goal: "Investigate ${title} on ${subjects}"}},
 		{ID: "mitigate", Type: work.StageAction, Phase: "mitigate", Action: &work.ActionSpec{FromProposal: "investigate",
@@ -115,8 +115,12 @@ func TestIncidentLoopOnSimulator(t *testing.T) {
 	orch := &orchestration.Orchestrator{Store: store, Runs: kr, Actions: rt, Evaluator: ev, Clock: c.now, Log: quiet, Owner: "o"}
 
 	env := plugin.WorkEnv{AssertFact: func(ctx context.Context, f world.Fact) error { _, _, err := store.AssertFact(ctx, f); return err },
-		Ingest: func(ctx context.Context, e eventing.Envelope) error { _, _, err := ing.Ingest(ctx, e); return err }}
-	sim.world = env.AssertFact
+		Ingest: func(ctx context.Context, e eventing.Envelope) error { _, _, err := ing.Ingest(ctx, e); return err },
+		UpsertEntity: func(ctx context.Context, ent world.Entity) error {
+			_, err := store.UpsertEntity(ctx, ent, c.now())
+			return err
+		}}
+	sim.world, sim.env = env.AssertFact, env
 	sim.publish(ctx)
 	sim.alert(ctx, env.Ingest)
 	sim.alert(ctx, env.Ingest) // the same episode: attaches, no second Work

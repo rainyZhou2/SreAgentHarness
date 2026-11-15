@@ -465,7 +465,7 @@ func (p *prometheus) RuleLoaded(ctx context.Context, group, name string) (bool, 
 // ---- Alertmanager webhook ----
 
 // AlertmanagerConfig configures the "alertmanager" event source
-// (POST /v1/sources/alertmanager/events with the Alertmanager webhook
+// (POST /api/sources/alertmanager/events with the Alertmanager webhook
 // payload, version 4) and its default correlation rules.
 type AlertmanagerConfig struct {
 	SubjectLabels SubjectMapping `json:"subject_labels,omitempty"`
