@@ -130,8 +130,6 @@ func TestHostLifecycleSuccess(t *testing.T) {
 	}
 }
 
-type hostStateKey struct{}
-
 func TestHostStartFailureRollsBackReverse(t *testing.T) {
 	events := []string{}
 	first := newRecordingLifecycle("first", &events)

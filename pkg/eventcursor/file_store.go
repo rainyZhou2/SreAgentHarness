@@ -143,7 +143,7 @@ func (s *FileStore) Advance(ctx context.Context, key Key, sequence int64, eventI
 	}
 	tmp := file.Name()
 	defer os.Remove(tmp)
-	if err := file.Chmod(0o600); err == nil {
+	if err = file.Chmod(0o600); err == nil {
 		_, err = file.Write(data)
 	}
 	if err == nil {

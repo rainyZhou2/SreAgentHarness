@@ -203,10 +203,6 @@ func (c *Client) follow(ctx context.Context, runID string, after int64, store ev
 	}
 }
 
-func (c *Client) followOnce(ctx context.Context, runID string, after *int64, onEvent func(Event), onDelta func(Delta)) (got, ended bool, err error) {
-	return c.followOnceCommitted(ctx, runID, after, nil, eventcursor.Key{}, onEvent, onDelta)
-}
-
 func (c *Client) followOnceCommitted(ctx context.Context, runID string, after *int64, store eventcursor.Store, key eventcursor.Key, onEvent func(Event), onDelta func(Delta)) (got, ended bool, err error) {
 	r, err := c.req(ctx, http.MethodGet, "/api/runs/"+url.PathEscape(runID)+"/events/stream?include_deltas=true", nil)
 	if err != nil {
