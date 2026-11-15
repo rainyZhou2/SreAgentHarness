@@ -1,0 +1,70 @@
+.governance-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  margin-bottom: var(--space-3);
+}
+
+.governance-tab {
+  flex: 1;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.governance-tab[aria-selected="true"] {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-1);
+}
+
+.governance-table-wrap {
+  overflow: auto;
+  max-height: min(60vh, 560px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.governance-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.governance-table th,
+.governance-table td {
+  text-align: left;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.governance-table th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface-muted);
+  color: var(--color-text-subtle);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.governance-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.governance-table .chip[data-outcome="denied"],
+.governance-table .chip[data-outcome="rejected"] {
+  color: var(--color-danger);
+}
+
+.governance-table .chip[data-outcome="allowed"],
+.governance-table .chip[data-outcome="applied"] {
+  color: var(--color-success);
+}

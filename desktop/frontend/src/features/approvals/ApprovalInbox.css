@@ -1,0 +1,90 @@
+.approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  background: var(--color-surface);
+}
+
+.approval-card[data-active="true"] {
+  border-color: var(--color-accent);
+}
+
+.approval-card__head,
+.approval-card__meta,
+.approval-card__actions,
+.approval-confirm__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.approval-card__head {
+  margin-bottom: 6px;
+}
+
+.approval-card__target {
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.approval-card__spacer {
+  flex: 1;
+}
+
+.approval-card__meta {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.approval-card__hash {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-card__actions {
+  margin-top: 10px;
+}
+
+.approval-confirm {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--color-surface-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.approval-confirm h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.risk {
+  font-weight: 700;
+}
+
+.risk--r0 {
+  color: var(--color-success);
+}
+
+.risk--r1 {
+  color: var(--color-warning);
+}
+
+.risk--r2,
+.risk--r3 {
+  color: var(--color-danger);
+}

@@ -1,0 +1,77 @@
+.home-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-5) var(--space-6);
+}
+
+.home-view__intro h1 {
+  font-size: clamp(22px, 2.6vw, 30px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.home-view__intro p {
+  margin-top: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 14px;
+  max-width: 56ch;
+}
+
+.home-view__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+.home-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.home-card:hover {
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-1);
+}
+
+.home-card:active {
+  transform: translateY(1px);
+}
+
+.home-card__title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.home-card__prompt {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.home-view__hint {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
+.home-view__logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  object-fit: cover;
+  box-shadow: var(--shadow-2);
+}

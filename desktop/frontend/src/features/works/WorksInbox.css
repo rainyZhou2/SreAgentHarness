@@ -1,0 +1,221 @@
+.works-inbox {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: var(--space-3);
+  min-height: 460px;
+  max-height: min(70vh, 640px);
+}
+
+.works-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--color-border);
+  padding-right: var(--space-3);
+}
+
+.works-list__filters {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  margin-bottom: var(--space-2);
+}
+
+.works-list__filter {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.works-list__filter[aria-selected="true"] {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-1);
+}
+
+.works-list__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.works-list__item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.works-list__item:hover,
+.works-list__item:focus-visible {
+  background: var(--color-surface-muted);
+}
+
+.works-list__item[data-active="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.works-list__title {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.works-list__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.works-list__reason {
+  font-size: 11px;
+  color: var(--color-warning);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.works-detail {
+  overflow-y: auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.works-detail__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.works-detail__head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.works-detail__meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.works-detail h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-subtle);
+}
+
+.works-detail__subjects {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.works-detail__waiting {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  font-size: 12px;
+}
+
+.works-detail__controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.works-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.works-stages li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.works-stages__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-border-strong);
+}
+
+.works-stages li[data-status="done"] .works-stages__dot {
+  background: var(--color-success);
+}
+
+.works-stages li[data-status="current"] .works-stages__dot {
+  background: var(--color-accent);
+}
+
+.works-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.works-actions li {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+@media (max-width: 860px) {
+  .works-inbox {
+    grid-template-columns: 1fr;
+  }
+
+  .works-list {
+    border-right: 0;
+    padding-right: 0;
+    max-height: 220px;
+  }
+}

@@ -1,0 +1,63 @@
+.conversation-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.conversation-thread {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-4);
+}
+
+.turn-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.turn--user {
+  align-self: flex-end;
+  width: min(100%, 640px);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  background: var(--color-surface-muted);
+}
+
+.turn--assistant {
+  width: 100%;
+}
+
+.turn__role {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.turn__user-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.turn__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}

@@ -1,0 +1,49 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: transparent;
+}
+
+.app-shell[data-drawer-open="true"] {
+  grid-template-columns: auto minmax(0, 1fr) var(--drawer-width);
+}
+
+.workspace {
+  background: var(--ambient), var(--color-bg);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+@media (max-width: 1100px) {
+  .app-shell[data-drawer-open="true"] {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+}
+
+
+.app-notice {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  max-width: min(460px, calc(100vw - 36px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: var(--shadow-2);
+  font-size: 13px;
+}
+
+.app-notice span {
+  overflow-wrap: anywhere;
+}

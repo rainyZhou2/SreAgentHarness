@@ -1,0 +1,32 @@
+.run-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+.run-controls__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.run-controls__stop {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.run-controls__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+}
+
+.run-controls__accepted {
+  color: var(--color-success);
+  font-size: 13px;
+}

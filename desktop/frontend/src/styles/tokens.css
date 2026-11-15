@@ -1,0 +1,110 @@
+/*
+ * Design tokens shared by the desktop shell. The palette, glass material and
+ * control radii follow the existing SRE Harness desktop client so the React
+ * shell keeps a quiet, monochrome product surface.
+ */
+:root {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --color-bg: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f4f4f5;
+  --color-surface-raised: #ffffff;
+  --color-border: rgb(0 0 0 / 8%);
+  --color-border-strong: rgb(0 0 0 / 14%);
+  --color-text: #18181b;
+  --color-text-muted: #5f5f67;
+  --color-text-subtle: #8e8e96;
+  --color-accent: #2f63e8;
+  --color-accent-strong: #2456d6;
+  --color-accent-soft: rgb(47 99 232 / 10%);
+  --color-accent-contrast: #ffffff;
+  --color-success: #16834a;
+  --color-success-soft: rgb(22 131 74 / 10%);
+  --color-warning: #b25e09;
+  --color-warning-soft: rgb(178 94 9 / 10%);
+  --color-danger: #c8312b;
+  --color-danger-soft: rgb(200 49 43 / 10%);
+  --color-info: #2f63e8;
+  --color-info-soft: rgb(47 99 232 / 10%);
+  --color-overlay: rgb(0 0 0 / 32%);
+  --color-selection: rgb(47 99 232 / 16%);
+
+  --glass: rgb(255 255 255 / 56%);
+  --glass-strong: rgb(255 255 255 / 74%);
+  --glass-side: rgb(246 246 248 / 62%);
+  --glass-edge: rgb(255 255 255 / 70%);
+  --glass-line: rgb(0 0 0 / 7%);
+  --blur-sm: blur(12px) saturate(160%);
+  --blur-lg: blur(24px) saturate(180%);
+  --ambient:
+    radial-gradient(60rem 40rem at 85% -10%, rgb(47 99 232 / 8%), transparent 60%),
+    radial-gradient(36rem 28rem at 0% 100%, rgb(122 162 255 / 16%), transparent 65%);
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 5%);
+  --shadow-2: 0 1px 2px rgb(0 0 0 / 5%), 0 8px 24px -12px rgb(0 0 0 / 18%);
+  --shadow-drawer: 0 1px 3px rgb(0 0 0 / 8%), 0 24px 60px -20px rgb(0 0 0 / 30%);
+
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-shell: 16px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  --sidebar-width: 264px;
+  --sidebar-collapsed-width: 72px;
+  --drawer-width: 360px;
+  --content-max-width: 860px;
+  --header-height: 52px;
+  --composer-min-height: 96px;
+}
+
+[data-theme="dark"] {
+  --color-bg: #0e0e10;
+  --color-surface: #18181b;
+  --color-surface-muted: #1f1f23;
+  --color-surface-raised: #1f1f23;
+  --color-border: rgb(255 255 255 / 8%);
+  --color-border-strong: rgb(255 255 255 / 14%);
+  --color-text: #ededef;
+  --color-text-muted: #a1a1aa;
+  --color-text-subtle: #74747c;
+  --color-accent: #7aa2ff;
+  --color-accent-strong: #8ab4ff;
+  --color-accent-soft: rgb(122 162 255 / 14%);
+  --color-accent-contrast: #111113;
+  --color-success: #4cc38a;
+  --color-success-soft: rgb(76 195 138 / 12%);
+  --color-warning: #e7a33e;
+  --color-warning-soft: rgb(231 163 62 / 12%);
+  --color-danger: #f2706a;
+  --color-danger-soft: rgb(242 112 106 / 12%);
+  --color-info: #7aa2ff;
+  --color-info-soft: rgb(122 162 255 / 12%);
+  --color-overlay: rgb(0 0 0 / 62%);
+  --color-selection: rgb(122 162 255 / 22%);
+
+  --glass: rgb(40 40 46 / 52%);
+  --glass-strong: rgb(30 30 34 / 72%);
+  --glass-side: rgb(22 22 26 / 58%);
+  --glass-edge: rgb(255 255 255 / 7%);
+  --glass-line: rgb(255 255 255 / 8%);
+  --ambient:
+    radial-gradient(60rem 40rem at 85% -10%, rgb(122 162 255 / 10%), transparent 60%),
+    radial-gradient(40rem 30rem at -10% 110%, rgb(122 162 255 / 6%), transparent 60%);
+
+  --shadow-2: 0 1px 3px rgb(0 0 0 / 50%), 0 24px 60px -20px rgb(0 0 0 / 70%);
+  --shadow-drawer: 0 1px 3px rgb(0 0 0 / 50%), 0 24px 60px -20px rgb(0 0 0 / 70%);
+}

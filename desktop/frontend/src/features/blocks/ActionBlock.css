@@ -1,0 +1,103 @@
+.action-block {
+  border-color: var(--color-border-strong);
+}
+
+.action-block[data-tone="warning"] {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.action-block[data-tone="danger"] {
+  border-color: var(--color-danger);
+  background: var(--color-danger-soft);
+}
+
+.action-block__badges {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.action-block__risk {
+  font-weight: 600;
+  color: var(--color-warning);
+  border-color: var(--color-warning);
+}
+
+.action-block__hash {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.action-block__warning,
+.action-block__danger {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  font-size: 13px;
+}
+
+.action-block__warning {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.action-block__danger p,
+.action-block__warning p {
+  color: inherit;
+  opacity: 0.9;
+}
+
+.action-block__success {
+  padding: var(--space-3);
+  border: 1px solid var(--color-success);
+  border-radius: var(--radius-md);
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.action-block__notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--color-danger);
+  font-size: 13px;
+}
+
+.action-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.action-confirm h3 {
+  font-size: 14px;
+}
+
+.action-confirm__target,
+.action-confirm__hash {
+  color: var(--color-text);
+}
+
+.action-confirm__hash {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

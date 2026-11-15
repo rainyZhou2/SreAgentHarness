@@ -1,0 +1,10 @@
+.evidence-block__summary {
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.chip--warning {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}

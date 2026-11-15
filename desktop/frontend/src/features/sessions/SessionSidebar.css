@@ -1,0 +1,344 @@
+.session-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  height: 100%;
+  padding: var(--space-3);
+  border-right: 1px solid var(--glass-line);
+  background: var(--glass-side);
+  box-shadow: inset -1px 0 0 var(--glass-edge);
+  -webkit-backdrop-filter: var(--blur-lg);
+  backdrop-filter: var(--blur-lg);
+}
+
+.session-sidebar[data-collapsed="true"] {
+  width: var(--sidebar-collapsed-width);
+  min-width: var(--sidebar-collapsed-width);
+  align-items: center;
+  padding-inline: var(--space-2);
+}
+
+.session-sidebar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__brand {
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.session-sidebar__logo {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.session-sidebar__name {
+  flex: 1;
+  font-weight: 650;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-sidebar__collapse {
+  min-width: 28px;
+  padding-inline: 6px;
+}
+
+.session-sidebar__actions,
+.session-sidebar__search {
+  width: 100%;
+}
+
+.session-sidebar__new {
+  width: 100%;
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__new {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.session-sidebar__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.session-sidebar__skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1);
+}
+
+.session-sidebar__skeleton {
+  height: 34px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  animation: sidebar-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes sidebar-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.session-sidebar__note {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+  padding: 0 var(--space-1);
+}
+
+.session-sidebar__error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  font-size: 13px;
+}
+
+.session-sidebar__error-detail {
+  overflow-wrap: anywhere;
+  opacity: 0.85;
+}
+
+.session-sidebar__empty {
+  padding: var(--space-3) var(--space-1);
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-item:hover {
+  background: var(--color-surface-muted);
+}
+
+.session-item[data-active="true"] {
+  border-color: var(--color-border);
+  background: var(--color-accent-soft);
+}
+
+.session-sidebar[data-collapsed="true"] .session-list {
+  width: 100%;
+}
+
+.session-sidebar[data-collapsed="true"] .session-item {
+  align-items: center;
+  padding: var(--space-2) 0;
+}
+
+.session-item__title {
+  width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-item__initial {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-item[data-active="true"] .session-item__initial {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.session-item__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+.session-item__active {
+  color: var(--color-info);
+  font-weight: 600;
+}
+
+.session-sidebar__footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  width: 100%;
+}
+
+.session-sidebar__connection {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.session-sidebar__status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-danger);
+}
+
+.session-sidebar__status-dot[data-online="true"] {
+  background: var(--color-success);
+}
+
+.session-sidebar__account {
+  overflow: hidden;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-sidebar__settings {
+  justify-content: flex-start;
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__settings {
+  justify-content: center;
+  width: 100%;
+}
+
+.session-sidebar__filters {
+  display: flex;
+  gap: var(--space-1);
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.session-sidebar__filter {
+  flex: 1;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 6px;
+  cursor: pointer;
+}
+
+.session-sidebar__filter[aria-selected="true"] {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-1);
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  position: relative;
+}
+
+.session-row .session-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-sidebar__approvals {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__approvals {
+  justify-content: center;
+  width: auto;
+}
+
+.session-sidebar__approvals:hover,
+.session-sidebar__approvals:focus-visible {
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+}
+
+.session-sidebar__badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding-inline: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--color-danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+/* Native macOS windows draw the traffic lights over the sidebar's top-left
+   corner. Reserve their height and make the brand row the drag surface. */
+html.native .session-sidebar {
+  padding-top: 44px;
+}
+
+html.native .session-sidebar__brand {
+  --wails-draggable: drag;
+}
+
+html.native .session-sidebar__brand button {
+  --wails-draggable: no-drag;
+}

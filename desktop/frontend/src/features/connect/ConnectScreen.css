@@ -1,0 +1,121 @@
+.connect-screen {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: var(--space-6);
+  background:
+    radial-gradient(1200px 500px at 20% -10%, var(--color-accent-soft), transparent 60%),
+    var(--color-bg);
+}
+
+.connect-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: min(480px, 100%);
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-2);
+}
+
+.connect-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.connect-logo {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+}
+
+.connect-header h1 {
+  font-size: 19px;
+}
+
+.connect-header p {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.connect-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.connect-tab {
+  flex: 1;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.connect-tab[aria-selected="true"] {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-1);
+}
+
+.connect-tab:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.connect-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.connect-hint {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.connect-auth {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.connect-auth legend {
+  width: 100%;
+  margin-bottom: var(--space-1);
+  padding: 0;
+}
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.connect-dev-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.connect-submit {
+  width: 100%;
+  margin-top: var(--space-1);
+}
