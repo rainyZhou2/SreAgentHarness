@@ -22,7 +22,7 @@ type localWork struct {
 
 func (w *localWork) close() { _ = w.store.Close() }
 
-// buildLocalWork assembles the v2 control plane on a separate SQLite file
+// buildLocalWork assembles the control plane on a separate SQLite file
 // (<data dir>/controlplane.db) when HARNESS_WORK_ENGINE_ENABLED is set.
 func buildLocalWork(ctx context.Context, cfg Config, local LocalFile, server *api.Server, pol policy.Gate,
 	metrics *obs.Metrics, embedder memory.Embedder) (*localWork, error) {

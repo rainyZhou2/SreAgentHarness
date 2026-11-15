@@ -14,18 +14,18 @@ const MaxBody = 1 << 20
 
 // API exposes the trigger routes:
 //
-//	POST /v1/triggers/{name}   deliver an event (operator)
-//	GET  /v1/triggers          list configured triggers (viewer)
+//	POST /api/triggers/{name}   deliver an event (operator)
+//	GET  /api/triggers          list configured triggers (viewer)
 type API struct {
 	Service *Service
 }
 
 func (a *API) RouteRoles() map[string]auth.Role {
-	return map[string]auth.Role{"POST /v1/triggers/{name}": auth.Operator, "GET /v1/triggers": auth.Viewer}
+	return map[string]auth.Role{"POST /api/triggers/{name}": auth.Operator, "GET /api/triggers": auth.Viewer}
 }
 
 func (a *API) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/triggers", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/triggers", func(w http.ResponseWriter, r *http.Request) {
 		p, ok := auth.FromContext(r.Context())
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
@@ -33,7 +33,7 @@ func (a *API) Register(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"triggers": a.Service.List(p.Tenant)})
 	})
-	mux.HandleFunc("POST /v1/triggers/{name}", a.deliver)
+	mux.HandleFunc("POST /api/triggers/{name}", a.deliver)
 }
 
 func (a *API) deliver(w http.ResponseWriter, r *http.Request) {

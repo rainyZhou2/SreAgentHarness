@@ -14,13 +14,13 @@ import (
 	"go-sre-harness/internal/trigger"
 )
 
-// TriggerSourcePrefix marks inbox events mirrored from v1 triggers.
+// TriggerSourcePrefix marks inbox events mirrored from legacy triggers.
 const TriggerSourcePrefix = "trigger:"
 
-// TriggerMirror feeds v1 webhook events into the v2 event inbox (RFC P0-3:
-// "trigger 新旧模式 Feature Flag，先使用 Shadow Mode 做事件关联比对"). v1 keeps
-// creating runs; the inbox records what v2 would have done, labelled with
-// what v1 did, for ShadowReport.
+// TriggerMirror feeds legacy webhook events into the current Work event inbox
+// (RFC P0-3: "trigger 新旧模式 Feature Flag，先使用 Shadow Mode 做事件关联比对").
+// The legacy path keeps creating runs; the inbox records what current routing
+// would have done, labelled with the legacy outcome, for ShadowReport.
 type TriggerMirror struct {
 	Ingestor *Ingestor
 }
@@ -35,9 +35,9 @@ func (m TriggerMirror) MirrorTriggerEvent(ctx context.Context, e trigger.MirrorE
 	return err
 }
 
-// MirrorEnvelope converts a v1 trigger event into a v2 envelope. The event
-// id is derived from the trigger, fingerprint and item, so redeliveries of
-// one webhook event are deduplicated by the inbox.
+// MirrorEnvelope converts a legacy trigger event into a current event envelope.
+// The event id is derived from the trigger, fingerprint and item, so redeliveries
+// of one webhook event are deduplicated by the inbox.
 func MirrorEnvelope(e trigger.MirrorEvent) (eventing.Envelope, error) {
 	item, err := json.Marshal(e.Item)
 	if err != nil {
@@ -63,9 +63,9 @@ func MirrorEnvelope(e trigger.MirrorEvent) (eventing.Envelope, error) {
 		labels[k] = cpkit.Truncate(e.Labels[k], eventing.MaxLabelValue)
 	}
 	labels["trigger"] = cpkit.Truncate(e.Trigger, eventing.MaxLabelValue)
-	labels["v1_action"] = e.V1Action
-	if e.V1RunID != "" {
-		labels["v1_run_id"] = e.V1RunID
+	labels["v1_action"] = e.LegacyAction
+	if e.LegacyRunID != "" {
+		labels["v1_run_id"] = e.LegacyRunID
 	}
 	if e.Incident != "" {
 		labels["incident"] = cpkit.Truncate(e.Incident, eventing.MaxLabelValue)
@@ -80,45 +80,47 @@ func MirrorEnvelope(e trigger.MirrorEvent) (eventing.Envelope, error) {
 		Confidence: 1, Labels: labels, Payload: item}, nil
 }
 
-// ShadowRow compares one mirrored event's v1 outcome with the v2 decision.
+// ShadowRow compares one mirrored event's legacy outcome with the current decision.
 type ShadowRow struct {
-	InboxID   string    `json:"inbox_id"`
-	Trigger   string    `json:"trigger"`
-	Subject   string    `json:"subject_ref"`
-	At        time.Time `json:"occurred_at"`
-	V1        string    `json:"v1_action"`
-	V1RunID   string    `json:"v1_run_id,omitempty"`
-	V2        string    `json:"v2_decision"`
-	V2Would   string    `json:"v2_would"` // create | attach | ignore | watch | none
-	Rule      string    `json:"rule,omitempty"`
-	Agrees    bool      `json:"agrees"`
-	Reason    string    `json:"reason,omitempty"`
-	WorkID    string    `json:"work_id,omitempty"`
-	Duplicate bool      `json:"-"`
+	InboxID         string    `json:"inbox_id"`
+	Trigger         string    `json:"trigger"`
+	Subject         string    `json:"subject_ref"`
+	At              time.Time `json:"occurred_at"`
+	LegacyAction    string    `json:"legacy_action"`
+	LegacyRunID     string    `json:"legacy_run_id,omitempty"`
+	CurrentDecision string    `json:"decision"`
+	CurrentWouldDo  string    `json:"would_do"` // create | attach | ignore | watch | none
+	Rule            string    `json:"rule,omitempty"`
+	Agrees          bool      `json:"agrees"`
+	Reason          string    `json:"reason,omitempty"`
+	WorkID          string    `json:"work_id,omitempty"`
+	Duplicate       bool      `json:"-"`
 }
 
-// ShadowReport summarizes v1/v2 agreement over a period.
+// ShadowReport summarizes legacy/current agreement over a period.
 type ShadowReport struct {
 	Since         time.Time         `json:"since"`
 	Until         time.Time         `json:"until"`
 	Events        int               `json:"events"`
 	Agreements    int               `json:"agreements"`
 	AgreementRate float64           `json:"agreement_rate"`
-	Matrix        map[string]int    `json:"matrix"` // "v1_action→v2_would"
+	Matrix        map[string]int    `json:"matrix"` // "legacy_action→would_do"
 	Disagreements []ShadowRow       `json:"disagreements"`
 	ByTrigger     map[string][2]int `json:"by_trigger"` // [events, agreements]
 }
 
-// v1 outcomes that mean "a new investigation was started".
-func v1Creates(a string) bool { return a == trigger.ActionCreated }
+// Legacy outcomes that mean "a new investigation was started".
+func legacyCreates(a string) bool { return a == trigger.ActionCreated }
 
-// v1 outcomes that mean "folded into an existing investigation".
-func v1Attaches(a string) bool { return a == trigger.ActionDuplicate || a == trigger.ActionResolved }
+// Legacy outcomes that mean "folded into an existing investigation".
+func legacyAttaches(a string) bool {
+	return a == trigger.ActionDuplicate || a == trigger.ActionResolved
+}
 
-// ShadowReport compares mirrored v1 trigger events with the v2 routing over
-// [since, until] (at most limit events, newest first). In shadow mode v2
-// does not correlate, so "would create" vs "would attach" is reconstructed
-// from the rule's group key and window, exactly as live correlation would.
+// ShadowReport compares mirrored legacy trigger events with current routing over
+// [since, until] (at most limit events, newest first). In shadow mode the
+// current engine does not correlate, so "would create" vs "would attach" is
+// reconstructed from the rule's group key and window, exactly as live correlation would.
 func (in *Ingestor) ShadowReport(ctx context.Context, tenantID string, since, until time.Time, limit int) (ShadowReport, error) {
 	recs, err := in.Store.ListEvents(ctx, cpsql.EventFilter{TenantID: tenantID, SourcePrefix: TriggerSourcePrefix,
 		Since: since, Until: until, Limit: limit})
@@ -142,9 +144,9 @@ func (in *Ingestor) ShadowReport(ctx context.Context, tenantID string, since, un
 	for _, rec := range recs {
 		env := rec.Envelope
 		row := ShadowRow{InboxID: rec.InboxID, Trigger: env.Labels["trigger"], Subject: env.SubjectRef, At: env.OccurredAt,
-			V1: env.Labels["v1_action"], V1RunID: env.Labels["v1_run_id"], V2: rec.Decision, WorkID: rec.WorkID}
-		row.V2Would, row.Rule = in.wouldDo(rec, rules, lastSeen)
-		row.Agrees, row.Reason = agree(row.V1, row.V2Would)
+			LegacyAction: env.Labels["v1_action"], LegacyRunID: env.Labels["v1_run_id"], CurrentDecision: rec.Decision, WorkID: rec.WorkID}
+		row.CurrentWouldDo, row.Rule = in.wouldDo(rec, rules, lastSeen)
+		row.Agrees, row.Reason = agree(row.LegacyAction, row.CurrentWouldDo)
 		rep.Events++
 		bt := rep.ByTrigger[row.Trigger]
 		bt[0]++
@@ -155,7 +157,7 @@ func (in *Ingestor) ShadowReport(ctx context.Context, tenantID string, since, un
 			rep.Disagreements = append(rep.Disagreements, row)
 		}
 		rep.ByTrigger[row.Trigger] = bt
-		rep.Matrix[row.V1+"→"+row.V2Would]++
+		rep.Matrix[row.LegacyAction+"→"+row.CurrentWouldDo]++
 	}
 	if rep.Events > 0 {
 		rep.AgreementRate = float64(rep.Agreements) / float64(rep.Events)
@@ -203,18 +205,18 @@ func (in *Ingestor) wouldDo(rec eventing.Record, rules map[string]eventing.Rule,
 	return "none", ""
 }
 
-func agree(v1, v2 string) (bool, string) {
+func agree(legacy, current string) (bool, string) {
 	switch {
-	case v1Creates(v1) && v2 == "create", v1Attaches(v1) && v2 == "attach":
+	case legacyCreates(legacy) && current == "create", legacyAttaches(legacy) && current == "attach":
 		return true, ""
-	case (v1 == trigger.ActionIgnored || v1 == trigger.ActionRateLimited) && (v2 == "ignore" || v2 == "attach"):
+	case (legacy == trigger.ActionIgnored || legacy == trigger.ActionRateLimited) && (current == "ignore" || current == "attach"):
 		return true, ""
-	case v1 == trigger.ActionError:
-		return false, "v1 failed to handle the event"
-	case v1Creates(v1):
-		return false, fmt.Sprintf("v1 started a run, v2 would %s", v2)
-	case v1Attaches(v1) && v2 == "create":
-		return false, "v1 deduplicated the event, v2 would open a new Work"
+	case legacy == trigger.ActionError:
+		return false, "legacy trigger failed to handle the event"
+	case legacyCreates(legacy):
+		return false, fmt.Sprintf("legacy trigger started a run; current routing would %s", current)
+	case legacyAttaches(legacy) && current == "create":
+		return false, "legacy trigger deduplicated the event; current routing would open a new Work"
 	}
-	return false, fmt.Sprintf("v1 %s, v2 would %s", v1, v2)
+	return false, fmt.Sprintf("legacy trigger %s; current routing would %s", legacy, current)
 }

@@ -39,6 +39,12 @@ func (s *Service) log() *slog.Logger {
 	return slog.Default()
 }
 
+// CreateCause explicitly links a new Incident to a dispatched mitigation Action.
+type CreateCause struct {
+	IncidentID string `json:"incident_id"`
+	ActionID   string `json:"action_id"`
+}
+
 // CreateRequest creates a Work.
 type CreateRequest struct {
 	TenantID       string          `json:"-"`
@@ -52,6 +58,7 @@ type CreateRequest struct {
 	Template       *work.Template  `json:"template_spec,omitempty"`
 	Priority       int             `json:"priority,omitempty"`
 	Queue          work.Queue      `json:"queue,omitempty"`
+	CausedBy       *CreateCause    `json:"caused_by,omitempty"`
 	Meta           json.RawMessage `json:"-"`
 }
 
@@ -83,6 +90,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (work.Work, boo
 	req.Goal.SubjectRefs = refs
 	for _, r := range refs {
 		subjects = append(subjects, work.SubjectLink{Kind: "subject", ID: r})
+	}
+	if req.CausedBy != nil {
+		cause, err := s.validateCauseLinks(ctx, req.TenantID, req.Kind, req.Goal.SubjectRefs, *req.CausedBy)
+		if err != nil {
+			return work.Work{}, false, err
+		}
+		subjects = append(subjects, cause.Links...)
 	}
 	actorType := req.ActorType
 	if actorType == "" {

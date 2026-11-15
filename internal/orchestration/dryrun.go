@@ -21,7 +21,7 @@ type DryRunStep struct {
 }
 
 // DryRunPlan is the simulation of a template for a goal (design §13.3
-// `POST /v1/work-templates/{id}/dry-run`). Nothing is created, started or
+// `POST /api/work-templates/{id}/dry-run`). Nothing is created, started or
 // dispatched: it answers "what would this Work do, and could it?" from the
 // template, the goal and the registered actions alone.
 type DryRunPlan struct {

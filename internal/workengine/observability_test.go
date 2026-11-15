@@ -33,7 +33,7 @@ func TestDashboardsReferenceExportedMetrics(t *testing.T) {
 	m := obs.NewMetrics()
 	om := orchestration.NewMetrics(m.Reg, s)
 	om.GuardDenied("scope", "x") // counters export once touched
-	// v3 metrics are exported once touched too.
+	// Current control-plane metrics are exported once touched too.
 	om.RunWake("woken")
 	om.Dispatch("deployment.rollback", "R2", "applied")
 	om.Reconciled("applied", time.Second)

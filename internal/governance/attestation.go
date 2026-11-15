@@ -45,7 +45,7 @@ func ParseTier(s string) (Tier, error) {
 type Stage string
 
 const (
-	G0 Stage = "G0" // legacy: v1 only
+	G0 Stage = "G0" // engine disabled
 	G1 Stage = "G1" // shadow: events mirrored and compared, no Works from events
 	G2 Stage = "G2" // read-only: Works, watches, RCA, drafts; no actions
 	G3 Stage = "G3" // dry-run: preflight and approval, dispatch simulated
@@ -56,9 +56,10 @@ const (
 // Flags are the rollout switches the gate looks at (a copy of the work
 // engine's, so this package does not depend on it).
 type Flags struct {
-	Engine                  bool `json:"engine"`
-	Shadow                  bool `json:"shadow"`
-	ActionV2                bool `json:"action_v2"`
+	Engine bool `json:"engine"`
+	Shadow bool `json:"shadow"`
+	// Actions enables the action runtime and action stages.
+	Actions                 bool `json:"actions"`
 	ActionDryRun            bool `json:"action_dry_run"`
 	RequireKnownTarget      bool `json:"require_known_target"`
 	RequireDistinctApprover bool `json:"require_distinct_approver"`
@@ -92,10 +93,11 @@ type ActionInfo struct {
 
 // Input is everything the gate judges.
 type Input struct {
-	Tier          Tier
-	Flags         Flags
-	BuildSHA      string
-	SchemaVersion string
+	Tier           Tier
+	Flags          Flags
+	ReleaseVersion string
+	BuildSHA       string
+	SchemaVersion  string
 	// ExpectedSchema is the newest migration compiled into the binary.
 	ExpectedSchema string
 	Store          string // postgres | sqlite
@@ -138,16 +140,17 @@ type Check struct {
 
 // Attestation is the launch attestation of a deployment.
 type Attestation struct {
-	BuildSHA      string            `json:"build_sha"`
-	SchemaVersion string            `json:"schema_version"`
-	Tier          string            `json:"tier"`
-	Stage         Stage             `json:"stage"`
-	Capabilities  []string          `json:"capabilities"`
-	DataSources   []string          `json:"data_sources"`
-	PolicyDigest  string            `json:"policy_digest"`
-	ConfigDigest  string            `json:"config_digest"`
-	Gates         map[string]string `json:"gates"`
-	GeneratedAt   time.Time         `json:"generated_at"`
+	BuildSHA       string            `json:"build_sha"`
+	ReleaseVersion string            `json:"release_version"`
+	SchemaVersion  string            `json:"schema_version"`
+	Tier           string            `json:"tier"`
+	Stage          Stage             `json:"stage"`
+	Capabilities   []string          `json:"capabilities"`
+	DataSources    []string          `json:"data_sources"`
+	PolicyDigest   string            `json:"policy_digest"`
+	ConfigDigest   string            `json:"config_digest"`
+	Gates          map[string]string `json:"gates"`
+	GeneratedAt    time.Time         `json:"generated_at"`
 
 	// RequestedStage is what the flags asked for; Stage is what the gate
 	// allows. They differ when the deployment was degraded.
@@ -177,7 +180,7 @@ func StageOf(f Flags) Stage {
 		return G0
 	case f.Shadow:
 		return G1
-	case !f.ActionV2:
+	case !f.Actions:
 		return G2
 	case f.ActionDryRun:
 		return G3
@@ -190,7 +193,11 @@ func StageOf(f Flags) Stage {
 // Evaluate judges a deployment. It has no side effects and calls nothing:
 // the caller collects the input (including source probes).
 func Evaluate(in Input) Attestation {
-	a := Attestation{BuildSHA: in.BuildSHA, SchemaVersion: in.SchemaVersion, Tier: string(in.Tier),
+	releaseVersion := strings.TrimSpace(in.ReleaseVersion)
+	if releaseVersion == "" {
+		releaseVersion = "dev"
+	}
+	a := Attestation{BuildSHA: in.BuildSHA, ReleaseVersion: releaseVersion, SchemaVersion: in.SchemaVersion, Tier: string(in.Tier),
 		Capabilities: append([]string(nil), in.Capabilities...), PolicyDigest: in.PolicyDigest, ConfigDigest: in.ConfigDigest,
 		Gates: map[string]string{}, GeneratedAt: in.Now, RequestedStage: StageOf(in.Flags), Effective: in.Flags, Mode: ModeNormal}
 	sort.Strings(a.Capabilities)
@@ -250,7 +257,7 @@ func Evaluate(in Input) Attestation {
 			}
 		}
 		block := ""
-		if prod && f.ActionV2 {
+		if prod && f.Actions {
 			// Outcome verification reads these sources: without them an
 			// action's effect could not be judged.
 			block = "actions"
@@ -263,7 +270,7 @@ func Evaluate(in Input) Attestation {
 	}
 
 	// ---- actions (G3+) ----
-	if f.ActionV2 {
+	if f.Actions {
 		block := ""
 		if prod {
 			block = "actions"
@@ -337,7 +344,7 @@ func Evaluate(in Input) Attestation {
 	}
 	if a.Mode == ModeInvestigation {
 		// Degrade, never widen: keep the read path, withhold dispatch.
-		a.Effective.ActionV2, a.Effective.ActionDryRun, a.Effective.Preauthorized = false, false, nil
+		a.Effective.Actions, a.Effective.ActionDryRun, a.Effective.Preauthorized = false, false, nil
 	}
 	a.Stage = StageOf(a.Effective)
 	if a.Mode == ModeRefused {

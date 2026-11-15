@@ -1,13 +1,14 @@
-// Package workengine assembles the v2 control plane (Works, events,
-// watches, world state, actions, outcomes) for the team server and the
-// local app, behind feature flags:
+// Package workengine assembles the control plane (Works, events, watches,
+// world state, actions, outcomes) for the team server and the local app.
+// Complete capabilities are enabled by default; these switches remain as
+// explicit rollout and rollback controls:
 //
-//	HARNESS_WORK_ENGINE_ENABLED  Work API, orchestrator, watches (default off)
-//	HARNESS_EVENT_SHADOW_MODE    events are routed and recorded, no Works are
-//	                             created from them (default on while rolling out)
-//	HARNESS_ACTION_V2_ENABLED    action runtime and action stages (default off)
+//	HARNESS_WORK_ENGINE_ENABLED  Work API, orchestrator, watches (default on)
+//	HARNESS_EVENT_SHADOW_MODE    record routing decisions without creating Works
+//	                             (default off)
+//	HARNESS_ACTIONS_ENABLED      action runtime and action stages (default on)
 //
-// With the engine off nothing here runs and the v1 run API is unchanged.
+// With the engine off nothing here runs and the run API is unchanged.
 package workengine
 
 import (
@@ -74,9 +75,9 @@ type Config struct {
 
 // Flags are the rollout switches.
 type Flags struct {
-	Engine   bool
-	Shadow   bool
-	ActionV2 bool
+	Engine  bool
+	Shadow  bool
+	Actions bool
 	// RequireDistinctApprover forbids a Work owner to approve its actions.
 	RequireDistinctApprover bool
 	// RequireKnownTarget rejects action targets the world does not know.
@@ -125,6 +126,15 @@ func csv(v string) []string {
 	return out
 }
 
+func actionEnabled(getenv func(string) string) bool {
+	current := strings.TrimSpace(getenv("HARNESS_ACTIONS_ENABLED"))
+	if current != "" {
+		v, err := strconv.ParseBool(current)
+		return err == nil && v
+	}
+	return true
+}
+
 // FlagsFromEnv reads the flags.
 func FlagsFromEnv(getenv func(string) string) Flags {
 	b := func(k string, def bool) bool {
@@ -133,9 +143,9 @@ func FlagsFromEnv(getenv func(string) string) Flags {
 		}
 		return def
 	}
-	f := Flags{Engine: b("HARNESS_WORK_ENGINE_ENABLED", false), Shadow: b("HARNESS_EVENT_SHADOW_MODE", true),
-		ActionV2: b("HARNESS_ACTION_V2_ENABLED", false), RequireDistinctApprover: b("HARNESS_REQUIRE_DISTINCT_APPROVER", false),
-		RequireKnownTarget: b("HARNESS_ACTION_REQUIRE_KNOWN_TARGET", false), InlineTemplates: b("HARNESS_WORK_INLINE_TEMPLATES", false),
+	f := Flags{Engine: b("HARNESS_WORK_ENGINE_ENABLED", true), Shadow: b("HARNESS_EVENT_SHADOW_MODE", false),
+		Actions: actionEnabled(getenv), RequireDistinctApprover: b("HARNESS_REQUIRE_DISTINCT_APPROVER", true),
+		RequireKnownTarget: b("HARNESS_ACTION_REQUIRE_KNOWN_TARGET", true), InlineTemplates: b("HARNESS_WORK_INLINE_TEMPLATES", true),
 		ApprovalTTL: 30 * time.Minute, EvidencePlanning: b("HARNESS_EVIDENCE_PLANNING", true)}
 	if d, err := time.ParseDuration(getenv("HARNESS_ACTION_APPROVAL_TTL")); err == nil && d > 0 {
 		f.ApprovalTTL = d
@@ -326,7 +336,7 @@ func New(o Options) (*Engine, error) {
 	if att.Mode == governance.ModeInvestigation {
 		log.Warn("deployment gate: production actions are withheld; running in investigation mode",
 			"tier", att.Tier, "requested_stage", att.RequestedStage, "stage", att.Stage, "reasons", att.Reasons)
-		o.Flags.ActionV2, o.Flags.ActionDryRun, o.Flags.Preauthorized = false, false, nil
+		o.Flags.Actions, o.Flags.ActionDryRun, o.Flags.Preauthorized = false, false, nil
 	}
 	sources2, err := eventSources(o.Config.EventSources)
 	if err != nil {
@@ -344,7 +354,7 @@ func New(o Options) (*Engine, error) {
 		m.RegisterPools(o.Metrics, pools)
 	}
 	var rt *action.Runtime
-	if o.Flags.ActionV2 {
+	if o.Flags.Actions {
 		gate := o.Policy
 		if gate == nil {
 			gate = policy.Default()
@@ -406,7 +416,7 @@ func New(o Options) (*Engine, error) {
 			rt.Observer = m
 		}
 	}
-	log.Info("work engine assembled", "shadow_events", o.Flags.Shadow, "actions_v2", o.Flags.ActionV2,
+	log.Info("work engine assembled", "shadow_events", o.Flags.Shadow, "actions", o.Flags.Actions,
 		"templates", len(cat.List()), "correlation_rules", len(o.Config.CorrelationRules),
 		"actions", len(reg.Descriptors()), "metric_sources", len(metricSources))
 	return e, nil

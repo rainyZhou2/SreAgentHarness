@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"go-sre-harness/internal/alerting"
 	"go-sre-harness/internal/continuous"
 	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/eventing"
@@ -93,6 +94,7 @@ type Ingestor struct {
 	Log         *slog.Logger
 	Metrics     *Metrics
 	MaxAttempts int
+	AlertPolicy alerting.Policy
 	// Sources are the operator-declared event sources: which types each may
 	// send and how late an event may open a Work (design §9.3). A source
 	// without an entry is bound by the caller's scope only.
@@ -217,6 +219,23 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record, dec *eventin
 	if err != nil {
 		return "", "", "", err
 	}
+	var alertProjection *alerting.Projection
+	if alerting.SupportedEvent(env) {
+		input, err := alerting.NewInput(env, rec.InboxID, in.AlertPolicy)
+		if err != nil {
+			return "", "", "", err
+		}
+		projection, err := in.Store.ProjectAlert(ctx, input)
+		if err != nil {
+			return "", "", "", err
+		}
+		alertProjection = &projection
+		dec.Alert = &eventing.AlertReference{InstanceID: projection.Instance.ID, SymptomID: projection.Symptom.ID,
+			Resolution: projection.Instance.Resolution, NotificationSuppressed: projection.Instance.NotificationSuppressed}
+		if projection.Episode != nil {
+			dec.Alert.EpisodeID = projection.Episode.ID
+		}
+	}
 	rule, ok := in.Router.Route(&env)
 	if ok {
 		dec.RuleName, dec.RuleVersion = rule.Name, rule.Version()
@@ -237,6 +256,12 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record, dec *eventin
 		return "", "no_rule", eventing.StateIgnored, nil
 	}
 	group := "rule:" + rule.GroupName() + "|" + rule.GroupKey(&env)
+	if rule.Key == eventing.KeySymptom {
+		if alertProjection == nil {
+			return "", "", "", fmt.Errorf("%w: symptom correlation requires an alert event", eventing.ErrRule)
+		}
+		group = "symptom:" + alertProjection.Symptom.Key
+	}
 	window := rule.Window.D()
 	if window <= 0 {
 		window = eventing.DefaultWindow
@@ -246,9 +271,17 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record, dec *eventin
 		dec.Reason = "shadow mode: the decision is recorded, no Work is created"
 		return firedWork, "shadow:" + rule.Action + ":" + rule.Name, eventing.StateProcessed, nil
 	}
+	payload := map[string]any{"inbox_id": rec.InboxID, "type": env.Type, "source": env.Source,
+		"subject_ref": env.SubjectRef, "rule": rule.Name}
+	if alertProjection != nil {
+		payload["alert_instance_id"] = alertProjection.Instance.ID
+		payload["alert_episode_id"] = alertProjection.Instance.EpisodeID
+		payload["alert_symptom_id"] = alertProjection.Symptom.ID
+		payload["alert_resolution"] = alertProjection.Instance.Resolution
+		payload["notification_suppressed"] = alertProjection.Instance.NotificationSuppressed
+	}
 	req := cpsql.CorrelateRequest{TenantID: env.TenantID, GroupKey: group, Rule: rule.Name, Window: window, Now: now,
-		EventID: rec.InboxID, Payload: map[string]any{"inbox_id": rec.InboxID, "type": env.Type, "source": env.Source,
-			"subject_ref": env.SubjectRef, "rule": rule.Name}}
+		EventID: rec.InboxID, Payload: payload}
 	if dec.Late {
 		// A late event joins the Work that is open for its group; it never
 		// opens a new one and never restarts a closed generation.

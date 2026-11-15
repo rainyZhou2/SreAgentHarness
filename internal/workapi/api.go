@@ -1,34 +1,34 @@
-// Package workapi exposes the v2 control plane over HTTP as an api.Server
+// Package workapi exposes the control plane over HTTP as an api.Server
 // extension:
 //
-//	POST /v1/works                         create a Work (operator; Idempotency-Key)
-//	GET  /v1/works                         list Works (viewer; ?status=&kind=&queue=&subject=)
-//	GET  /v1/works/{id}                    read a Work (ETag = version)
-//	GET  /v1/works/{id}/events             timeline page (after_seq, limit)
-//	GET  /v1/works/{id}/events/stream      timeline SSE (Last-Event-ID / after_seq)
-//	GET  /v1/works/{id}/runs|evidence|hypotheses|watches|outcomes|actions|evaluation
-//	GET  /v1/works/{id}/assignments        agent assignments per stage with results
-//	GET  /v1/works/{id}/goals              goal of every generation
-//	POST /v1/works/{id}/commands           pause|resume|cancel|replan|resolve|wake|set_queue (operator),
+//	POST /api/works                         create a Work (operator; Idempotency-Key)
+//	GET  /api/works                         list Works (viewer; ?status=&kind=&queue=&subject=)
+//	GET  /api/works/{id}                    read a Work (ETag = version)
+//	GET  /api/works/{id}/events             timeline page (after_seq, limit)
+//	GET  /api/works/{id}/events/stream      timeline SSE (Last-Event-ID / after_seq)
+//	GET  /api/works/{id}/runs|evidence|hypotheses|watches|outcomes|actions|evaluation
+//	GET  /api/works/{id}/assignments        agent assignments per stage with results
+//	GET  /api/works/{id}/goals              goal of every generation
+//	POST /api/works/{id}/commands           pause|resume|cancel|replan|resolve|wake|set_queue (operator),
 //	                                       confirm|reopen (approver); Idempotency-Key, If-Match
-//	GET  /v1/work-templates                template catalog
-//	POST /v1/works/{id}/evidence           attach evidence (operator; untrusted tier unless admin)
-//	POST /v1/works/{id}/playbook           propose a Playbook candidate from a verified Work (operator)
-//	POST /v1/events                        ingest an event envelope (service or operator, within scope)
-//	GET  /v1/events/{id}                   inbox record
-//	GET  /v1/actions/{id}/effects          kernel tool effects on the action's target
-//	POST /v1/sources/{source}/events       source-native webhook via a domain capability (service)
-//	GET  /v1/events/shadow-report          v1 trigger vs v2 routing agreement (?since=&until=)
-//	GET  /v1/world/entities                ?ref= or ?attr=&value=
-//	GET  /v1/world/facts                   ?subject=&predicate=&as_of=&known_at=
-//	POST /v1/world/facts                   assert a fact (operator; untrusted tier unless admin)
-//	POST /v1/world/snapshots/query         bitemporal snapshot (viewer)
-//	GET  /v1/world/snapshots/{id}
-//	GET  /v1/actions/{id}
-//	POST /v1/actions/{id}/approve          approve/reject bound to intent_hash (approver)
-//	POST /v1/actions/{id}/reconcile        read-only reconcile of an unknown effect (operator)
-//	POST /v1/actions/{id}/resolve          human resolution of an unknown effect (approver)
-//	POST /v1/actions/{id}/break-glass      emergency release with justification (break_glass role)
+//	GET  /api/work-templates                template catalog
+//	POST /api/works/{id}/evidence           attach evidence (operator; untrusted tier unless admin)
+//	POST /api/works/{id}/playbook           propose a Playbook candidate from a verified Work (operator)
+//	POST /api/events                        ingest an event envelope (service or operator, within scope)
+//	GET  /api/events/{id}                   inbox record
+//	GET  /api/actions/{id}/effects          kernel tool effects on the action's target
+//	POST /api/sources/{source}/events       source-native webhook via a domain capability (service)
+//	GET  /api/events/shadow-report          legacy trigger vs current routing agreement (?since=&until=)
+//	GET  /api/world/entities                ?ref= or ?attr=&value=
+//	GET  /api/world/facts                   ?subject=&predicate=&as_of=&known_at=
+//	POST /api/world/facts                   assert a fact (operator; untrusted tier unless admin)
+//	POST /api/world/snapshots/query         bitemporal snapshot (viewer)
+//	GET  /api/world/snapshots/{id}
+//	GET  /api/actions/{id}
+//	POST /api/actions/{id}/approve          approve/reject bound to intent_hash (approver)
+//	POST /api/actions/{id}/reconcile        read-only reconcile of an unknown effect (operator)
+//	POST /api/actions/{id}/resolve          human resolution of an unknown effect (approver)
+//	POST /api/actions/{id}/break-glass      emergency release with justification (break_glass role)
 //
 // Every query is scoped to the authenticated tenant (and PostgreSQL RLS
 // through the request's tenant setting). Principals with a Scope are
@@ -55,6 +55,7 @@ import (
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/evidence"
 	"go-sre-harness/internal/governance"
+	"go-sre-harness/internal/impact"
 	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/observability"
 	"go-sre-harness/internal/orchestration"
@@ -62,6 +63,8 @@ import (
 	"go-sre-harness/internal/playbook"
 	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/protocol"
+	"go-sre-harness/internal/quota"
+	"go-sre-harness/internal/runbook"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/work"
@@ -149,166 +152,6 @@ func (a *API) log() *slog.Logger {
 	return slog.Default()
 }
 
-// RouteRoles declares the minimum role per route.
-func (a *API) RouteRoles() map[string]auth.Role {
-	roles := a.v2Roles()
-	for route, role := range a.v3Roles() {
-		roles[route] = role
-	}
-	return roles
-}
-
-func (a *API) v2Roles() map[string]auth.Role {
-	return map[string]auth.Role{
-		"POST /v1/works":                    auth.Operator,
-		"GET /v1/works":                     auth.Viewer,
-		"GET /v1/works/{id}":                auth.Viewer,
-		"GET /v1/works/{id}/events":         auth.Viewer,
-		"GET /v1/works/{id}/events/stream":  auth.Viewer,
-		"GET /v1/works/{id}/runs":           auth.Viewer,
-		"GET /v1/works/{id}/evidence":       auth.Viewer,
-		"POST /v1/works/{id}/evidence":      auth.Operator,
-		"POST /v1/works/{id}/playbook":      auth.Operator,
-		"GET /v1/works/{id}/postmortem":     auth.Viewer,
-		"POST /v1/works/{id}/postmortem":    auth.Operator,
-		"GET /v1/works/{id}/hypotheses":     auth.Viewer,
-		"GET /v1/works/{id}/decisions":      auth.Viewer,
-		"GET /v1/works/{id}/watches":        auth.Viewer,
-		"GET /v1/works/{id}/outcomes":       auth.Viewer,
-		"GET /v1/works/{id}/evaluation":     auth.Viewer,
-		"GET /v1/works/{id}/actions":        auth.Viewer,
-		"POST /v1/works/{id}/commands":      auth.Operator,
-		"GET /v1/work-templates":            auth.Viewer,
-		"POST /v1/events":                   auth.Service,
-		"GET /v1/events/{id}":               auth.Viewer,
-		"GET /v1/world/entities":            auth.Viewer,
-		"GET /v1/world/facts":               auth.Viewer,
-		"POST /v1/world/facts":              auth.Operator,
-		"POST /v1/world/snapshots/query":    auth.Viewer,
-		"GET /v1/world/snapshots/{id}":      auth.Viewer,
-		"GET /v1/actions/{id}":              auth.Viewer,
-		"POST /v1/actions/{id}/approve":     auth.Approver,
-		"POST /v1/actions/{id}/reconcile":   auth.Operator,
-		"POST /v1/actions/{id}/resolve":     auth.Approver,
-		"POST /v1/actions/{id}/break-glass": auth.BreakGlass,
-		"GET /v1/events/shadow-report":      auth.Viewer,
-		"POST /v1/sources/{source}/events":  auth.Service,
-		"GET /v1/works/{id}/assignments":    auth.Viewer,
-		"GET /v1/works/{id}/goals":          auth.Viewer,
-		"GET /v1/actions/{id}/effects":      auth.Viewer,
-	}
-}
-
-// Register mounts the routes.
-func (a *API) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/works", a.createWork)
-	mux.HandleFunc("GET /v1/works", a.listWorks)
-	mux.HandleFunc("GET /v1/works/{id}", a.getWork)
-	mux.HandleFunc("GET /v1/works/{id}/events", a.workEvents)
-	mux.HandleFunc("GET /v1/works/{id}/events/stream", a.streamEvents)
-	mux.HandleFunc("GET /v1/works/{id}/runs", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListRunLinks(ctx, t, id)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/evidence", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListEvidence(ctx, t, id, 500)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/hypotheses", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		w, err := a.Store.GetWork(ctx, t, id)
-		if err != nil {
-			return nil, err
-		}
-		hs, err := a.Store.ListHypotheses(ctx, t, id)
-		if err != nil {
-			return nil, err
-		}
-		ledger, err := a.Store.ListEvidence(ctx, t, id, evidence.MaxDecisionEvidence)
-		if err != nil {
-			return nil, err
-		}
-		scope := evidence.DecisionScope{TenantID: t, WorkID: id, Generation: w.Generation}
-		type view struct {
-			evidence.Hypothesis
-			DecisionCurrent bool `json:"decision_current"`
-		}
-		out := make([]view, 0, len(hs))
-		at := a.Clock.Now().UTC()
-		for _, h := range hs {
-			out = append(out, view{Hypothesis: h, DecisionCurrent: h.ValidDecisionFor(scope, ledger, at)})
-		}
-		return out, nil
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/decisions", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		w, err := a.Store.GetWork(ctx, t, id)
-		if err != nil {
-			return nil, err
-		}
-		hs, err := a.Store.ListHypotheses(ctx, t, id)
-		if err != nil {
-			return nil, err
-		}
-		ledger, err := a.Store.ListEvidence(ctx, t, id, evidence.MaxDecisionEvidence)
-		if err != nil {
-			return nil, err
-		}
-		decisions := []evidence.DecisionVerdict{}
-		scope := evidence.DecisionScope{TenantID: t, WorkID: id, Generation: w.Generation}
-		at := a.Clock.Now().UTC()
-		for _, h := range hs {
-			if h.ValidDecisionFor(scope, ledger, at) {
-				decisions = append(decisions, *h.Decision)
-			}
-		}
-		return decisions, nil
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/watches", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListWatches(ctx, t, id, false)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/evaluation", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		if a.Eval == nil {
-			return nil, fmt.Errorf("%w: work evaluation is not configured", work.ErrInvalid)
-		}
-		return a.Eval.Score(ctx, t, id)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/outcomes", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListOutcomes(ctx, t, id, 100)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/actions", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListActions(ctx, t, id)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/assignments", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.assignments(ctx, t, id)
-	}))
-	mux.HandleFunc("GET /v1/works/{id}/goals", a.sub(func(ctx context.Context, t, id string) (any, error) {
-		return a.Store.ListGoals(ctx, t, id)
-	}))
-	mux.HandleFunc("POST /v1/works/{id}/commands", a.command)
-	mux.HandleFunc("GET /v1/work-templates", func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := principal(w, r); ok {
-			writeJSON(w, http.StatusOK, map[string]any{"templates": a.Service.Catalog.List()})
-		}
-	})
-	mux.HandleFunc("POST /v1/events", a.ingest)
-	mux.HandleFunc("GET /v1/events/{id}", a.getEvent)
-	mux.HandleFunc("GET /v1/world/entities", a.entities)
-	mux.HandleFunc("GET /v1/world/facts", a.facts)
-	mux.HandleFunc("POST /v1/world/facts", a.assertFact)
-	mux.HandleFunc("POST /v1/world/snapshots/query", a.snapshot)
-	mux.HandleFunc("GET /v1/world/snapshots/{id}", a.getSnapshot)
-	mux.HandleFunc("GET /v1/actions/{id}", a.getAction)
-	mux.HandleFunc("GET /v1/actions/{id}/effects", a.actionEffects)
-	mux.HandleFunc("POST /v1/actions/{id}/approve", a.approve)
-	mux.HandleFunc("POST /v1/actions/{id}/reconcile", a.reconcile)
-	mux.HandleFunc("POST /v1/actions/{id}/resolve", a.resolve)
-	mux.HandleFunc("POST /v1/actions/{id}/break-glass", a.breakGlass)
-	mux.HandleFunc("POST /v1/works/{id}/evidence", a.addEvidence)
-	mux.HandleFunc("POST /v1/works/{id}/playbook", a.proposePlaybook)
-	mux.HandleFunc("GET /v1/works/{id}/postmortem", a.getPostmortem)
-	mux.HandleFunc("POST /v1/works/{id}/postmortem", a.createPostmortem)
-	mux.HandleFunc("GET /v1/events/shadow-report", a.shadowReport)
-	mux.HandleFunc("POST /v1/sources/{source}/events", a.sourceEvents)
-	a.registerV3(mux)
-}
-
 // ---- helpers ----
 
 func principal(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
@@ -352,6 +195,16 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
 	var te *work.TransitionError
 	switch {
+	case errors.Is(err, orchestration.ErrOverloaded):
+		w.Header().Set("Retry-After", "30")
+		writeErr(w, http.StatusTooManyRequests, "overloaded", err.Error())
+	case errors.Is(err, observability.ErrNotFound), errors.Is(err, runbook.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
+	case errors.Is(err, observability.ErrVersionConflict), errors.Is(err, runbook.ErrVersionConflict):
+		writeErr(w, http.StatusPreconditionFailed, "version_mismatch", "the resource changed; reload and retry")
+	case errors.Is(err, observability.ErrInvalid), errors.Is(err, runbook.ErrInvalid), errors.Is(err, impact.ErrInvalid),
+		errors.Is(err, quota.ErrInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, work.ErrNotFound), errors.Is(err, action.ErrNotFound), errors.Is(err, world.ErrNotFound),
 		errors.Is(err, cpsql.ErrEvidenceNotFound):
 		writeErr(w, http.StatusNotFound, "not_found", "not found")
@@ -364,6 +217,8 @@ func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeErr(w, http.StatusConflict, "version_conflict", "concurrent update; retry")
 	case errors.Is(err, work.ErrIdempotencyConflict):
 		writeErr(w, http.StatusUnprocessableEntity, "idempotency_conflict", "the idempotency key was used with a different request")
+	case errors.Is(err, work.ErrCauseConflict):
+		writeErr(w, http.StatusConflict, "cause_conflict", "the Incident already has a different cause")
 	case errors.As(err, &te), errors.Is(err, work.ErrInvalidTransition):
 		writeErr(w, http.StatusConflict, "invalid_transition", err.Error())
 	case errors.Is(err, work.ErrLimit):
@@ -494,7 +349,7 @@ func (a *API) createWork(w http.ResponseWriter, r *http.Request) {
 	req.TenantID, req.ActorID, req.ActorType, req.IdempotencyKey = p.Tenant, p.Subject, "user", key
 	wk, created, err := a.Service.Create(r.Context(), req)
 	if err != nil {
-		a.failV3(w, r, err)
+		a.fail(w, r, err)
 		return
 	}
 	code := http.StatusOK
@@ -503,7 +358,7 @@ func (a *API) createWork(w http.ResponseWriter, r *http.Request) {
 		a.log().Info("work created", "tenant", p.Tenant, "work_id", wk.ID, "kind", wk.Kind, "actor", p.Subject)
 	}
 	etag(w, wk.Version)
-	w.Header().Set("Location", "/v1/works/"+wk.ID)
+	w.Header().Set("Location", "/api/works/"+wk.ID)
 	writeJSON(w, code, wk)
 }
 
@@ -853,7 +708,7 @@ func (a *API) ingest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
 		return
 	}
-	// Schema 1 and the v2 wire envelope are both accepted.
+	// The legacy stored schema and current wire envelope are both accepted.
 	env, err := eventing.Upcast(body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -1102,7 +957,7 @@ func (a *API) actionEffects(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) actionsEnabled(w http.ResponseWriter) bool {
 	if a.Actions == nil {
-		writeErr(w, http.StatusServiceUnavailable, "disabled", "the action runtime is disabled (HARNESS_ACTION_V2_ENABLED)")
+		writeErr(w, http.StatusServiceUnavailable, "disabled", "the action runtime is disabled (HARNESS_ACTIONS_ENABLED)")
 		return false
 	}
 	return true
@@ -1366,7 +1221,7 @@ func (a *API) addEvidence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, out)
 }
 
-// shadowReport compares v1 trigger outcomes with v2 routing decisions for
+// shadowReport compares legacy trigger outcomes with current routing decisions for
 // mirrored events (default: the last 24 hours).
 func (a *API) shadowReport(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
@@ -1494,7 +1349,7 @@ func (a *API) createPostmortem(w http.ResponseWriter, r *http.Request) {
 		a.audit(r.Context(), p, "work.create_postmortem", "work", wk.ID, "applied", map[string]any{"source_work": src.ID})
 	}
 	etag(w, wk.Version)
-	w.Header().Set("Location", "/v1/works/"+wk.ID)
+	w.Header().Set("Location", "/api/works/"+wk.ID)
 	writeJSON(w, code, wk)
 }
 

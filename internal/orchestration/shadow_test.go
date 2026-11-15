@@ -13,8 +13,8 @@ import (
 	"go-sre-harness/internal/work"
 )
 
-// RFC P0-3: v1 triggers keep running; their events are mirrored into the
-// inbox in shadow mode, and the report shows where v2 routing would differ.
+// RFC P0-3: legacy triggers keep running; their events are mirrored into the
+// inbox in shadow mode, and the report shows where current routing would differ.
 func TestShadowMirrorAndReport(t *testing.T) {
 	ctx := context.Background()
 	s, err := cpsql.OpenSQLite(filepath.Join(t.TempDir(), "cp.db"))
@@ -32,11 +32,11 @@ func TestShadowMirrorAndReport(t *testing.T) {
 	cat, _ := NewCatalog(nil)
 	in := &Ingestor{Store: s, Router: router, Catalog: cat, Shadow: true, Clock: clock.Now, Log: quiet}
 	m := TriggerMirror{Ingestor: in}
-	send := func(fp, v1 string, item map[string]any) {
+	send := func(fp, legacyAction string, item map[string]any) {
 		t.Helper()
 		if err := m.MirrorTriggerEvent(ctx, trigger.MirrorEvent{Trigger: "alerts", TenantID: "t1", Fingerprint: fp,
 			Goal: "Investigate", Services: []string{"checkout"}, Labels: map[string]string{"severity": "critical"},
-			Item: item, ReceivedAt: clock.Now(), V1Action: v1, V1RunID: map[bool]string{true: cpkit.NewID()}[v1 == trigger.ActionCreated]}); err != nil {
+			Item: item, ReceivedAt: clock.Now(), LegacyAction: legacyAction, LegacyRunID: map[bool]string{true: cpkit.NewID()}[legacyAction == trigger.ActionCreated]}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -46,8 +46,8 @@ func TestShadowMirrorAndReport(t *testing.T) {
 	send("fpA", trigger.ActionDuplicate, map[string]any{"n": 2}) // agree: attach
 	send("fpB", trigger.ActionCreated, map[string]any{"n": 3})   // agree: create
 	clock.Add(10 * time.Minute)
-	// v1's dedup window expired (shorter) but v2's 30m window still holds:
-	// v1 starts a second run, v2 would attach to the open Work.
+	// The legacy dedup window expired (shorter) but the current 30m window still holds:
+	// the legacy path starts a second run; current routing would attach to the open Work.
 	send("fpA", trigger.ActionCreated, map[string]any{"n": 4})
 
 	if ws, _ := s.ListWorks(ctx, work.Filter{TenantID: "t1"}); len(ws) != 0 {
@@ -69,7 +69,7 @@ func TestShadowMirrorAndReport(t *testing.T) {
 		t.Fatalf("report: %+v", rep)
 	}
 	d := rep.Disagreements[0]
-	if d.V1 != trigger.ActionCreated || d.V2Would != "attach" || d.Rule != "alerts" {
+	if d.LegacyAction != trigger.ActionCreated || d.CurrentWouldDo != "attach" || d.Rule != "alerts" {
 		t.Fatalf("disagreement: %+v", d)
 	}
 	if rep.Matrix["created→create"] != 2 || rep.Matrix["deduplicated→attach"] != 1 || rep.ByTrigger["alerts"] != [2]int{4, 3} {

@@ -7,9 +7,9 @@ import (
 	"go-sre-harness/internal/orchestration"
 )
 
-// The shipped v2 demo config must load and validate.
-func TestV2DemoConfig(t *testing.T) {
-	f, err := loadLocalFile("../../scripts/v2/harness.local.json", true)
+// The shipped Work demo config must load and validate.
+func TestCurrentDemoConfig(t *testing.T) {
+	f, err := loadLocalFile("../../scripts/work/harness.local.json", true)
 	if err != nil {
 		t.Fatal(err)
 	}

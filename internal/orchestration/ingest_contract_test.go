@@ -111,7 +111,7 @@ func TestTopologyAssistedCorrelationIsOnlyALead(t *testing.T) {
 	_ = work.StatusActive
 }
 
-func TestUpcastV2AndSourceSignature(t *testing.T) {
+func TestUpcastCurrentAndSourceSignature(t *testing.T) {
 	raw := []byte(`{"schema_version":2,"event_id":"am-1","source_id":"alertmanager-prod","type":"alert.firing",
 		"subject_ref":"service://prod/search-api","occurred_at":"2026-11-10T13:00:00Z","observed_at":"2026-11-10T13:00:03Z",
 		"correlation_key":"search-api:latency","labels":{"severity":"critical"}}`)
@@ -120,7 +120,7 @@ func TestUpcastV2AndSourceSignature(t *testing.T) {
 		t.Fatalf("upcast: %+v %v", e, err)
 	}
 	if _, err := eventing.Upcast([]byte(`{"schema_version":2,"event_id":"x","tenant_id":"evil"}`)); err == nil {
-		t.Fatal("a v2 body cannot name a tenant")
+		t.Fatal("a current wire body cannot name a tenant")
 	}
 	if _, err := eventing.Upcast([]byte(`{"schema_version":3}`)); err == nil {
 		t.Fatal("unknown schema version accepted")

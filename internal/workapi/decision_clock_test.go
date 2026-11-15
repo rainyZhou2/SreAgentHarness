@@ -15,7 +15,7 @@ import (
 func TestDecisionViewsUseOneInjectedClockReading(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	code, created, _ := e.do("POST", "/v1/works", "t1", "operator", map[string]any{"kind": "incident", "goal": map[string]any{"intent": "clock scoped decision"}}, map[string]string{"Idempotency-Key": "decision-clock"})
+	code, created, _ := e.do("POST", "/api/works", "t1", "operator", map[string]any{"kind": "incident", "goal": map[string]any{"intent": "clock scoped decision"}}, map[string]string{"Idempotency-Key": "decision-clock"})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, created)
 	}
@@ -54,7 +54,7 @@ func TestDecisionViewsUseOneInjectedClockReading(t *testing.T) {
 	for _, suffix := range []string{"/decisions", "/hypotheses"} {
 		t.Run(suffix, func(t *testing.T) {
 			calls = 0
-			code, body, _ := e.do("GET", "/v1/works/"+id+suffix, "t1", "viewer", nil, nil)
+			code, body, _ := e.do("GET", "/api/works/"+id+suffix, "t1", "viewer", nil, nil)
 			items, _ := body["items"].([]any)
 			if code != http.StatusOK || len(items) != 2 {
 				t.Fatalf("injected horizon ignored: %d %v", code, body)

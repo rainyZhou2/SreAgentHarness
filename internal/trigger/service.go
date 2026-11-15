@@ -73,7 +73,7 @@ type ItemResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// MirrorEvent is one webhook event as v1 handled it, offered to the v2
+// MirrorEvent is one webhook event as v1 handled it, offered to the current Work
 // event engine in shadow mode so both behaviours can be compared before
 // the switch (RFC P0-3). It carries data only; v1 does not depend on it.
 type MirrorEvent struct {
@@ -87,13 +87,13 @@ type MirrorEvent struct {
 	Labels      map[string]string
 	Item        any
 	ReceivedAt  time.Time
-	// V1Action and V1RunID are what the v1 trigger did with the event.
-	V1Action string
-	V1RunID  string
+	// LegacyAction and LegacyRunID are what the legacy trigger did with the event.
+	LegacyAction string
+	LegacyRunID  string
 }
 
-// Mirror receives v1 webhook events (e.g. the v2 event inbox). It must not
-// block or fail the v1 path; errors are logged by the caller.
+// Mirror receives legacy webhook events (e.g. the current Work event inbox). It must not
+// block or fail the legacy path; errors are logged by the caller.
 type Mirror interface {
 	MirrorTriggerEvent(ctx context.Context, e MirrorEvent) error
 }
@@ -233,7 +233,7 @@ func (s *Service) Handle(ctx context.Context, tenantID, actorID, name string, bo
 	return res, nil
 }
 
-// mirror offers a handled event to the v2 engine; it never affects v1.
+// mirror offers a handled event to the current Work engine; it never affects v1.
 func (s *Service) mirror(ctx context.Context, t *compiled, tenantID, actorID string, ev event, item any, now time.Time, r ItemResult) {
 	if s.Mirror == nil {
 		return
@@ -242,7 +242,7 @@ func (s *Service) mirror(ctx context.Context, t *compiled, tenantID, actorID str
 	defer cancel()
 	if err := s.Mirror.MirrorTriggerEvent(mctx, MirrorEvent{Trigger: t.Name, TenantID: tenantID, ActorID: actorID,
 		Fingerprint: ev.fingerprint, Goal: ev.goal, Services: ev.ctx.Services, Incident: ev.ctx.Incident,
-		Labels: ev.ctx.Labels, Item: item, ReceivedAt: now, V1Action: r.Action, V1RunID: r.RunID}); err != nil {
+		Labels: ev.ctx.Labels, Item: item, ReceivedAt: now, LegacyAction: r.Action, LegacyRunID: r.RunID}); err != nil {
 		s.Log.Warn("trigger mirror", "trigger", t.Name, "tenant", tenantID, "err", err)
 	}
 }

@@ -46,11 +46,11 @@ func TestInheritedChildRequiresMachineGoal(t *testing.T) {
 	}
 }
 
-func TestInferenceIncidentV2RecoveryDoesNotWaitForRCA(t *testing.T) {
+func TestInferenceIncidentRecoveryDoesNotWaitForRCA(t *testing.T) {
 	h := newHarness(t, domain.RiskR2)
 	h.withTemplates(sre.InferenceIncidentTemplates()...)
 	spec := &outcome.Spec{AllOf: []outcome.Objective{{ID: "image", Kind: outcome.KindState, State: &outcome.StateExpr{Predicate: "image", Equals: "v1"}, Freshness: cpkit.Duration(time.Hour)}}}
-	parent := h.create("inference-incident-v2", spec)
+	parent := h.create("inference-incident", spec)
 	h.tick(4)
 	kids, err := h.store.Children(h.ctx, "t1", parent.ID)
 	if err != nil || len(kids) != 2 {

@@ -20,7 +20,7 @@ type stageChild struct {
 }
 
 // ChildRequest creates a child Work under a parent (POST
-// /v1/works/{id}/children). The child inherits the parent's subjects and
+// /api/works/{id}/children). The child inherits the parent's subjects and
 // constraints and may only narrow them.
 type ChildRequest struct {
 	TenantID       string     `json:"-"`

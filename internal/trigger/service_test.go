@@ -393,7 +393,7 @@ func TestAPIStatusCodes(t *testing.T) {
 	mux := http.NewServeMux()
 	(&API{Service: s}).Register(mux)
 	call := func(name, body string, authed bool) int {
-		req := httptest.NewRequest(http.MethodPost, "/v1/triggers/"+name, strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/triggers/"+name, strings.NewReader(body))
 		if authed {
 			req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Tenant: "t1", Subject: "am"}))
 		}
@@ -428,8 +428,8 @@ func (m *recMirror) MirrorTriggerEvent(_ context.Context, e MirrorEvent) error {
 	return m.err
 }
 
-// The v2 mirror sees every rendered event with v1's outcome, and a failing
-// mirror never changes what v1 does.
+// The current Work mirror sees every rendered event with the legacy outcome;
+// a failing mirror never changes legacy trigger behavior.
 func TestMirrorReceivesV1Outcomes(t *testing.T) {
 	s, runs, _, _ := newService(t, alertTrigger())
 	m := &recMirror{err: errors.New("inbox unavailable")}
@@ -444,9 +444,9 @@ func TestMirrorReceivesV1Outcomes(t *testing.T) {
 	if len(runs.runs) != 1 {
 		t.Fatalf("runs: %d", len(runs.runs))
 	}
-	// Filtered events are not mirrored (v1 never rendered them).
-	if len(m.got) != 2 || m.got[0].V1Action != ActionCreated || m.got[0].V1RunID == "" ||
-		m.got[1].V1Action != ActionDuplicate || m.got[0].Fingerprint != m.got[1].Fingerprint ||
+	// Filtered events are not mirrored (the legacy path never rendered them).
+	if len(m.got) != 2 || m.got[0].LegacyAction != ActionCreated || m.got[0].LegacyRunID == "" ||
+		m.got[1].LegacyAction != ActionDuplicate || m.got[0].Fingerprint != m.got[1].Fingerprint ||
 		m.got[0].Trigger != "alerts" || m.got[0].TenantID != "t1" || len(m.got[0].Services) != 1 {
 		t.Fatalf("mirrored: %+v", m.got)
 	}

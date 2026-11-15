@@ -192,7 +192,7 @@ func TestServicePrincipalScope(t *testing.T) {
 		return map[string]any{"event_id": cpkit.NewID(), "source": source, "type": typ, "subject_ref": subject,
 			"dedup_key": "k-" + subject, "occurred_at": e.now}
 	}
-	if c, out := e.do(svc, "POST", "/v1/events", ev("alertmanager", "alert.firing", "service://prod/checkout")); c != http.StatusAccepted {
+	if c, out := e.do(svc, "POST", "/api/events", ev("alertmanager", "alert.firing", "service://prod/checkout")); c != http.StatusAccepted {
 		t.Fatalf("in-scope event: %d %v", c, out)
 	}
 	for name, body := range map[string]map[string]any{
@@ -200,7 +200,7 @@ func TestServicePrincipalScope(t *testing.T) {
 		"other type":    ev("alertmanager", "deploy.started", "service://prod/checkout"),
 		"other subject": ev("alertmanager", "alert.firing", "service://staging/checkout"),
 	} {
-		if c, _ := e.do(svc, "POST", "/v1/events", body); c != http.StatusForbidden {
+		if c, _ := e.do(svc, "POST", "/api/events", body); c != http.StatusForbidden {
 			t.Fatalf("%s: %d", name, c)
 		}
 	}
@@ -208,26 +208,26 @@ func TestServicePrincipalScope(t *testing.T) {
 		t.Fatal("scope denials must be audited")
 	}
 	// A service principal can only submit events.
-	if c, _ := e.do(svc, "POST", "/v1/works", map[string]any{"kind": "incident", "template": "incident"},
+	if c, _ := e.do(svc, "POST", "/api/works", map[string]any{"kind": "incident", "template": "incident"},
 		"Idempotency-Key", "k1"); c != http.StatusForbidden {
 		t.Fatalf("service creating a Work: %d", c)
 	}
-	if c, _ := e.do(svc, "GET", "/v1/works", nil); c != http.StatusForbidden {
+	if c, _ := e.do(svc, "GET", "/api/works", nil); c != http.StatusForbidden {
 		t.Fatalf("service reading Works: %d", c)
 	}
 	// Operators keep event ingestion (operator implies service).
 	op := caller{user: "oncall", roles: "operator"}
-	if c, _ := e.do(op, "POST", "/v1/events", ev("manual", "note.added", "service://prod/checkout")); c != http.StatusAccepted {
+	if c, _ := e.do(op, "POST", "/api/events", ev("manual", "note.added", "service://prod/checkout")); c != http.StatusAccepted {
 		t.Fatalf("operator event: %d", c)
 	}
 	// A scoped operator cannot open Works or assert facts outside its scope.
 	scoped := caller{user: "team-a", roles: "operator", scope: `{"resources":["service://prod/search*"]}`}
-	if c, _ := e.do(scoped, "POST", "/v1/works", map[string]any{"kind": "incident", "template": "incident", "title": "x",
+	if c, _ := e.do(scoped, "POST", "/api/works", map[string]any{"kind": "incident", "template": "incident", "title": "x",
 		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"}}},
 		"Idempotency-Key", "k2"); c != http.StatusForbidden {
 		t.Fatalf("scoped operator, foreign subject: %d", c)
 	}
-	if c, _ := e.do(scoped, "POST", "/v1/world/facts", map[string]any{"subject_ref": "service://prod/checkout",
+	if c, _ := e.do(scoped, "POST", "/api/world/facts", map[string]any{"subject_ref": "service://prod/checkout",
 		"predicate": "owner", "value": "x"}); c != http.StatusForbidden {
 		t.Fatalf("scoped fact: %d", c)
 	}
@@ -237,7 +237,7 @@ func TestApproverScopeAndRisk(t *testing.T) {
 	e := newSecEnv(t)
 	a := e.heldAction("deployment://prod/checkout")
 	body := map[string]any{"decision": "approve", "intent_hash": a.IntentHash}
-	path := "/v1/actions/" + a.ID + "/approve"
+	path := "/api/actions/" + a.ID + "/approve"
 
 	if c, _ := e.do(caller{user: "junior", roles: "approver", scope: `{"max_risk":"R1"}`}, "POST", path, body); c != http.StatusForbidden {
 		t.Fatalf("R1 approver on an R2 action: %d", c)
@@ -267,7 +267,7 @@ func TestApproverScopeAndRisk(t *testing.T) {
 func TestBreakGlass(t *testing.T) {
 	e := newSecEnv(t)
 	a := e.heldAction("deployment://prod/checkout")
-	path := "/v1/actions/" + a.ID + "/break-glass"
+	path := "/api/actions/" + a.ID + "/break-glass"
 	good := map[string]any{"intent_hash": a.IntentHash, "incident_ref": "INC-2026-1110",
 		"justification": "SEV1: checkout down for all users, approvers unreachable, rollback is the documented fix"}
 
@@ -323,7 +323,7 @@ func TestBreakGlass(t *testing.T) {
 func TestOperatorEvidence(t *testing.T) {
 	e := newSecEnv(t)
 	a := e.heldAction("deployment://prod/checkout")
-	path := "/v1/works/" + a.WorkID + "/evidence"
+	path := "/api/works/" + a.WorkID + "/evidence"
 	ev := map[string]any{"source_type": "human", "summary": "pod logs show OOMKilled; token=abcd1234efgh5678 leaked in env",
 		"trust_tier": "T1", "claims": []string{"oom"}}
 	if c, _ := e.do(caller{user: "viewer", roles: "viewer"}, "POST", path, ev); c != http.StatusForbidden {

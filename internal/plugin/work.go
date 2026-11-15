@@ -12,7 +12,7 @@ import (
 	"go-sre-harness/internal/world"
 )
 
-// WorkExtension contributes v2 control-plane capabilities: action
+// WorkExtension contributes current control-plane capabilities: action
 // executors (always behind the action runtime's policy, preflight,
 // approval and ledger) and named, read-only metric sources for outcome
 // verification. Built in the "work_extension" phase, after tools.
@@ -48,7 +48,7 @@ type EventContributor interface {
 
 // SourceNormalizers is optionally implemented by a WorkExtension that
 // accepts source-native webhooks (Alertmanager, Kubernetes events, Argo
-// CD, ...) at POST /v1/sources/{source}/events.
+// CD, ...) at POST /api/sources/{source}/events.
 type SourceNormalizers interface {
 	Sources() []string
 	Normalizer(source string) (func(ctx context.Context, tenantID string, h http.Header, body []byte, now time.Time) ([]eventing.Envelope, error), bool)
@@ -69,4 +69,4 @@ type WorkRunner interface {
 }
 
 // WorkExt is the extension point.
-var WorkExt = NewKind[WorkExtension]("work_extension", true, "v2 action executors and outcome metric sources (optional background feeders)")
+var WorkExt = NewKind[WorkExtension]("work_extension", true, "current action executors and outcome metric sources (optional background feeders)")

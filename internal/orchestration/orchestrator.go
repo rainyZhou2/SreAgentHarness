@@ -37,7 +37,7 @@ import (
 type Orchestrator struct {
 	Store     *cpsql.Store
 	Runs      Runs
-	Actions   *action.Runtime // nil: action stages block (HARNESS_ACTION_V2_ENABLED off)
+	Actions   *action.Runtime // nil: action stages block (HARNESS_ACTIONS_ENABLED off)
 	Evaluator *outcome.Evaluator
 	Clock     cpkit.Clock
 	Log       *slog.Logger
@@ -1169,7 +1169,7 @@ func (d *driver) actionStage(ctx context.Context, stage work.Stage, st stageStat
 	w := &d.w
 	rt := d.o.Actions
 	if rt == nil {
-		return d.block("action stages need the action runtime (HARNESS_ACTION_V2_ENABLED)"), nil
+		return d.block("action stages need the action runtime (HARNESS_ACTIONS_ENABLED)"), nil
 	}
 	spec := stage.Action
 	now := d.o.now()

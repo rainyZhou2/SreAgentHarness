@@ -12,7 +12,7 @@ import (
 	"go-sre-harness/internal/world"
 )
 
-// Metrics are the v2 control-plane metrics (RFC §21.1). Labels are bounded
+// Metrics are the control-plane metrics (RFC §21.1). Labels are bounded
 // enums only: never tenant, work id, run id, subject or free text — those
 // go to spans, logs and the audit log.
 type Metrics struct {
@@ -46,7 +46,7 @@ type Metrics struct {
 	plans          obs.Counter
 	planExcluded   obs.Counter
 
-	// v3 (design §6, §7.6, §10, §11).
+	// Scheduling, dispatch, reconciliation and correlation (design §6, §7.6, §10, §11).
 	reapedHolds   obs.Counter
 	shedWorks     obs.Counter
 	queuedLong    obs.Counter

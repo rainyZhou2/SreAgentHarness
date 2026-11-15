@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -12,8 +13,25 @@ func prodInput() Input {
 		Actions: []ActionInfo{{Name: "deployment.rollback", Risk: "R2", IdempotencyMode: "QUERY_BEFORE_RETRY", HasVersionFact: true},
 			{Name: "ticket.comment", Risk: "R1", IdempotencyMode: "NATIVE"}, {Name: "legacy.script", Risk: "R2", IdempotencyMode: "NONE"}},
 		DataSources: []SourceStatus{{ID: "prom", Kind: "metrics", State: "ACTIVE", Healthy: true, Probed: true, Required: true}},
-		Flags: Flags{Engine: true, ActionV2: true, RequireKnownTarget: true, RequireDistinctApprover: true,
+		Flags: Flags{Engine: true, Actions: true, RequireKnownTarget: true, RequireDistinctApprover: true,
 			ActionAllowlist: []string{"deployment.rollback"}, ActionScope: []string{"deployment://prod/search-api"}}}
+}
+
+func TestFlagsJSONContract(t *testing.T) {
+	raw, err := json.Marshal(Flags{Actions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["actions"] != true {
+		t.Fatalf("actions = %v, want true; JSON: %s", got["actions"], raw)
+	}
+	if _, ok := got["action_v2"]; ok {
+		t.Fatalf("removed action_v2 key remains in JSON: %s", raw)
+	}
 }
 
 func TestStages(t *testing.T) {
@@ -22,8 +40,8 @@ func TestStages(t *testing.T) {
 		want Stage
 	}{
 		{Flags{}, G0}, {Flags{Engine: true, Shadow: true}, G1}, {Flags{Engine: true}, G2},
-		{Flags{Engine: true, ActionV2: true, ActionDryRun: true}, G3}, {Flags{Engine: true, ActionV2: true}, G4},
-		{Flags{Engine: true, ActionV2: true, Preauthorized: []string{"x"}}, G5},
+		{Flags{Engine: true, Actions: true, ActionDryRun: true}, G3}, {Flags{Engine: true, Actions: true}, G4},
+		{Flags{Engine: true, Actions: true, Preauthorized: []string{"x"}}, G5},
 	} {
 		if got := StageOf(tc.f); got != tc.want {
 			t.Errorf("%+v: %s, want %s", tc.f, got, tc.want)
@@ -33,7 +51,7 @@ func TestStages(t *testing.T) {
 
 func TestProductionBoundedActionsPass(t *testing.T) {
 	a := Evaluate(prodInput())
-	if a.Mode != ModeNormal || a.Stage != G4 || !a.Effective.ActionV2 {
+	if a.Mode != ModeNormal || a.Stage != G4 || !a.Effective.Actions {
 		t.Fatalf("%s %s %v", a.Mode, a.Stage, a.Reasons)
 	}
 }
@@ -56,8 +74,8 @@ func TestProductionDegradesToInvestigation(t *testing.T) {
 		in := prodInput()
 		mut(&in)
 		a := Evaluate(in)
-		if a.Mode != ModeInvestigation || a.Effective.ActionV2 || a.Stage != G2 || !a.OK() || len(a.Reasons) == 0 {
-			t.Errorf("%s: mode=%s stage=%s action_v2=%v reasons=%v", name, a.Mode, a.Stage, a.Effective.ActionV2, a.Reasons)
+		if a.Mode != ModeInvestigation || a.Effective.Actions || a.Stage != G2 || !a.OK() || len(a.Reasons) == 0 {
+			t.Errorf("%s: mode=%s stage=%s actions=%v reasons=%v", name, a.Mode, a.Stage, a.Effective.Actions, a.Reasons)
 		}
 		if a.RequestedStage == a.Stage {
 			t.Errorf("%s: the attestation must show the requested stage", name)
@@ -84,8 +102,8 @@ func TestProductionRefusals(t *testing.T) {
 // Local and staging keep the existing behaviour: the gate only reports.
 func TestLocalIsPermissive(t *testing.T) {
 	a := Evaluate(Input{Tier: TierLocal, Store: "sqlite", AuthMode: "dev", ArtifactStore: "memory",
-		Flags: Flags{Engine: true, ActionV2: true}})
-	if a.Mode != ModeNormal || !a.Effective.ActionV2 {
+		Flags: Flags{Engine: true, Actions: true}})
+	if a.Mode != ModeNormal || !a.Effective.Actions {
 		t.Fatalf("local: %s %v", a.Mode, a.Reasons)
 	}
 }

@@ -40,7 +40,7 @@ type LocalFile struct {
 	// list.
 	PlannerReactPatterns []string `json:"planner_react_patterns,omitempty"`
 	PlannerFlowPatterns  []string `json:"planner_flow_patterns,omitempty"`
-	// Work configures the v2 control plane (HARNESS_WORK_ENGINE_ENABLED):
+	// Work configures the control plane (HARNESS_WORK_ENGINE_ENABLED):
 	// templates and correlation rules.
 	Work workengine.Config `json:"work,omitempty"`
 	// WorkExtensions enables compiled-in work_extension plugins (action

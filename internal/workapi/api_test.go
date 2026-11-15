@@ -90,33 +90,33 @@ func TestWorkAPI(t *testing.T) {
 	body := map[string]any{"kind": "incident", "title": "checkout 5xx",
 		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"}}}
 
-	if code, _, _ := e.do("POST", "/v1/works", "t1", "operator", body, nil); code != http.StatusBadRequest {
+	if code, _, _ := e.do("POST", "/api/works", "t1", "operator", body, nil); code != http.StatusBadRequest {
 		t.Fatalf("missing idempotency key: %d", code)
 	}
-	if code, _, _ := e.do("POST", "/v1/works", "t1", "viewer", body, map[string]string{"Idempotency-Key": "k1"}); code != http.StatusForbidden {
+	if code, _, _ := e.do("POST", "/api/works", "t1", "viewer", body, map[string]string{"Idempotency-Key": "k1"}); code != http.StatusForbidden {
 		t.Fatalf("viewer create: %d", code)
 	}
-	code, w1, hdr := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "k1"})
+	code, w1, hdr := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "k1"})
 	if code != http.StatusCreated || hdr.Get("ETag") != `"1"` {
 		t.Fatalf("create: %d %v %s", code, w1, hdr.Get("ETag"))
 	}
 	id := w1["id"].(string)
-	code, w2, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "k1"})
+	code, w2, _ := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "k1"})
 	if code != http.StatusOK || w2["id"] != id {
 		t.Fatalf("replay: %d", code)
 	}
 	body["title"] = "other"
-	if code, _, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "k1"}); code != http.StatusUnprocessableEntity {
+	if code, _, _ := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "k1"}); code != http.StatusUnprocessableEntity {
 		t.Fatalf("idempotency conflict: %d", code)
 	}
 	// T18: other tenants cannot see the Work.
-	if code, _, _ := e.do("GET", "/v1/works/"+id, "t2", "viewer", nil, nil); code != http.StatusNotFound {
+	if code, _, _ := e.do("GET", "/api/works/"+id, "t2", "viewer", nil, nil); code != http.StatusNotFound {
 		t.Fatalf("tenant isolation: %d", code)
 	}
-	if code, _, _ := e.do("GET", "/v1/works/"+id+"/events", "t2", "viewer", nil, nil); code != http.StatusNotFound {
+	if code, _, _ := e.do("GET", "/api/works/"+id+"/events", "t2", "viewer", nil, nil); code != http.StatusNotFound {
 		t.Fatalf("tenant isolation (events): %d", code)
 	}
-	code, list, _ := e.do("GET", "/v1/works?status=NEW", "t1", "viewer", nil, nil)
+	code, list, _ := e.do("GET", "/api/works?status=NEW", "t1", "viewer", nil, nil)
 	if code != 200 || len(list["items"].([]any)) != 1 {
 		t.Fatalf("list: %d %v", code, list)
 	}
@@ -127,7 +127,7 @@ func TestWorkAPI(t *testing.T) {
 		if ifm != "" {
 			h["If-Match"] = ifm
 		}
-		code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", roles, map[string]any{"type": typ, "payload": payload}, h)
+		code, _, _ := e.do("POST", "/api/works/"+id+"/commands", "t1", roles, map[string]any{"type": typ, "payload": payload}, h)
 		return code
 	}
 	if c := cmd(work.CmdPause, `"9"`, "operator", nil); c != http.StatusPreconditionFailed {
@@ -142,7 +142,7 @@ func TestWorkAPI(t *testing.T) {
 	if c := cmd(work.CmdCancel, `"1"`, "operator", nil); c != http.StatusOK {
 		t.Fatalf("cancel: %d", c)
 	}
-	code, got, _ := e.do("GET", "/v1/works/"+id, "t1", "viewer", nil, nil)
+	code, got, _ := e.do("GET", "/api/works/"+id, "t1", "viewer", nil, nil)
 	if code != 200 || got["status"] != "CANCELLED" {
 		t.Fatalf("after cancel: %v", got)
 	}
@@ -150,37 +150,37 @@ func TestWorkAPI(t *testing.T) {
 	// Events: tenant is forced; redelivery is a duplicate.
 	ev := map[string]any{"event_id": "a1", "source": "am", "type": "alert.firing", "subject_ref": "service://prod/checkout",
 		"dedup_key": "fp"}
-	code, r1, _ := e.do("POST", "/v1/events", "t1", "operator", ev, nil)
+	code, r1, _ := e.do("POST", "/api/events", "t1", "operator", ev, nil)
 	if code != http.StatusAccepted || r1["decision"] != "created" {
 		t.Fatalf("ingest: %d %v", code, r1)
 	}
-	code, r2, _ := e.do("POST", "/v1/events", "t1", "operator", ev, nil)
+	code, r2, _ := e.do("POST", "/api/events", "t1", "operator", ev, nil)
 	if code != http.StatusOK || r2["duplicate"] != true {
 		t.Fatalf("duplicate: %d %v", code, r2)
 	}
 	ev["tenant_id"] = "t2"
-	if code, _, _ := e.do("POST", "/v1/events", "t1", "operator", ev, nil); code != http.StatusForbidden {
+	if code, _, _ := e.do("POST", "/api/events", "t1", "operator", ev, nil); code != http.StatusForbidden {
 		t.Fatalf("cross-tenant ingest: %d", code)
 	}
 
 	// World: facts posted through the API are untrusted.
 	fact := map[string]any{"subject_ref": "service://prod/checkout", "predicate": "replicas", "value": "3",
 		"trust_tier": "T1"}
-	code, f, _ := e.do("POST", "/v1/world/facts", "t1", "operator", fact, nil)
+	code, f, _ := e.do("POST", "/api/world/facts", "t1", "operator", fact, nil)
 	if code != http.StatusCreated || f["trust_tier"] != "T4" {
 		t.Fatalf("assert fact: %d %v", code, f)
 	}
-	code, fs, _ := e.do("GET", "/v1/world/facts?subject=service://prod/checkout", "t1", "viewer", nil, nil)
+	code, fs, _ := e.do("GET", "/api/world/facts?subject=service://prod/checkout", "t1", "viewer", nil, nil)
 	if code != 200 || len(fs["items"].([]any)) != 1 {
 		t.Fatalf("facts: %d %v", code, fs)
 	}
-	code, snap, _ := e.do("POST", "/v1/world/snapshots/query", "t1", "viewer",
+	code, snap, _ := e.do("POST", "/api/world/snapshots/query", "t1", "viewer",
 		map[string]any{"subjects": []string{"service://prod/checkout"}, "required": []string{"replicas", "image"}}, nil)
 	if code != 200 || len(snap["missing"].([]any)) != 1 {
 		t.Fatalf("snapshot: %d %v", code, snap)
 	}
 	// Actions are disabled in this server.
-	if code, _, _ := e.do("POST", "/v1/actions/x/approve", "t1", "approver", map[string]any{}, nil); code != http.StatusServiceUnavailable {
+	if code, _, _ := e.do("POST", "/api/actions/x/approve", "t1", "approver", map[string]any{}, nil); code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled actions: %d", code)
 	}
 }
@@ -191,7 +191,7 @@ func TestGoalAmendmentAndAssignments(t *testing.T) {
 	e := newEnv(t)
 	body := map[string]any{"kind": "incident", "title": "checkout 5xx",
 		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"}}}
-	code, w1, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "g1"})
+	code, w1, _ := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "g1"})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, w1)
 	}
@@ -199,11 +199,11 @@ func TestGoalAmendmentAndAssignments(t *testing.T) {
 	amend := map[string]any{"type": "replan", "reason": "widen scope", "payload": map[string]any{
 		"goal": map[string]any{"intent": "mitigate", "description": "include payments",
 			"subject_refs": []string{"service://prod/checkout", "service://prod/payments"}}}}
-	code, w2, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", amend, map[string]string{"Idempotency-Key": "r1"})
+	code, w2, _ := e.do("POST", "/api/works/"+id+"/commands", "t1", "operator", amend, map[string]string{"Idempotency-Key": "r1"})
 	if code != http.StatusOK || w2["generation"].(float64) != 2 {
 		t.Fatalf("replan with goal: %d %v", code, w2)
 	}
-	code, goals, _ := e.do("GET", "/v1/works/"+id+"/goals", "t1", "viewer", nil, nil)
+	code, goals, _ := e.do("GET", "/api/works/"+id+"/goals", "t1", "viewer", nil, nil)
 	items, _ := goals["items"].([]any)
 	if code != 200 || len(items) != 2 {
 		t.Fatalf("goals: %d %v", code, goals)
@@ -213,14 +213,14 @@ func TestGoalAmendmentAndAssignments(t *testing.T) {
 		t.Fatalf("generation 2 goal: %v", g2)
 	}
 	bad := map[string]any{"type": "replan", "payload": map[string]any{"goal": map[string]any{"intent": ""}}}
-	if code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", bad, map[string]string{"Idempotency-Key": "r2"}); code != http.StatusBadRequest {
+	if code, _, _ := e.do("POST", "/api/works/"+id+"/commands", "t1", "operator", bad, map[string]string{"Idempotency-Key": "r2"}); code != http.StatusBadRequest {
 		t.Fatalf("invalid amended goal: %d", code)
 	}
-	code, as, _ := e.do("GET", "/v1/works/"+id+"/assignments", "t1", "viewer", nil, nil)
+	code, as, _ := e.do("GET", "/api/works/"+id+"/assignments", "t1", "viewer", nil, nil)
 	if code != 200 || as["items"] == nil {
 		t.Fatalf("assignments: %d %v", code, as)
 	}
-	if code, _, _ := e.do("GET", "/v1/works/"+id+"/goals", "t2", "viewer", nil, nil); code != http.StatusNotFound {
+	if code, _, _ := e.do("GET", "/api/works/"+id+"/goals", "t2", "viewer", nil, nil); code != http.StatusNotFound {
 		t.Fatalf("goals across tenants: %d", code)
 	}
 }
@@ -230,18 +230,18 @@ func TestPostmortemRoutes(t *testing.T) {
 	body := map[string]any{"kind": "incident", "title": "checkout 5xx",
 		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"},
 			"labels": map[string]string{"environment": "prod"}}}
-	_, w1, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "pm"})
+	_, w1, _ := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "pm"})
 	id := w1["id"].(string)
 
-	code, rep, _ := e.do("GET", "/v1/works/"+id+"/postmortem", "t1", "viewer", nil, nil)
+	code, rep, _ := e.do("GET", "/api/works/"+id+"/postmortem", "t1", "viewer", nil, nil)
 	if code != 200 || rep["work_id"] != id || rep["root_cause"] != nil {
 		t.Fatalf("report: %d %v", code, rep)
 	}
-	if code, _, _ := e.do("GET", "/v1/works/"+id+"/postmortem", "t2", "viewer", nil, nil); code != http.StatusNotFound {
+	if code, _, _ := e.do("GET", "/api/works/"+id+"/postmortem", "t2", "viewer", nil, nil); code != http.StatusNotFound {
 		t.Fatalf("tenant isolation: %d", code)
 	}
 	// Markdown rendering.
-	r := httptest.NewRequest("GET", "/v1/works/"+id+"/postmortem?format=markdown", nil)
+	r := httptest.NewRequest("GET", "/api/works/"+id+"/postmortem?format=markdown", nil)
 	r.Header.Set("X-Tenant", "t1")
 	r.Header.Set("X-Roles", "viewer")
 	rec := httptest.NewRecorder()
@@ -252,17 +252,17 @@ func TestPostmortemRoutes(t *testing.T) {
 	}
 
 	// Only closed Works get a postmortem Work, and only operators open one.
-	if code, _, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "operator", nil, nil); code != http.StatusConflict {
+	if code, _, _ := e.do("POST", "/api/works/"+id+"/postmortem", "t1", "operator", nil, nil); code != http.StatusConflict {
 		t.Fatalf("open Work: %d", code)
 	}
-	if code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", map[string]any{"type": work.CmdCancel},
+	if code, _, _ := e.do("POST", "/api/works/"+id+"/commands", "t1", "operator", map[string]any{"type": work.CmdCancel},
 		map[string]string{"Idempotency-Key": "c", "If-Match": `"1"`}); code != 200 {
 		t.Fatalf("cancel: %d", code)
 	}
-	if code, _, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "viewer", nil, nil); code != http.StatusForbidden {
+	if code, _, _ := e.do("POST", "/api/works/"+id+"/postmortem", "t1", "viewer", nil, nil); code != http.StatusForbidden {
 		t.Fatalf("viewer: %d", code)
 	}
-	code, pm, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "operator", nil, nil)
+	code, pm, _ := e.do("POST", "/api/works/"+id+"/postmortem", "t1", "operator", nil, nil)
 	if code != http.StatusCreated {
 		t.Fatalf("create postmortem: %d %v", code, pm)
 	}
@@ -274,15 +274,15 @@ func TestPostmortemRoutes(t *testing.T) {
 		t.Fatalf("postmortem Work: %v", pm)
 	}
 	// Idempotent per source Work.
-	code, again, _ := e.do("POST", "/v1/works/"+id+"/postmortem", "t1", "operator", nil, nil)
+	code, again, _ := e.do("POST", "/api/works/"+id+"/postmortem", "t1", "operator", nil, nil)
 	if code != http.StatusOK || again["id"] != pm["id"] {
 		t.Fatalf("replay: %d", code)
 	}
 	// A postmortem Work does not get its own postmortem.
 	pmID := pm["id"].(string)
-	e.do("POST", "/v1/works/"+pmID+"/commands", "t1", "operator", map[string]any{"type": work.CmdCancel},
+	e.do("POST", "/api/works/"+pmID+"/commands", "t1", "operator", map[string]any{"type": work.CmdCancel},
 		map[string]string{"Idempotency-Key": "c2", "If-Match": `"1"`})
-	if code, _, _ := e.do("POST", "/v1/works/"+pmID+"/postmortem", "t1", "operator", nil, nil); code != http.StatusBadRequest {
+	if code, _, _ := e.do("POST", "/api/works/"+pmID+"/postmortem", "t1", "operator", nil, nil); code != http.StatusBadRequest {
 		t.Fatalf("postmortem of postmortem: %d", code)
 	}
 }
@@ -294,27 +294,27 @@ func TestWorkQueueRoutes(t *testing.T) {
 	e := newEnv(t)
 	body := map[string]any{"kind": "incident", "title": "sev1", "queue": "critical-mitigation",
 		"goal": map[string]any{"intent": "mitigate", "subject_refs": []string{"service://prod/checkout"}}}
-	code, w1, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "q1"})
+	code, w1, _ := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "q1"})
 	if code != http.StatusCreated || w1["queue"] != "critical-mitigation" {
 		t.Fatalf("create critical: %d %v", code, w1)
 	}
 	id := w1["id"].(string)
 	body["queue"] = "asap"
-	if code, _, _ := e.do("POST", "/v1/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "q2"}); code != http.StatusBadRequest {
+	if code, _, _ := e.do("POST", "/api/works", "t1", "operator", body, map[string]string{"Idempotency-Key": "q2"}); code != http.StatusBadRequest {
 		t.Fatalf("unknown queue: %d", code)
 	}
-	code, list, _ := e.do("GET", "/v1/works?queue=critical-mitigation", "t1", "viewer", nil, nil)
+	code, list, _ := e.do("GET", "/api/works?queue=critical-mitigation", "t1", "viewer", nil, nil)
 	if items, _ := list["items"].([]any); code != 200 || len(items) != 1 {
 		t.Fatalf("filter: %d %v", code, list)
 	}
-	if code, _, _ := e.do("GET", "/v1/works?queue=asap", "t1", "viewer", nil, nil); code != http.StatusBadRequest {
+	if code, _, _ := e.do("GET", "/api/works?queue=asap", "t1", "viewer", nil, nil); code != http.StatusBadRequest {
 		t.Fatalf("filter unknown queue: %d", code)
 	}
 	cmd := map[string]any{"type": work.CmdSetQueue, "payload": map[string]any{"queue": "routine-work"}}
-	if code, _, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "viewer", cmd, nil); code != http.StatusForbidden {
+	if code, _, _ := e.do("POST", "/api/works/"+id+"/commands", "t1", "viewer", cmd, nil); code != http.StatusForbidden {
 		t.Fatalf("viewer set_queue: %d", code)
 	}
-	code, moved, _ := e.do("POST", "/v1/works/"+id+"/commands", "t1", "operator", cmd, map[string]string{"Idempotency-Key": "sq1"})
+	code, moved, _ := e.do("POST", "/api/works/"+id+"/commands", "t1", "operator", cmd, map[string]string{"Idempotency-Key": "sq1"})
 	if code != 200 || moved["queue"] != "routine-work" {
 		t.Fatalf("set_queue: %d %v", code, moved)
 	}
@@ -322,11 +322,11 @@ func TestWorkQueueRoutes(t *testing.T) {
 
 func TestDecisionsEndpointIsolationAndLegacyCompatibility(t *testing.T) {
 	e := newEnv(t)
-	code, w, _ := e.do("POST", "/v1/works", "t1", "operator", map[string]any{"kind": "incident", "goal": map[string]any{"intent": "diagnose"}}, map[string]string{"Idempotency-Key": "decision-work"})
+	code, w, _ := e.do("POST", "/api/works", "t1", "operator", map[string]any{"kind": "incident", "goal": map[string]any{"intent": "diagnose"}}, map[string]string{"Idempotency-Key": "decision-work"})
 	if code != http.StatusCreated {
 		t.Fatalf("create %d %v", code, w)
 	}
-	path := "/v1/works/" + w["id"].(string) + "/decisions"
+	path := "/api/works/" + w["id"].(string) + "/decisions"
 	if code, _, _ := e.do("GET", path, "t1", "viewer", nil, nil); code != http.StatusOK {
 		t.Fatalf("decisions %d", code)
 	}
@@ -341,7 +341,7 @@ func TestDecisionsEndpointIsolationAndLegacyCompatibility(t *testing.T) {
 func TestDecisionContractAcrossAPIViewsAndGenerations(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	code, created, _ := e.do("POST", "/v1/works", "t1", "operator", map[string]any{
+	code, created, _ := e.do("POST", "/api/works", "t1", "operator", map[string]any{
 		"kind": "incident", "goal": map[string]any{"intent": "diagnose controlled regression"},
 	}, map[string]string{"Idempotency-Key": "decision-contract"})
 	if code != http.StatusCreated {
@@ -372,7 +372,7 @@ func TestDecisionContractAcrossAPIViewsAndGenerations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := "/v1/works/" + id
+	base := "/api/works/" + id
 	code, decisions, _ := e.do("GET", base+"/decisions", "t1", "viewer", nil, nil)
 	items, _ := decisions["items"].([]any)
 	if code != http.StatusOK || len(items) != 1 {

@@ -9,12 +9,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"go-sre-harness/internal/action"
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cpkit"
+	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/governance"
 	"go-sre-harness/internal/impact"
@@ -25,6 +29,7 @@ import (
 	"go-sre-harness/internal/protocol"
 	"go-sre-harness/internal/runbook"
 	"go-sre-harness/internal/store/cpsql"
+	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/workapi"
 	"go-sre-harness/internal/world"
@@ -32,14 +37,33 @@ import (
 	_ "go-sre-harness/plugins/observability"
 )
 
-type v3env struct {
+type testAudit struct {
+	mu      sync.Mutex
+	entries []pg.AuditEntry
+}
+
+func (a *testAudit) Audit(_ context.Context, entry pg.AuditEntry) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.entries = append(a.entries, entry)
+	return nil
+}
+
+func (a *testAudit) snapshot() []pg.AuditEntry {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]pg.AuditEntry(nil), a.entries...)
+}
+
+type testenv struct {
 	t     *testing.T
 	srv   *httptest.Server
 	store *cpsql.Store
 	api   *workapi.API
+	audit *testAudit
 }
 
-func newV3(t *testing.T) *v3env {
+func newTest(t *testing.T) *testenv {
 	s, err := cpsql.OpenSQLite(filepath.Join(t.TempDir(), "cp.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -56,9 +80,10 @@ func newV3(t *testing.T) *v3env {
 	bl := limits[work.QueueBatch]
 	bl.MaxBacklog = 2
 	limits[work.QueueBatch] = bl
+	audit := &testAudit{}
 	a := &workapi.API{Store: s, Service: &orchestration.Service{Store: s, Catalog: cat, Log: quiet, Queues: limits},
-		Ingestor: &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Log: quiet},
-		World:    ws, Log: quiet, Postmortems: &postmortem.Builder{Ledger: s}, StreamPoll: 10 * time.Millisecond,
+		Ingestor: &orchestration.Ingestor{Store: s, Router: router, Catalog: cat, Log: quiet}, Audit: audit,
+		World: ws, Log: quiet, Postmortems: &postmortem.Builder{Ledger: s}, StreamPoll: 10 * time.Millisecond,
 		Broker: &observability.Broker{Catalog: s, Audit: s, Endpoints: map[string]observability.Endpoint{"prom-prod": {URL: "http://127.0.0.1:1"}},
 			Credentials: observability.Credentials{}, Local: map[string]observability.Factory{"ledger": impact.Ledger(s)}},
 		Attestation: func() governance.Attestation {
@@ -72,6 +97,9 @@ func newV3(t *testing.T) *v3env {
 		for _, x := range strings.Split(r.Header.Get("X-Roles"), ",") {
 			p.Roles = append(p.Roles, auth.Role(x))
 		}
+		if scope := r.Header.Get("X-Scope"); scope != "" {
+			p.Scope = &auth.Scope{Resources: []string{scope}}
+		}
 		_, pattern := mux.Handler(r)
 		if need, ok := roles[pattern]; ok && !p.Has(need) {
 			http.Error(w, `{"error":"forbidden","message":"missing role"}`, http.StatusForbidden)
@@ -81,10 +109,10 @@ func newV3(t *testing.T) *v3env {
 	})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &v3env{t: t, srv: srv, store: s, api: a}
+	return &testenv{t: t, srv: srv, store: s, api: a, audit: audit}
 }
 
-func (e *v3env) client(tenant, roles string) *workclient.Client {
+func (e *testenv) client(tenant, roles string) *workclient.Client {
 	c := workclient.New(e.srv.URL, "")
 	c.Header = http.Header{"X-Tenant": {tenant}, "X-User": {"u-" + roles}, "X-Roles": {roles}}
 	return c
@@ -100,24 +128,24 @@ func status(err error) int {
 
 var goal = workclient.Goal{Intent: "restore search latency", SubjectRefs: []string{"service://prod/search-api"}}
 
-// Every v3 route has a role; none is reachable without one.
-func TestV3RoutesHaveRoles(t *testing.T) {
-	e := newV3(t)
+// Every current route has a role; none is reachable without one.
+func TestCurrentRoutesHaveRoles(t *testing.T) {
+	e := newTest(t)
 	roles := e.api.RouteRoles()
-	for _, route := range []string{"GET /v1/work-graphs/{id}", "POST /v1/works/{id}/children", "GET /v1/observability/sources",
-		"POST /v1/observability/sources", "POST /v1/observability/sources/{id}/probe", "POST /v1/observability/query",
-		"GET /v1/observability/evidence/{id}", "POST /v1/work-templates/{id}/dry-run", "GET /v1/governance/attestation", "GET /v1/quotas"} {
+	for _, route := range []string{"GET /api/work-graphs/{id}", "POST /api/works/{id}/children", "POST /api/works/{id}/caused-by", "GET /api/observability/sources",
+		"POST /api/observability/sources", "POST /api/observability/sources/{id}/probe", "POST /api/observability/query",
+		"GET /api/observability/evidence/{id}", "POST /api/work-templates/{id}/dry-run", "GET /api/governance/attestation", "GET /api/quotas"} {
 		if _, ok := roles[route]; !ok {
 			t.Errorf("route %s has no role", route)
 		}
 	}
-	if roles["POST /v1/observability/sources"] != auth.Admin || roles["POST /v1/actions/{id}/break-glass/review"] != auth.Approver {
+	if roles["POST /api/observability/sources"] != auth.Admin || roles["POST /api/actions/{id}/break-glass/review"] != auth.Approver {
 		t.Fatal("source changes need admin, break-glass reviews an approver")
 	}
 }
 
-func TestV3GraphViewAndSDK(t *testing.T) {
-	e := newV3(t)
+func TestCurrentGraphViewAndSDK(t *testing.T) {
+	e := newTest(t)
 	ctx := context.Background()
 	op, viewer, other := e.client("t1", "operator"), e.client("t1", "viewer"), e.client("t2", "operator")
 	parent, err := op.Works().Create(ctx, "incident-1", workclient.CreateWork{Kind: "incident", Title: "search p99", Goal: goal})
@@ -167,7 +195,7 @@ func TestV3GraphViewAndSDK(t *testing.T) {
 // §13.2: a client that reconnects with the last sequence it saw gets every
 // persisted event exactly once, in order, in the stable contract.
 func TestSubscribeResumesWithoutGapsOrDuplicates(t *testing.T) {
-	e := newV3(t)
+	e := newTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	op := e.client("t1", "operator,approver")
@@ -230,8 +258,8 @@ func TestSubscribeResumesWithoutGapsOrDuplicates(t *testing.T) {
 	}
 }
 
-func TestV3SourcesQuotasIntentsDryRunRunbooks(t *testing.T) {
-	e := newV3(t)
+func TestCurrentSourcesQuotasIntentsDryRunRunbooks(t *testing.T) {
+	e := newTest(t)
 	ctx := context.Background()
 	admin, op, viewer := e.client("t1", "admin"), e.client("t1", "operator"), e.client("t1", "viewer")
 	src := workclient.Source{ID: "prom", Kind: observability.SignalMetrics, Backend: "prometheus", Environment: "prod",
@@ -320,24 +348,306 @@ func TestV3SourcesQuotasIntentsDryRunRunbooks(t *testing.T) {
 	}
 }
 
+func TestIncidentViewExposesOrthogonalProjection(t *testing.T) {
+	e := newTest(t)
+	ctx := context.Background()
+	client := e.client("t1", "operator")
+	incidentWork, err := client.CreateWork(ctx, "incident-projection", workclient.CreateWork{Kind: "incident", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := client.View(ctx, incidentWork.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Incident == nil || view.Incident.WorkID != incidentWork.ID || view.Incident.Generation != incidentWork.Generation ||
+		view.Incident.Recovery.Status != "IMPACT_ACTIVE" || view.Incident.RCA.Status != "NOT_STARTED" ||
+		view.Incident.Postmortem.Status != "NOT_STARTED" || view.Incident.Children == nil ||
+		view.Incident.CausedBy != nil || view.Incident.SecondaryIncidents == nil {
+		t.Fatalf("incident projection: %+v", view.Incident)
+	}
+
+	routine, err := client.CreateWork(ctx, "routine-view", workclient.CreateWork{Kind: "routine", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routineView, err := client.View(ctx, routine.ID)
+	if err != nil || routineView.Incident != nil {
+		t.Fatalf("non-incident gained projection: %+v %v", routineView.Incident, err)
+	}
+}
+
+func createTestSecondaryAction(t *testing.T, e *testenv, w work.Work, dispatched bool) action.Record {
+	t.Helper()
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	p := action.Plan{ID: cpkit.NewID(), TenantID: w.TenantID, WorkID: w.ID, Generation: w.Generation,
+		ActionName: "deployment.rollback", ActionVersion: "1", Risk: domain.RiskR1, TargetRef: goal.SubjectRefs[0],
+		Args: json.RawMessage(`{"request":"` + cpkit.NewID() + `"}`), CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	p.Seal()
+	r := action.Record{Plan: p, State: action.StateReady, UpdatedAt: now}
+	if dispatched {
+		r.State, r.MayHaveDispatched, r.DispatchedAt = action.StateDispatched, true, &now
+	}
+	stored, _, err := e.store.CreateAction(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+func createTestSecondarySource(t *testing.T, e *testenv, client *workclient.Client) (work.Work, work.Work) {
+	t.Helper()
+	source, err := client.CreateWork(context.Background(), "secondary-source-"+cpkit.NewID(), workclient.CreateWork{Kind: "incident", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mitigation, err := client.CreateChild(context.Background(), source.ID, "secondary-mitigation-"+cpkit.NewID(), workclient.CreateChild{
+		Goal: workclient.Goal{Intent: "mitigate", SubjectRefs: goal.SubjectRefs, Labels: map[string]string{"child_key": "mitigation"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source, mitigation
+}
+
+func TestSecondaryIncidentAPIProjectsExplicitCause(t *testing.T) {
+	e := newTest(t)
+	ctx := context.Background()
+	client := e.client("t1", "operator")
+	source, mitigation := createTestSecondarySource(t, e, client)
+	act := createTestSecondaryAction(t, e, mitigation, true)
+	secondary, err := client.CreateWork(ctx, "secondary-incident", workclient.CreateWork{Kind: "incident", Goal: goal,
+		CausedBy: &workclient.CreateCause{IncidentID: source.ID, ActionID: act.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceView, err := client.View(ctx, source.ID)
+	if err != nil || sourceView.Incident == nil || len(sourceView.Incident.SecondaryIncidents) != 1 {
+		t.Fatalf("source view=%+v err=%v", sourceView.Incident, err)
+	}
+	item := sourceView.Incident.SecondaryIncidents[0]
+	if item.WorkID != secondary.ID || item.ActionID != act.ID || item.MitigationWorkID != mitigation.ID || item.Relation != "mitigation_caused" {
+		t.Fatalf("secondary item=%+v", item)
+	}
+	secondaryView, err := client.View(ctx, secondary.ID)
+	if err != nil || secondaryView.Incident == nil || secondaryView.Incident.CausedBy == nil ||
+		secondaryView.Incident.CausedBy.IncidentID != source.ID || secondaryView.Incident.CausedBy.ActionID != act.ID {
+		t.Fatalf("secondary view=%+v err=%v", secondaryView.Incident, err)
+	}
+}
+
+func TestSecondaryIncidentAPIRejectsUndispatchedAction(t *testing.T) {
+	e := newTest(t)
+	ctx := context.Background()
+	client := e.client("t1", "operator")
+	source, mitigation := createTestSecondarySource(t, e, client)
+	act := createTestSecondaryAction(t, e, mitigation, false)
+	_, err := client.CreateWork(ctx, "secondary-undispatched", workclient.CreateWork{Kind: "incident", Goal: goal,
+		CausedBy: &workclient.CreateCause{IncidentID: source.ID, ActionID: act.ID}})
+	if status(err) != http.StatusBadRequest {
+		t.Fatalf("undispatched action accepted: %v", err)
+	}
+	if _, err := e.store.WorkByIdempotencyKey(ctx, "t1", "secondary-undispatched"); !errors.Is(err, work.ErrNotFound) {
+		t.Fatalf("rejected API request created a Work: %v", err)
+	}
+}
+
+func postCauseBackfill(t *testing.T, e *testenv, tenant, roles, workID, key, version string, body workclient.LinkCauseRequest) (int, string, http.Header) {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, e.srv.URL+"/api/works/"+workID+"/caused-by", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Tenant", tenant)
+	req.Header.Set("X-User", "u-"+roles)
+	req.Header.Set("X-Roles", roles)
+	req.Header.Set("Idempotency-Key", key)
+	if version != "" {
+		req.Header.Set("If-Match", version)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Code string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, out.Code, resp.Header
+}
+
+func TestIncidentCauseBackfillAPIProjectsAndAudits(t *testing.T) {
+	e := newTest(t)
+	ctx := context.Background()
+	client := e.client("t1", "operator")
+	source, mitigation := createTestSecondarySource(t, e, client)
+	act := createTestSecondaryAction(t, e, mitigation, true)
+	target, err := client.CreateWork(ctx, "backfill-target", workclient.CreateWork{Kind: "incident", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := workclient.LinkCauseRequest{IncidentID: source.ID, ActionID: act.ID, Reason: "verified in postmortem"}
+	updated, err := client.LinkIncidentCause(ctx, target.ID, "api-backfill", target.Version, req)
+	if err != nil || updated.Version != target.Version+1 {
+		t.Fatalf("backfill=%+v err=%v", updated, err)
+	}
+	replay, err := client.LinkIncidentCause(ctx, target.ID, "api-backfill", target.Version, req)
+	if err != nil || replay.Version != updated.Version || replay.LastSeq != updated.LastSeq {
+		t.Fatalf("replay=%+v err=%v first=%+v", replay, err, updated)
+	}
+	noOp, err := client.LinkIncidentCause(ctx, target.ID, "api-backfill-noop", updated.Version, req)
+	if err != nil || noOp.Version != updated.Version || noOp.LastSeq != updated.LastSeq {
+		t.Fatalf("no-op=%+v err=%v", noOp, err)
+	}
+	targetView, err := client.View(ctx, target.ID)
+	if err != nil || targetView.Incident == nil || targetView.Incident.CausedBy == nil ||
+		targetView.Incident.CausedBy.IncidentID != source.ID || targetView.Incident.CausedBy.ActionID != act.ID {
+		t.Fatalf("target view=%+v err=%v", targetView.Incident, err)
+	}
+	sourceView, err := client.View(ctx, source.ID)
+	if err != nil || sourceView.Incident == nil || len(sourceView.Incident.SecondaryIncidents) != 1 ||
+		sourceView.Incident.SecondaryIncidents[0].WorkID != target.ID {
+		t.Fatalf("source view=%+v err=%v", sourceView.Incident, err)
+	}
+	var outcomes []string
+	for _, entry := range e.audit.snapshot() {
+		if entry.Action != "work.incident_cause.link" {
+			continue
+		}
+		outcomes = append(outcomes, entry.Outcome)
+		if entry.ResourceID != target.ID || entry.Details["incident_id"] != source.ID || entry.Details["action_id"] != act.ID {
+			t.Fatalf("audit entry=%+v", entry)
+		}
+	}
+	if len(outcomes) != 3 || outcomes[0] != "applied" || outcomes[1] != "unchanged" || outcomes[2] != "unchanged" {
+		t.Fatalf("audit outcomes=%v", outcomes)
+	}
+}
+
+func TestIncidentCauseBackfillAPIValidationAndScope(t *testing.T) {
+	e := newTest(t)
+	ctx := context.Background()
+	client, viewer, other := e.client("t1", "operator"), e.client("t1", "viewer"), e.client("t2", "operator")
+	source, mitigation := createTestSecondarySource(t, e, client)
+	act := createTestSecondaryAction(t, e, mitigation, true)
+	target, err := client.CreateWork(ctx, "backfill-validation", workclient.CreateWork{Kind: "incident", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := workclient.LinkCauseRequest{IncidentID: source.ID, ActionID: act.ID, Reason: "confirmed"}
+	if _, err := viewer.LinkIncidentCause(ctx, target.ID, "viewer", target.Version, req); status(err) != http.StatusForbidden {
+		t.Fatalf("viewer error=%v", err)
+	}
+	if code, apiCode, _ := postCauseBackfill(t, e, "t1", "operator", target.ID, "missing-version", "", req); code != http.StatusPreconditionRequired || apiCode != "if_match_required" {
+		t.Fatalf("missing If-Match: code=%d api=%s", code, apiCode)
+	}
+	if code, _, _ := postCauseBackfill(t, e, "t1", "operator", target.ID, "bad-version", "abc", req); code != http.StatusBadRequest {
+		t.Fatalf("invalid If-Match: code=%d", code)
+	}
+	for _, reason := range []string{"", strings.Repeat("x", 501)} {
+		bad := req
+		bad.Reason = reason
+		if _, err := client.LinkIncidentCause(ctx, target.ID, "bad-reason-"+cpkit.NewID(), target.Version, bad); status(err) != http.StatusBadRequest {
+			t.Fatalf("invalid reason error=%v", err)
+		}
+	}
+	if _, err := other.LinkIncidentCause(ctx, target.ID, "other-tenant", target.Version, req); status(err) != http.StatusNotFound {
+		t.Fatalf("cross tenant error=%v", err)
+	}
+	scoped := e.client("t1", "operator")
+	scoped.Header.Set("X-Scope", "service://prod/other")
+	if _, err := scoped.LinkIncidentCause(ctx, target.ID, "scoped", target.Version, req); status(err) != http.StatusForbidden {
+		t.Fatalf("scope error=%v", err)
+	}
+	denied := false
+	for _, entry := range e.audit.snapshot() {
+		if entry.Action == "work.incident_cause.link" && entry.Outcome == "denied" && entry.ResourceID == target.ID {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Fatal("scope denial was not audited")
+	}
+
+	updated, err := client.LinkIncidentCause(ctx, target.ID, "validation-first", target.Version, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.LinkIncidentCause(ctx, target.ID, "stale", target.Version, req); status(err) != http.StatusPreconditionFailed {
+		t.Fatalf("stale error=%v", err)
+	}
+	second := createTestSecondaryAction(t, e, mitigation, true)
+	conflict := req
+	conflict.ActionID = second.ID
+	if _, err := client.LinkIncidentCause(ctx, target.ID, "conflict", updated.Version, conflict); status(err) != http.StatusConflict {
+		t.Fatalf("cause conflict error=%v", err)
+	}
+	changedReplay := req
+	changedReplay.Reason = "changed"
+	if _, err := client.LinkIncidentCause(ctx, target.ID, "validation-first", target.Version, changedReplay); status(err) != http.StatusUnprocessableEntity {
+		t.Fatalf("idempotency conflict error=%v", err)
+	}
+	code, _, header := postCauseBackfill(t, e, "t1", "operator", target.ID, "http-noop", strconv.FormatInt(updated.Version, 10), req)
+	if code != http.StatusOK || header.Get("ETag") != strconv.Quote(strconv.FormatInt(updated.Version, 10)) {
+		t.Fatalf("no-op code=%d ETag=%q", code, header.Get("ETag"))
+	}
+}
+
+func TestIncidentCauseBackfillAPIRejectsCorruptStoredLinks(t *testing.T) {
+	e := newTest(t)
+	ctx := context.Background()
+	client := e.client("t1", "operator")
+	source, mitigation := createTestSecondarySource(t, e, client)
+	act := createTestSecondaryAction(t, e, mitigation, true)
+	target, err := client.CreateWork(ctx, "backfill-corrupt", workclient.CreateWork{Kind: "incident", Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.DB().ExecContext(ctx, `INSERT INTO work_subject_links
+		(tenant_id, work_id, subject_kind, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+		target.TenantID, target.ID, work.SubjectCausedByWork, source.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	req := workclient.LinkCauseRequest{IncidentID: source.ID, ActionID: act.ID, Reason: "confirmed"}
+	if _, err := client.LinkIncidentCause(ctx, target.ID, "corrupt", target.Version, req); status(err) != http.StatusInternalServerError {
+		t.Fatalf("corrupt links error=%v", err)
+	}
+}
+
 func TestViewFailsWhenSnapshotSourcesFail(t *testing.T) {
-	for _, source := range []string{"outcomes", "children"} {
+	for _, source := range []string{"outcomes", "children", "postmortems", "causal_links"} {
 		t.Run(source, func(t *testing.T) {
-			e := newV3(t)
+			e := newTest(t)
 			ctx := context.Background()
 			c := e.client("t1", "operator")
 			parent, err := c.CreateWork(ctx, "snapshot-parent", workclient.CreateWork{Kind: "incident", Goal: goal})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if source == "outcomes" {
+			switch source {
+			case "outcomes":
 				_, err = e.store.DB().ExecContext(ctx, `DROP TABLE work_outcomes`)
-			} else {
+			case "children":
 				child, xerr := c.CreateChild(ctx, parent.ID, "snapshot-child", workclient.CreateChild{Goal: workclient.Goal{Intent: "investigate"}})
 				if xerr != nil {
 					t.Fatal(xerr)
 				}
 				_, err = e.store.DB().ExecContext(ctx, `UPDATE agent_works SET goal='{' WHERE id=?`, child.ID)
+			case "postmortems":
+				other, xerr := c.CreateWork(ctx, "snapshot-malformed", workclient.CreateWork{Kind: "incident", Goal: goal})
+				if xerr != nil {
+					t.Fatal(xerr)
+				}
+				_, err = e.store.DB().ExecContext(ctx, `UPDATE agent_works SET goal='{' WHERE id=?`, other.ID)
+			case "causal_links":
+				_, err = e.store.DB().ExecContext(ctx, `DROP TABLE work_subject_links`)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -350,7 +660,7 @@ func TestViewFailsWhenSnapshotSourcesFail(t *testing.T) {
 }
 
 func TestProtocolMetadataOnEmptyPageAndStream(t *testing.T) {
-	e := newV3(t)
+	e := newTest(t)
 	ctx := context.Background()
 	c := e.client("t1", "operator")
 	w, err := c.CreateWork(ctx, "metadata", workclient.CreateWork{Kind: "incident", Goal: goal})
@@ -370,21 +680,21 @@ func TestProtocolMetadataOnEmptyPageAndStream(t *testing.T) {
 		}
 		return resp
 	}
-	resp := request("/v1/works/" + w.ID + "/events?protocol=1&after_seq=9999")
+	resp := request("/api/works/" + w.ID + "/events?protocol=1&after_seq=9999")
 	var page protocol.EventPage
 	err = json.NewDecoder(resp.Body).Decode(&page)
 	resp.Body.Close()
 	if err != nil || page.SchemaVersion != 1 || page.ContractVersion != 1 || page.MinimumReaderVersion != 1 || len(page.Items) != 0 {
 		t.Fatalf("empty page metadata: %+v %v", page, err)
 	}
-	resp = request("/v1/works/" + w.ID + "/events/stream?protocol=1")
+	resp = request("/api/works/" + w.ID + "/events/stream?protocol=1")
 	for _, header := range []string{protocol.HeaderSchemaVersion, protocol.HeaderContractVersion, protocol.HeaderMinimumReaderVersion} {
 		if resp.Header.Get(header) != "1" {
 			t.Errorf("header %s=%q", header, resp.Header.Get(header))
 		}
 	}
 	resp.Body.Close()
-	resp = request("/v1/works/" + w.ID + "/events")
+	resp = request("/api/works/" + w.ID + "/events")
 	var legacy map[string]json.RawMessage
 	err = json.NewDecoder(resp.Body).Decode(&legacy)
 	resp.Body.Close()
@@ -400,7 +710,7 @@ func TestProtocolMetadataOnEmptyPageAndStream(t *testing.T) {
 func TestSubscribeDrainsTerminalTransaction(t *testing.T) {
 	for _, terminal := range []work.Status{work.StatusCancelled, work.StatusSucceeded} {
 		t.Run(string(terminal), func(t *testing.T) {
-			e := newV3(t)
+			e := newTest(t)
 			ctx := context.Background()
 			c := e.client("t1", "operator")
 			w, err := c.Works().Create(ctx, "terminal-tail", workclient.CreateWork{Kind: "incident", Title: "tail", Goal: goal})
