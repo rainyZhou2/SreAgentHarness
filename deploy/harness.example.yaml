@@ -72,7 +72,7 @@ plugins:
     - name: kubernetes
       config: {in_cluster: true, namespaces: [shop], dry_run: true}
     - name: mcp
-      instance: mcp:runbooks
+      instance: runbooks
       config:
         name: runbooks
         url: "http://runbooks-mcp:8080/mcp"
