@@ -13,13 +13,17 @@ func (s *Store) SecondaryIncidentsFor(ctx context.Context, tenantID, sourceWorkI
 	if sourceWorkID == "" {
 		return nil, fmt.Errorf("%w: source Work is required", work.ErrInvalid)
 	}
+	actionJoin := "a.id=ca.subject_id"
+	if s.d == Postgres {
+		actionJoin = "a.id::text=ca.subject_id"
+	}
 	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+workCols+`, cause_action_id, action_work_id FROM (
 		SELECT w.*, ca.subject_id AS cause_action_id, a.work_id AS action_work_id
 		FROM work_subject_links cw
 		JOIN agent_works w ON w.tenant_id=cw.tenant_id AND w.id=cw.work_id
 		LEFT JOIN work_subject_links ca ON ca.tenant_id=cw.tenant_id AND ca.work_id=cw.work_id
 			AND ca.subject_kind='caused_by_action'
-		LEFT JOIN work_actions a ON a.tenant_id=ca.tenant_id AND a.id=ca.subject_id
+		LEFT JOIN work_actions a ON a.tenant_id=ca.tenant_id AND `+actionJoin+`
 		WHERE cw.tenant_id=? AND cw.subject_kind='caused_by_work' AND cw.subject_id=?
 		ORDER BY w.created_at DESC, w.id DESC, ca.subject_id DESC LIMIT 101
 	) secondary_incidents`), tenantID, sourceWorkID)

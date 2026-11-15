@@ -148,7 +148,7 @@ func TestSecurityDecisionAudit(t *testing.T) {
 			t.Fatalf("conflicting request audit: %v", err)
 		}
 		var count int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM security_decision_audit WHERE tenant_id=?`, request.TenantID).Scan(&count); err != nil || count != 1 {
+		if err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM security_decision_audit WHERE tenant_id=?`), request.TenantID).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("audit count=%d err=%v", count, err)
 		}
 	})

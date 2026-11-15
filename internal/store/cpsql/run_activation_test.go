@@ -17,7 +17,8 @@ func TestRunActivationAuthority(t *testing.T) {
 		ctx, tn := context.Background(), tenant()
 		now := time.Now().UTC()
 		w := mustCreate(t, s, tn)
-		if _, err := s.ClaimDueWorks(ctx, "driver", now, time.Minute, 200); err != nil {
+		if _, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET lease_owner=?, lease_until=? WHERE tenant_id=? AND id=?`),
+			"driver", s.t(now.Add(time.Minute)), tn, w.ID); err != nil {
 			t.Fatal(err)
 		}
 		w, err := s.GetWork(ctx, tn, w.ID)

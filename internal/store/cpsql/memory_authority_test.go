@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/outcome"
 	"go-sre-harness/internal/work"
 )
@@ -21,7 +22,7 @@ func TestMemoryVerificationAuthority(t *testing.T) {
 		if err != nil || len(hs) == 0 {
 			t.Fatalf("hypotheses=%d err=%v", len(hs), err)
 		}
-		e := outcome.Evaluation{ID: "evaluation-1", SpecHash: "human", Verdict: outcome.Satisfied,
+		e := outcome.Evaluation{ID: cpkit.NewID(), SpecHash: "human", Verdict: outcome.Satisfied,
 			RawVerdict: outcome.Satisfied, EvaluatedAt: t0, EvidenceRefs: []string{"evidence:outcome"}}
 		if _, err := s.ApplyWork(ctx, work.Mutation{TenantID: tn, WorkID: w.ID, ExpectedVersion: updated.Version,
 			ActorType: "system", Now: t0, Outcome: &e}); err != nil {

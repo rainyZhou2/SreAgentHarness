@@ -2,14 +2,27 @@ package cpsql
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
+
+func workMessageID(t *testing.T, payload []byte) string {
+	t.Helper()
+	var body struct {
+		WorkID string `json:"work_id"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("decode work message: %v", err)
+	}
+	return body.WorkID
+}
 
 func TestWorkOutboxLifecycle(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		tn := tenant()
+		publishPendingWorkMessages(t, s)
 		w, created, err := s.CreateWork(ctx, newWork(tn, "outbox-create"))
 		if err != nil || !created {
 			t.Fatalf("create work: created=%v err=%v", created, err)
@@ -21,7 +34,7 @@ func TestWorkOutboxLifecycle(t *testing.T) {
 		if err != nil || len(msgs) != 1 {
 			t.Fatalf("claim create: messages=%v err=%v", msgs, err)
 		}
-		if msgs[0].Subject != "harness.work.wake" || msgs[0].TenantID != tn || string(msgs[0].Payload) != `{"work_id":"`+w.ID+`"}` {
+		if msgs[0].Subject != "harness.work.wake" || msgs[0].TenantID != tn || workMessageID(t, msgs[0].Payload) != w.ID {
 			t.Fatalf("message=%+v payload=%s", msgs[0], msgs[0].Payload)
 		}
 		concurrent, err := s.ClaimOutbox(ctx, 10, time.Second)

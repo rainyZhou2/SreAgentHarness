@@ -11,16 +11,22 @@ import (
 
 func publishPendingWorkMessages(t *testing.T, s *Store) []domain.OutboxMessage {
 	t.Helper()
-	msgs, err := s.ClaimOutbox(context.Background(), 100, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, msg := range msgs {
-		if err := s.MarkPublished(context.Background(), msg.ID); err != nil {
+	var published []domain.OutboxMessage
+	for {
+		msgs, err := s.ClaimOutbox(context.Background(), 100, time.Minute)
+		if err != nil {
 			t.Fatal(err)
 		}
+		if len(msgs) == 0 {
+			return published
+		}
+		for _, msg := range msgs {
+			if err := s.MarkPublished(context.Background(), msg.ID); err != nil {
+				t.Fatal(err)
+			}
+			published = append(published, msg)
+		}
 	}
-	return msgs
 }
 
 func TestReleaseWorkPublishesImmediateRetry(t *testing.T) {
@@ -37,7 +43,7 @@ func TestReleaseWorkPublishesImmediateRetry(t *testing.T) {
 			t.Fatal(err)
 		}
 		msgs := publishPendingWorkMessages(t, s)
-		if len(msgs) != 1 || string(msgs[0].Payload) != `{"work_id":"`+w.ID+`"}` {
+		if len(msgs) != 1 || workMessageID(t, msgs[0].Payload) != w.ID {
 			t.Fatalf("messages=%v", msgs)
 		}
 	})
@@ -65,10 +71,10 @@ func TestWakeDeferredPublishesEachWork(t *testing.T) {
 		}
 		seen := map[string]bool{}
 		for _, msg := range msgs {
-			seen[string(msg.Payload)] = true
+			seen[workMessageID(t, msg.Payload)] = true
 		}
 		for _, w := range []work.Work{first, second} {
-			if !seen[`{"work_id":"`+w.ID+`"}`] {
+			if !seen[w.ID] {
 				t.Errorf("missing wake for %s: %v", w.ID, seen)
 			}
 		}
@@ -100,7 +106,7 @@ func TestCompleteChildPublishesEligibleParentWake(t *testing.T) {
 		msgs := publishPendingWorkMessages(t, s)
 		found := false
 		for _, msg := range msgs {
-			if string(msg.Payload) == `{"work_id":"`+parent.ID+`"}` {
+			if workMessageID(t, msg.Payload) == parent.ID {
 				found = true
 			}
 		}
@@ -130,7 +136,7 @@ func TestCompleteChildPublishesEligibleParentWake(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, msg := range publishPendingWorkMessages(t, s) {
-			if string(msg.Payload) == `{"work_id":"`+parent.ID+`"}` {
+			if workMessageID(t, msg.Payload) == parent.ID {
 				t.Fatalf("blocked parent was woken: %v", msg)
 			}
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go-sre-harness/internal/cpkit"
 	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/security/revocation"
 	"go-sre-harness/internal/store/cpsql"
@@ -80,11 +81,11 @@ func TestTwoReplicasObserveRevocation(t *testing.T) {
 	}
 	a := newSecurityReplica(t, "a", newPostgresSecurityStore(t))
 	b := newSecurityReplica(t, "b", newPostgresSecurityStore(t))
-	req := security.Request{Operation: security.ArtifactWrite, TenantID: "t-replica-" + strings.ReplaceAll(t.Name(), "/", "-"),
+	req := security.Request{Operation: security.ArtifactWrite, TenantID: "t-replica-" + cpkit.NewID(),
 		Subject: "work:w", WorkID: "w", RunID: "r", InputHash: "sha256:" + strings.Repeat("a", 64)}
 	decision, err := a.Authorize(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || decision.Effect != security.Allow {
+		t.Fatalf("authorize: decision=%+v err=%v", decision, err)
 	}
 	if _, err = b.Revocations.Revoke(context.Background(), revocation.Event{TenantID: req.TenantID, Scope: "work", ScopeID: "w",
 		IdempotencyKey: "stop-w", ActorID: "admin", Reason: "incident", CreatedAt: time.Now().UTC()}); err != nil {

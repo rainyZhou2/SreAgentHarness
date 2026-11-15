@@ -108,26 +108,26 @@ func TestSecondaryIncidentsForRejectsInconsistentLinks(t *testing.T) {
 			corrupt func(t *testing.T, tenantID, secondaryID, actionID string)
 		}{
 			{name: "missing action link", corrupt: func(t *testing.T, tenantID, secondaryID, _ string) {
-				_, err := s.DB().ExecContext(ctx, `DELETE FROM work_subject_links WHERE tenant_id=? AND work_id=? AND subject_kind='caused_by_action'`, tenantID, secondaryID)
+				_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM work_subject_links WHERE tenant_id=? AND work_id=? AND subject_kind='caused_by_action'`), tenantID, secondaryID)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}},
 			{name: "missing action", corrupt: func(t *testing.T, tenantID, _, actionID string) {
-				_, err := s.DB().ExecContext(ctx, `DELETE FROM work_actions WHERE tenant_id=? AND id=?`, tenantID, actionID)
+				_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM work_actions WHERE tenant_id=? AND id=?`), tenantID, actionID)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}},
 			{name: "duplicate action link", corrupt: func(t *testing.T, tenantID, secondaryID, _ string) {
-				_, err := s.DB().ExecContext(ctx, `INSERT INTO work_subject_links (tenant_id, work_id, subject_kind, subject_id, created_at)
-					VALUES (?,?,?,?,?)`, tenantID, secondaryID, work.SubjectCausedByAction, cpkit.NewID(), t0)
+				_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO work_subject_links (tenant_id, work_id, subject_kind, subject_id, created_at)
+					VALUES (?,?,?,?,?)`), tenantID, secondaryID, work.SubjectCausedByAction, cpkit.NewID(), t0)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}},
 			{name: "non incident", corrupt: func(t *testing.T, tenantID, secondaryID, _ string) {
-				_, err := s.DB().ExecContext(ctx, `UPDATE agent_works SET kind='routine' WHERE tenant_id=? AND id=?`, tenantID, secondaryID)
+				_, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET kind='routine' WHERE tenant_id=? AND id=?`), tenantID, secondaryID)
 				if err != nil {
 					t.Fatal(err)
 				}
