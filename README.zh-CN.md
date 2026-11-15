@@ -4,37 +4,44 @@
 
 [English](README.md) | **简体中文**
 
-面向 SRE 场景的认知型 Agent 运行时：把每一次推理和工具调用当作可恢复、可审计的分布式事务来执行。
+企业级长期自治 SRE Agent Runtime：以统一持久执行内核承载长期目标，让每一次推理、工具调用和生产变更都可恢复、可审计、可验证。
+
+**Durable Agent Runtime · Continuous Work · Safe Production Execution · Verifiable Decision & Outcome**
 
 <img src="docs/images/desktop-diagnosis.zh-CN.png" alt="桌面客户端：一次排查的工作日志、工具调用和已验证的假设" width="900">
 
-[桌面客户端](#桌面客户端) · [快速开始](#快速开始) · [架构](#架构) · [Agent 运行时](#agent-运行时) · [记忆](#记忆) · [推理质量](#推理质量) · [触发器与策略](#触发器策略规则与动作闭环) · [部署](#部署) · [配置](#配置) · [API](#api)
+[核心优势](#核心优势) · [桌面客户端](#桌面客户端) · [快速开始](#快速开始) · [架构](#架构) · [Agent 运行时](#agent-运行时) · [记忆](#记忆) · [推理质量](#推理质量) · [触发器与策略](#触发器策略规则与动作闭环) · [部署](#部署) · [配置](#配置) · [API](#api)
 
 </div>
 
-## 亮点
+## 核心优势
 
-- **数据库是唯一真相，推送只是加速**：断线、丢消息、副本故障都不会造成状态不一致。
-- **副作用不可重复**：审批绑定动作哈希，执行前二次校验意图；结果未知宁可交给人，也不自动重试。
-- **插件只能收紧不能放宽**：策略底线、风险等级来源、信任规则、审计都由框架兜底。
-- **没有 API Key 也能跑通全链路**：内置 scripted 模型，账本、Manifest、流式输出和工具校验全部走到。
-- **演进闭环完整**：数据集冻结 → 离线回放 → 门禁 → 人工批准 → 金丝雀 → 自动回滚。
+- **长期目标，而不是长期会话**：Work 是独立的长期目标聚合，身份、Generation、阶段、预算和唤醒条件全部持久化；等待期间不占用 Worker，也不消耗模型 Token。
+- **一个内核，统一可靠语义**：Run／Step／Attempt 共享 Claim、Lease、Fence、Checkpoint、Outbox、预算和恢复机制，Work 编排与插件不另建私有执行内核。
+- **安全高于自治**：统一 `PolicyDecision` 覆盖 Tool、MCP、Sandbox、Artifact、Memory 与 Model Egress；生产 Action 绑定意图哈希、目标版本、资源锁和审批，未知效果进入 Inspect／Reconcile，而非盲目重试。
+- **证据、裁决与效果彼此独立**：Evidence 记录观察，DecisionVerdict 统一裁决，Outcome 验证实际效果；工具返回成功不等于业务恢复，多 Agent 投票不能替代有效证据。
+- **数据库权威，事件可靠恢复**：在线状态、领域事件和 Outbox 同事务提交，JetStream／MQ 只负责加速；持久 Cursor、来源对账和轮询 Reconciler 共同覆盖断线、重投与丢失场景。
+- **记忆受治理，不污染权威事实**：Memory 具有来源、版本、ACL、有效期、验证状态和冲突关系；历史经验只生成候选计划，执行前重新检查当前 World、Policy 和 Approval。
+- **Local 与 Team 同构**：SQLite 单机与 PostgreSQL 团队部署共享状态转换、幂等、安全和恢复契约，同一份领域逻辑服务桌面、CLI、Web 与 SDK。
+- **模块化单体，按能力扩展**：清晰的状态所有权配合可替换插件，在不引入分布式调度复杂度的同时获得独立扩缩容、最小权限和版本兼容能力。
+- **质量可以量化，演进可以灰度**：统一 Trace 串联 Event → Work → Run → Action → Outcome；数据集、只读回放、非劣性门禁、人工审批、金丝雀和自动回滚形成治理闭环。
 
 ## 核心能力
 
 | 领域 | 能力 |
 |---|---|
-| **持久执行** | Run/Step/Attempt 状态机，Step 级租约 + Fence Token，进程崩溃后从断点恢复；副作用结果先于步骤提交落账，提交丢失也不会把已知结果变成人工处理 |
-| **安全执行** | R0–R3 风险分级、审批绑定 `action_hash`、一次性授权、副作用账本；结果未知进入 `NEEDS_HUMAN`，绝不自动重放 |
-| **对话** | Session / Turn / Branch，单写者队列，分支 fork，消息与事件可回放 |
-| **模型网关** | Alias → 硬过滤 → 软评分路由，熔断、预算与并发准入，仅在"未发送"时 fallback；支持 Claude、OpenAI 兼容、Gemini |
-| **上下文与意图** | Prompt Manifest（分区哈希）、确定性压缩；每条消息先区分问答 / 诊断 / 澄清 |
-| **长期记忆** | 全文 + 向量 + 依赖图三路召回，RRF 融合，投毒检测与冲突裁决 |
-| **编排 DSL** | Profile 内嵌 flow 图：条件/循环、并行子 Run、变量插值、审批/人工输入、子流程与多 Agent；编译到 Step 引擎 |
-| **联网能力** | `web.fetch` 开箱可用；`web.search` 支持 Brave / Tavily / Bing / 通用后端，输出按不可信内容处理 |
-| **评估与演进** | 从真实 Run 录制数据集、离线回放、非劣性门禁、金丝雀与自动回滚 |
-| **事件分发** | 提交事件 → 事件日志 → Relay → JetStream → SSE；断线按游标回补，稳态不查询数据库 |
-| **插件化** | 除状态机、租约、事务提交、Outbox 和核心路由外，其余全部是可替换插件；显式 Descriptor、版本兼容、最小权限、严格配置和 Host 生命周期统一治理 |
+| **长期自治** | 持久 Work、Work Graph、Generation、Replan、Timer／Event／Approval 唤醒、长期预算与机器 Outcome |
+| **持久执行** | Run／Step／Attempt 状态机，租约与 Fence Token，Checkpoint 恢复，副作用账本与幂等提交 |
+| **安全执行** | R0–R3 风险分级、统一安全决策、Change Window、Canary、动态撤权、目标前置条件与资源锁 |
+| **证据与裁决** | Canonical Reference Resolver、信任／质量／关系／独立性正交评估、统一 DecisionVerdict 与只读重放 |
+| **认知与编排** | 自动 Planner、ReAct、Flow DSL、并行子 Run、多 Agent 只读协作、条件／循环／审批／人工输入 |
+| **模型网关** | Alias 路由、熔断、预算、并发准入、安全 Fallback；支持 Claude、OpenAI 兼容与 Gemini |
+| **上下文与工具** | Prompt Manifest、确定性压缩、MCP／HTTP／Kubernetes／Prometheus／沙箱，所有外部内容按不可信数据处理 |
+| **记忆治理** | 全文＋向量＋依赖图召回，七态生命周期、机器验证与人工审批、ACL、冲突撤销与 Embedding 版本隔离 |
+| **事件与恢复** | Durable Inbox、Transactional Outbox、Work Push、持久 Cursor、来源对账、SSE 断线续传与只读 Replay |
+| **插件体系** | Capability Descriptor、语义版本兼容、权限与数据级别声明、资源预算、健康检查和统一 Host 生命周期 |
+| **评估与演进** | 真实 Run 数据集、离线回放、推理质量评分、非劣性门禁、金丝雀与自动回滚 |
+| **客户端** | Session／Turn／Branch、流式输出、对话内审批、结构化附件；Desktop、CLI、Web 与 Go SDK 共享领域语义 |
 
 ## 桌面客户端
 
@@ -121,34 +128,64 @@ scripts/demo.sh "remediate high latency service=checkout"
 
 ## 架构
 
+```text
+CLI / Desktop / Web / Go SDK
+              │ REST + SSE + Versioned Protocol
+              ▼
+┌──────────────────── 长期 Work 控制面 ────────────────────┐
+│ Work Service · Template Catalog · Work Graph · Generation │
+│ Orchestrator · Replan · Wakeup · Reconciler · Outcome     │
+└──────────────────────────┬───────────────────────────────┘
+                           │ Start / Resume / Cancel
+                           ▼
+┌──────────────────── 统一 Durable Kernel ─────────────────┐
+│ Run / Step / Attempt · Claim / Lease / Fence              │
+│ Checkpoint / Recovery · Budget · Idempotency · Outbox     │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+             ┌─────────────┴──────────────┐
+             ▼                            ▼
+┌────────── Cognitive Runtime ──────────┐  ┌──────── Safety Executor ────────┐
+│ Context · Planner · Model Gateway     │  │ Policy · Approval · Action Hash │
+│ Multi-Agent · Tools · MCP · Memory    │  │ Resource Lock · Inspect · Effect │
+└──────────────────┬────────────────────┘  └────────────────┬────────────────┘
+                   └────────────────────┬───────────────────┘
+                                        ▼
+                    Evidence → DecisionVerdict → Outcome
+                                        │
+              SQLite / PostgreSQL · Artifact Store · Event Log
+              Transactional Outbox → Optional JetStream / MQ
 ```
-客户端（Web / 桌面端）
-   │ REST + SSE
-internal/api ── 扩展：memory / eval / extensions
-   │
-internal/kernel ── Durable Step Engine
-   ├─ cognitive  意图分析、上下文装配、Prompt Manifest、策略
-   ├─ gateway    路由、熔断、预算、请求与用量账本
-   ├─ tools      MCP / gRPC / Kubernetes / Prometheus / HTTP
-   └─ policy     风险门禁与审批
-   │
-PostgreSQL（唯一真相）  +  NATS JetStream（唤醒与事件分发）
+
+### 架构设计原则
+
+- **状态所有权唯一**：Work Service／Orchestrator 拥有长期目标，Durable Kernel 拥有 Run／Step／Attempt，Action Runtime 拥有生产副作用，Evidence Adjudicator 拥有裁决，Outcome Evaluator 拥有实际效果判定。
+- **短事务领取，带 Fence 提交**：执行在事务外进行，提交重新校验租约与 Fence；失效 Worker 和迟到结果无法覆盖新状态。
+- **在线状态与事件日志分离**：SQLite／PostgreSQL 保存权威聚合与账本，Event Log 承担审计、时间线、因果追踪和受控投影，MQ 不直接修改业务状态。
+- **统一安全控制面**：Tool、MCP、Sandbox、Artifact、Memory 与 Model Egress 使用同一决策契约；副作用提交在数据库事务内重验审计、审批和撤权。`HARNESS_SECURITY_MODE` 支持 `legacy`、`shadow`、`enforce`。
+- **模块化 Go Monolith**：内核只依赖接口，不 import PostgreSQL、NATS 或模型 SDK；部署可以按 API、Worker、Scheduler 拆分，领域语义与状态所有权保持不变。
+- **回放零生产副作用**：Workbench 使用隔离存储与模拟执行器，Eval 使用独立 Artifact 输出；统一 Guard 只允许注册的只读投影，生产副作用返回 `replay_read_only`。
+
+Work 控制面拥有长期目标，同一个 Kernel 拥有其 Run、Step 和 Attempt。Work 所属 Run 及其 Flow 子 Run 通过只读工具调查；生产变更通过 Action Runtime，将策略、审批和派发绑定到当前 Work Generation。Run 预留、所有者关联和激活保留各自的持久恢复边界。
+
+模板可将 `repeat_from` 指向等待阶段。机器目标通过稳定观察窗口后，控制面在同一事务记录本代 Outcome、递增 Generation 并注册下一次等待；Run、Action、费用预算按整个生命周期累计。`inference-continuous` 为推理 TTFT 事件提供这一模式，每代动作需要独立审批。未知副作用先通过只读 Inspect 检查，无法确认则进入人工恢复。自动 WorkBench 场景位于 `internal/workbench/testdata/sglang-continuous.json`，通过脚本化指标和隔离执行器提供可重复的控制面回归。
+
+`inference-incident` 模板并行运行必需的 Mitigation 子 Work 与可选的只读 RCA 子 Work。调用者提供机器恢复目标；Mitigation 通过 `inherit_success` 显式继承，父 Work 独立验证同一目标。恢复与根因裁决分别表达：RCA 可以继续调查，已验证的恢复不依赖根因结论。
+
+Decision Adjudicator v3 规范化裁决输入，并在 API、评分和复盘读取时重新验证当前 Ledger。历史 v2 裁决通过重放和重新裁决进入当前语义。升级时暂停调度和裁决写入、排空旧 Worker，将消费者和 Worker 一并升级后再恢复；回滚保留对既有 v3 记录的读取能力。回滚到不理解 `repeat_from` 的版本前，须暂停循环 Work。
+
+### SRE 全生命周期闭环
+
+```text
+Observe → Evaluate Goal → Decide → Plan / Replan → Durable Run
+       → Safe Action → Inspect → Outcome → Memory / Improvement → Wait
 ```
 
-- **短事务领取 → 事务外执行 → 带 Fence 提交**：租约丢失时结果直接丢弃，旧 worker 无法覆盖新状态。
-- **无空洞事件日志 + Transactional Outbox**：状态、事件、唤醒消息同事务提交，Reconciler 兜底恢复。
-- **事件平面**：Relay 以租约单活追尾事件日志，JetStream 按 Run 分发；SSE 网关补齐一次后只接收推送。
-- **内核只依赖接口**：不 import PostgreSQL、NATS 或模型 SDK，适配器可独立替换和测试。
-- **统一安全控制面**：Tool、MCP、Sandbox、Artifact、Memory 与 Model Egress 使用同一决策契约；副作用提交在数据库事务内重验审计、审批和撤权。`HARNESS_SECURITY_MODE` 支持 `legacy`、`shadow`、`enforce`，默认保持 Legacy；上线与回退顺序见 [统一安全控制面上线顺序](docs/architecture/SECURITY_ROLLOUT_2026-11-15.md)。
-- **只读 Replay**：Workbench 使用隔离存储与模拟执行器，Eval 回放使用独立 Artifact 输出；通用投影仅接受注册的只读入口，生产副作用返回 `replay_read_only`。
-
-Work 控制面拥有长期目标，同一个 Kernel 拥有其 Run、Step 和 Attempt。Work 所属 Run 及其 Flow 子 Run 通过只读工具调查；生产变更通过 Action Runtime，将策略、审批和派发绑定到当前 Work generation。Run 预留、所有者关联和激活保留各自的持久恢复边界。
-
-模板可将 `repeat_from` 指向等待阶段。机器目标通过稳定观察窗口后，控制面在同一事务记录本代 Outcome、递增 generation 并注册下一次等待；Run、Action、费用预算按整个生命周期累计。`inference-continuous` 为推理 TTFT 事件提供这一模式，每代动作需要独立审批。未知副作用先通过只读 Inspect 检查，无法确认则进入人工恢复，不重新派发。自动 WorkBench 场景位于 `internal/workbench/testdata/sglang-continuous.json`，使用脚本化指标和隔离执行器，并非真实 Serving 集群验收。
-
-可选的 `inference-incident` 模板并行运行必需的 Mitigation 子 Work 与可选的只读 RCA 子 Work。调用者必须提供机器恢复目标；Mitigation 通过 `inherit_success` 显式继承，父 Work 独立验证同一目标。恢复后，未得出确定结论的 RCA 可以继续运行。现有事故路由保持兼容；跨子 Work 报告聚合和完整的 Incident 正交状态投影尚未实现。
-
-Decision adjudicator v3 规范化裁决输入，并在 API、评分和复盘读取时重新验证当前 Ledger。历史 v2 裁决仍可重放，但需重新裁决才能成为当前有效结论。升级时应暂停调度和裁决写入、排空旧 Worker，将消费者和 Worker 一并升级后再恢复；v2 二进制不能解释新写入的 v3 裁决。回滚需要停止 v3 写入并保留读取已有 v3 记录的能力，不能只替换回旧二进制。这些新增字段无需 SQL migration。回滚到不理解 `repeat_from` 的旧二进制前，须暂停循环 Work。
+- **止损与 RCA 解耦**：Mitigation 和只读 RCA 使用独立子 Work，恢复由机器 Outcome 判定，根因由 DecisionVerdict 表达，避免“工具成功即恢复”或“根因明确即恢复”的误判。
+- **统一事实来源**：Postmortem、WorkEval、API 与 UI 消费同一 DecisionVerdict、Action Ledger 和 Outcome，模型负责组织语言，不创造账本之外的结论。
+- **改进以效果关闭**：Improvement Work 关联原事故和整改动作，以规则测试、SLO 稳定、容量达标或配置生效等可验证结果评价实际效果。
+- **长期运行低成本**：常规等待、Timer、状态核验和稳定观察窗不调用模型；只有需要推理、重规划或处置时才启动新的 Run。
+- **领域能力外置**：SRE、GPU、推理服务、可观测数据源和 Action Adapter 通过 Work Template、Decision Profile 与 Plugin 扩展，通用内核保持稳定。
 
 ### 编排 DSL
 
@@ -251,7 +288,7 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 
 ### 记忆检索
 
-固定记忆和历史 `harness.memory_search` 结果在进入模型上下文前重新检查租户、ACL、当前版本、生命周期、有效期、环境和数据级别；个人固定记忆还必须属于发起 Run 的用户。原始 Artifact 保留为不可变审计记录。这一过滤尚不能撤回旧压缩摘要或笔记中已衍生的自由文本。
+固定记忆和历史 `harness.memory_search` 结果在进入模型上下文前重新检查租户、ACL、当前版本、生命周期、有效期、环境和数据级别；个人固定记忆还必须属于发起 Run 的用户。原始 Artifact 保留为不可变审计记录，历史摘要与笔记始终作为不可信上下文；当前 Work、Evidence、DecisionVerdict 和 Outcome 继续承担权威事实语义。
 
 - **历史运行搜索**：`harness.run_search`（R0，`query`，可选 `service`、`status`、`limit` ≤ 10）搜索已结束的运行——当时的问题、结论和假设——这样即使没人把某次排查提升为记忆，智能体也能找到它是怎么结束的。可见范围是调用者自己的对话和非用户发起的运行（触发器、定时、Work），看不到其他用户的对话，跳过 flow 的子运行和调用方自己，会脱敏，并标注为“历史”而非证据。它扫描最近的已结束运行（默认 300 条、6 秒预算），文本带缓存，被截断时会明确说明；数据库全文索引可以去掉这个上限。
 
@@ -262,7 +299,7 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 
 ## 推理质量
 
-对 agent 显式的决策轨迹（计划、带置信度的假设、校验）做打分、复用和改进；从不读取模型提供方隐藏的推理。设计文档：`docs/superpowers/specs/2026-11-07-reasoning-quality-and-self-improvement-design.md`。
+对 Agent 显式的决策轨迹（计划、带置信度的假设、校验）进行打分、复用和改进；评分依据来自持久账本与可检查引用，不依赖模型提供方隐藏的推理。
 
 - **量化**：每个结束的 run 由 consolidator 打分，收到反馈后重新打分。指标包括：校准度（以 VERIFIED/REFUTED 结束的假设的 Brier 分数）、证据支撑率、重复工具调用、到首个结论的步数、最终校验结论和综合质量分。离线回放用同一套打分；若候选版本在 holdout 上的校准度、证据支撑率、冗余率或质量分退化，发布门禁直接不通过。
 - **引用校验**：每条 observation 头都带有自己的引用 `obs:step<N>`，证据为 `kv:<key>@<v>`，记忆为 `memory:<id>@<v>`。kernel 会把 `supports`、`refutes`、`evidence_refs` 中的每条引用与本次请求实际给模型看的内容对照解析（`obs:4`、`obs:<tool>`、offload handle 等别名会归一为标准形式）。指向不存在内容的引用存为 `unresolved:<原文>`，不计入证据支撑。没有有效引用就被判为 VERIFIED/REFUTED 的假设记为无据结论；VERIFIED 结论如果 verification 和已证实的假设都没有有效引用，视为模型自封：打分和统计按未验证处理，不算成功，也不会被提炼成模式。引用有效率、无据假设率和无据结论率会汇总进 summary，纳入发布门禁和金丝雀门禁，并在改进循环中触发 `citation` playbook 提示。
@@ -379,11 +416,11 @@ HARNESS_PG_TEST_URL=postgres://localhost/harness_test go test -race ./...
 harness work-bench run bench/cases
 ```
 
-CI 门禁（RFC §24.3）如下；workflow 文件和 bench 用例只保存在本地，不进仓库：
+CI 门禁（RFC §24.3）围绕正确性、兼容性、故障恢复和性能预算组织：
 
 - **gofmt、go vet**（包括 `-tags=integration`）。
 - **单元测试**：SQLite 与 PostgreSQL，普通模式和 `-race` 各跑一遍。
-- **迁移只能追加**：`migrations/checksums.sha256` 固定了每个已发布迁移的校验和。新增迁移后执行 `go test ./migrations -run AppendOnly -update-checksums` 记录；修改已记录的迁移会让构建失败。
+- **迁移只能追加**：`migrations/checksums.sha256` 固定每个已发布迁移的校验和。新增迁移后执行 `go test ./migrations -run AppendOnly -update-checksums` 记录；修改已记录的迁移会让构建失败。
 - **升级兼容**：`TestUpgradeKeepsOldRecordsReadable` 在旧 schema（v1.0、最后一个 v1、早期 v2）写入记录，升级到最新后用当前代码读回。
 - **故障注入**（`go test -tags=integration ./internal/orchestration -run Fault`）：三个副本同时处理同一批 Work，期间随机崩溃、提交成功但返回错误、执行器在生效前或生效后超时。门禁要求：每个副作用最多下发、生效一次；需要审批的动作不会在无审批时下发；每个 SUCCEEDED 的 Work 都有 SATISFIED 结果；其余 Work 只能因“副作用未知”停在 BLOCKED 等人处理。日志会打印随机种子，设置 `HARNESS_CHAOS_SEED` 可复现。
 - **基准与压测**：先跑 bench 用例，再跑 `harness work-bench load`，输出 Work 创建、事件关联、唤醒延迟（Work 到期到被 orchestrator 开始处理）和世界快照的 p50/p95/p99 与吞吐，超出 `-budget` 文件中的预算即失败：
@@ -401,16 +438,14 @@ HARNESS_DATABASE_URL=postgres://localhost/scratch harness work-bench load -store
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "审批后重启 checkout"
 ```
 
-## 已知限制
+## 生产部署基线
 
-- vLLM/SGLang 的模型路由与 KV cache offload 控制未实现；推理健康、诊断和 prefill/decode 池扩缩容已实现。
-- Artifact：文件系统实现仅适合单机，生产使用 `s3`（S3/MinIO）存储。受管保留模式统一检查引用、retain_until 和 legal hold，并通过可恢复租约清理；相同前缀的外部 bucket lifecycle 自动到期必须停用，避免绕过引用与 hold。
-- Memory 治理升级使用 PostgreSQL 0037 和 LocalStore schema v3 停机迁移：先停止所有写入与 Artifact 清理器并备份，再启动同版本新二进制；不支持新旧二进制混跑。真实 PostgreSQL、多副本与真实旧数据迁移验收需在目标环境单独执行。
-- 插件动态加载、热切换、版本共存和跨副本全局 Ready 尚未完成。
-- 真实 PostgreSQL、NATS JetStream、多副本故障接管、浏览器进程重启和真实外部来源对账需在目标环境验收；本地测试通过不代表这些生产环境验收已经完成。
-- 离线评估使用独立内存账本，成本不计入租户预算。
-- 计划回放用录制的节点结果驱动 flow 状态机；含有限循环的图会做编译与安全检查，但不做逐步回放。
-- 插件配置在启动时读取，修改后需要重启。可观测数据源例外：它们在目录中带版本，可通过 API 在线变更并回滚。所有插件显式声明 Descriptor 和生命周期；Host 统一启动、健康检查、任务监管与关闭。`MaxConcurrent` 仅约束组件后台任务并按注册顺序公平调度，不限制任意 Provider 方法。配置预检不连接外部服务，但 URL、Provider 参数等部分业务语义仍在初始化时校验。
+- **存储拓扑**：Local 使用 SQLite 与本地 Artifact；Team 使用 PostgreSQL、S3／MinIO 和 NATS JetStream，按 API、Worker、Scheduler 角色拆分进程并共享同一领域契约。
+- **Artifact 保留**：受管保留统一检查业务引用、`retain_until` 和 legal hold，并通过可恢复租约清理；相同前缀的外部 bucket lifecycle 自动到期保持关闭，由数据库引用与保留策略统一决定删除。
+- **数据迁移**：采用 Expand → Migrate → Verify → Contract，迁移前备份数据库并停止写入与 Artifact 清理器；Memory 治理使用 PostgreSQL 0037 和 LocalStore schema v3，在同一版本二进制下完成升级与校验。
+- **插件治理**：配置在启动时加载，配置变更通过滚动重启应用；可观测数据源使用带版本的目录并支持 API 在线变更与回滚。Descriptor、健康检查、任务监管、公平并发和 Drain／Stop 由 Host 统一管理。
+- **评估隔离**：离线评估使用独立内存账本，与生产租户预算隔离；计划回放使用录制节点结果驱动 Flow 状态机，并对有限循环执行编译与安全检查。
+- **安全发布**：通过部署层级、只读调查、Shadow、DryRun、审批、限定 Scope 和金丝雀逐步扩大自动化范围；回滚切换启用路径并保留已提交事实与兼容读取能力。
 
 
 ## 生产控制平面

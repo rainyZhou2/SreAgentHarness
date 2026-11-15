@@ -4,37 +4,44 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A cognitive agent runtime for SRE: every reasoning step and tool call runs as a recoverable, auditable distributed transaction.
+An enterprise-grade, long-running autonomous SRE Agent Runtime: one durable execution kernel carries long-lived goals, making every reasoning step, tool call and production change recoverable, auditable and verifiable.
+
+**Durable Agent Runtime · Continuous Work · Safe Production Execution · Verifiable Decision & Outcome**
 
 <img src="docs/images/desktop-diagnosis.png" alt="Desktop client: a diagnosis with its work log, tool calls and verified hypotheses" width="900">
 
-[Desktop client](#desktop-client) · [Quick start](#quick-start) · [Architecture](#architecture) · [Agent runtime](#agent-runtime) · [Memory](#memory) · [Reasoning quality](#reasoning-quality) · [Triggers & policy](#triggers-policy-rules-and-the-action-loop) · [Deployment](#deployment) · [Configuration](#configuration) · [API](#api)
+[Core strengths](#core-strengths) · [Desktop client](#desktop-client) · [Quick start](#quick-start) · [Architecture](#architecture) · [Agent runtime](#agent-runtime) · [Memory](#memory) · [Reasoning quality](#reasoning-quality) · [Triggers & policy](#triggers-policy-rules-and-the-action-loop) · [Deployment](#deployment) · [Configuration](#configuration) · [API](#api)
 
 </div>
 
-## Highlights
+## Core strengths
 
-- **The database is the only truth; push is an accelerator.** Disconnects, dropped messages and replica failures cannot make state inconsistent.
-- **Side effects cannot be duplicated.** Approvals bind an action hash and are re-checked before execution; an unknown outcome goes to a human instead of being retried.
-- **Plugins can only tighten, never relax.** The policy floor, risk-class source, trust rules and audit are enforced by the framework.
-- **The full path runs without an API key.** The built-in scripted model exercises the ledger, prompt manifest, streaming and tool validation.
-- **The evolution loop is complete.** Freeze a dataset → replay offline → gate → human approval → canary → automatic rollback.
+- **Long-lived goals, not long-lived sessions**: a Work is an independent durable aggregate with its own identity, generation, stages, budget and wakeup conditions. Waiting consumes neither a worker nor model tokens.
+- **One kernel, one reliability contract**: Runs, Steps and Attempts share claim, lease, fencing, checkpoints, outbox, budgets and recovery. Work orchestration and plugins do not create private execution kernels.
+- **Safety before autonomy**: one `PolicyDecision` contract covers Tools, MCP, Sandbox, Artifacts, Memory and Model Egress. Production Actions bind intent hashes, target versions, resource locks and approvals; unknown effects enter Inspect／Reconcile rather than blind retry.
+- **Evidence, decisions and outcomes stay independent**: Evidence records observations, DecisionVerdict provides the single adjudication, and Outcome verifies real-world effects. A successful tool call is not business recovery, and an agent majority is not evidence.
+- **Database authority with recoverable delivery**: state, domain events and outbox records commit atomically. JetStream／MQ only accelerates delivery; persistent cursors, source reconciliation and polling reconcilers cover disconnects, redelivery and loss.
+- **Governed memory, authoritative facts intact**: Memory carries provenance, versions, ACLs, validity, verification and conflicts. Historical experience proposes candidate plans; execution rechecks current World, Policy and Approval.
+- **One domain contract for Local and Team**: SQLite and PostgreSQL deployments share transitions, idempotency, safety and recovery semantics across Desktop, CLI, Web and SDK.
+- **Modular monolith, capability-oriented extension**: explicit state ownership and replaceable plugins provide independent scaling, least privilege and version compatibility without distributed scheduler complexity.
+- **Measurable quality, governed evolution**: traces connect Event → Work → Run → Action → Outcome. Datasets, read-only replay, non-inferiority gates, human approval, canaries and automatic rollback form one governance loop.
 
 ## Core capabilities
 
 | Area | Capability |
 |---|---|
-| **Durable execution** | Run/Step/Attempt state machine, step-level leases + fence tokens, resume after a crash; side-effect results are recorded before the step commit, so a lost commit never turns a known outcome into a human escalation |
-| **Safe execution** | R0–R3 risk classes, approvals bound to `action_hash`, single-use grants, side-effect ledger; unknown outcomes go to `NEEDS_HUMAN` and are never replayed |
-| **Conversations** | Session / Turn / Branch, single-writer queue, branch fork, replayable messages and events |
-| **Model gateway** | Alias → hard filters → soft-score routing, circuit breakers, budget and concurrency admission, fallback only while "not yet sent"; Claude, OpenAI-compatible and Gemini |
-| **Context & intent** | Prompt manifest (per-section hashes), deterministic compaction; each message is classified as a question, a task or a clarification |
-| **Long-term memory** | Full-text + vector + dependency-graph recall, RRF fusion, poisoning checks and conflict resolution |
-| **Orchestration DSL** | A profile-embedded flow graph: conditions/loops, parallel child runs, variable interpolation, approvals/human input, subflows and multi-agent |
-| **Web** | `web.fetch` works out of the box; `web.search` supports Brave / Tavily / Bing / a generic backend, with output treated as untrusted |
-| **Evaluation & evolution** | Datasets recorded from real runs, offline replay, non-inferiority gate, canary with automatic rollback |
-| **Event delivery** | Committed event → event log → relay → JetStream → SSE; reconnects resume from the cursor, with no steady-state database reads |
-| **Plugins** | Everything is replaceable except the state machine, leases, transactional commit, outbox and core routes |
+| **Continuous autonomy** | Durable Works, Work Graph, generations, replanning, timer／event／approval wakeup, lifetime budgets and machine Outcomes |
+| **Durable execution** | Run／Step／Attempt state machines, leases and fence tokens, checkpoint recovery, effect ledgers and idempotent commits |
+| **Safe execution** | R0–R3 risk classes, unified security decisions, change windows, canaries, dynamic revocation, target preconditions and resource locks |
+| **Evidence & decisions** | Canonical reference resolution, orthogonal trust／quality／relation／independence, one DecisionVerdict and read-only replay |
+| **Cognition & orchestration** | Automatic Planner, ReAct, Flow DSL, parallel child Runs, read-only multi-agent collaboration, conditions／loops／approvals／human input |
+| **Model gateway** | Alias routing, circuit breakers, budgets, concurrency admission and safe fallback; Claude, OpenAI-compatible and Gemini |
+| **Context & tools** | Prompt Manifest, deterministic compaction, MCP／HTTP／Kubernetes／Prometheus／Sandbox, with all external content treated as untrusted data |
+| **Memory governance** | Full-text＋vector＋dependency recall, seven-state lifecycle, machine verification and human approval, ACLs, conflict revocation and embedding-version isolation |
+| **Events & recovery** | Durable Inbox, Transactional Outbox, Work Push, persistent cursors, source reconciliation, resumable SSE and read-only Replay |
+| **Plugin system** | Capability Descriptors, semantic-version compatibility, permission and data-class declarations, resource budgets, health checks and one Host lifecycle |
+| **Evaluation & evolution** | Real-Run datasets, offline replay, reasoning-quality scores, non-inferiority gates, canaries and automatic rollback |
+| **Clients** | Session／Turn／Branch, streaming, inline approvals and structured attachments; Desktop, CLI, Web and Go SDK share domain semantics |
 
 ## Desktop client
 
@@ -85,8 +92,8 @@ Day-to-day commands for local mode:
 | `harness local init` | Choose a model provider, test the key with a read-only call (no tokens spent) and save it to `<data>/local.env` (mode 0600). The real environment always overrides the file. |
 | `harness chat` | Interactive chat in the terminal with inline approvals (`/approvals`, `/approve N`, `/resume`, `--yes`). Works against a team server too (`-server`, `-token`). |
 | `harness memory list \| set KEY VALUE \| rm KEY` | View and edit the personal memory the agent keeps about you (the desktop app has the same in its **Memory** view). |
-| `harness memory review \| show ID \| approve ID \| reject ID [REASON] \| archive ID` | Review what the agent proposes to remember (CANDIDATE memories). **Only approved (ACTIVE) memories reach later runs**, so without review the agent's learning never takes effect. `review` shows what each proposal would replace; IDs may be shortened to a unique prefix. The desktop **Memory → Learned by the agent** tab does the same, with edit-then-approve and a pending-count badge. |
-| `harness memory curate \| suggestions \| apply ID \| dismiss ID` | Look for memories worth setting aside and review the suggestions (see *Memory curation*). `apply` sets them aside as STALE (out of retrieval, restorable with `memory approve ID`); `dismiss` keeps them and the same finding is not raised again. |
+| `harness memory review \| show ID \| approve ID \| reject ID [REASON] \| archive ID` | Review what the agent proposes to remember (CANDIDATE and machine-verified VERIFIED memories). Human approval accepts VERIFIED memories and publishes them as APPROVED through the pinned-version endpoint. Semantic memories can be recalled as VERIFIED or APPROVED; procedural memories require APPROVED. Reject and archive revoke a memory, while STALE memories cannot be republished directly from the CLI. IDs may be shortened to a unique prefix. |
+| `harness memory curate \| suggestions \| apply ID \| dismiss ID` | Look for memories worth setting aside and review the suggestions (see *Memory curation*). `apply` marks them STALE; restoration requires new evidence and fresh machine verification. `dismiss` keeps them and the same finding is not raised again. |
 | `harness compact-eval [-runs N]` | Measures what a compactor keeps from fixed investigation histories: key-fact recall, what the model is shown, citations, injection leakage. With no model configured it measures only the deterministic baseline and says the model-backed one was not run. |
 | `harness local doctor` | Checks the data directory, token, database integrity and schema, port, disk use, model keys and Prometheus. Exits 1 on a failure. |
 | `harness local backup [-out F]` | Consistent backup while running (database snapshot, event logs, artifacts). Tokens and API keys are never included. |
@@ -121,32 +128,64 @@ The default `dev` authentication mode only listens on loopback addresses.
 
 ## Architecture
 
+```text
+CLI / Desktop / Web / Go SDK
+              │ REST + SSE + Versioned Protocol
+              ▼
+┌──────────────────── Continuous Work Plane ───────────────────┐
+│ Work Service · Template Catalog · Work Graph · Generation     │
+│ Orchestrator · Replan · Wakeup · Reconciler · Outcome         │
+└──────────────────────────┬────────────────────────────────────┘
+                           │ Start / Resume / Cancel
+                           ▼
+┌──────────────────── Unified Durable Kernel ──────────────────┐
+│ Run / Step / Attempt · Claim / Lease / Fence                  │
+│ Checkpoint / Recovery · Budget · Idempotency · Outbox         │
+└──────────────────────────┬────────────────────────────────────┘
+                           │
+             ┌─────────────┴──────────────┐
+             ▼                            ▼
+┌────────── Cognitive Runtime ──────────┐  ┌──────── Safety Executor ────────┐
+│ Context · Planner · Model Gateway     │  │ Policy · Approval · Action Hash │
+│ Multi-Agent · Tools · MCP · Memory    │  │ Resource Lock · Inspect · Effect │
+└──────────────────┬────────────────────┘  └────────────────┬────────────────┘
+                   └────────────────────┬───────────────────┘
+                                        ▼
+                    Evidence → DecisionVerdict → Outcome
+                                        │
+              SQLite / PostgreSQL · Artifact Store · Event Log
+              Transactional Outbox → Optional JetStream / MQ
 ```
-clients (web / desktop)
-   │ REST + SSE
-internal/api ── extensions: memory / eval / extensions
-   │
-internal/kernel ── Durable Step Engine
-   ├─ cognitive  intent analysis, context assembly, prompt manifest, strategies
-   ├─ gateway    routing, circuit breakers, budget, request/usage ledger
-   ├─ tools      MCP / gRPC / Kubernetes / Prometheus / HTTP
-   └─ policy     risk gate and approvals
-   │
-PostgreSQL (source of truth)  +  NATS JetStream (wake-ups and event delivery)
+
+### Architectural principles
+
+- **One owner for each state**: Work Service／Orchestrator owns long-lived goals, the Durable Kernel owns Runs／Steps／Attempts, Action Runtime owns production effects, Evidence Adjudicator owns decisions, and Outcome Evaluator owns effect verification.
+- **Short claim transactions, fenced commits**: execution happens outside the transaction; commit rechecks the lease and fence so stale workers and late results cannot overwrite current state.
+- **Online state separated from event history**: SQLite／PostgreSQL owns aggregates and ledgers; the Event Log provides audit, timeline, causality and controlled projections. MQ never changes business state directly.
+- **One security control plane**: Tool, MCP, Sandbox, Artifact, Memory and Model Egress share one decision contract. Side-effect commits revalidate audit, approval and revocation inside the database transaction. `HARNESS_SECURITY_MODE` supports `legacy`, `shadow` and `enforce`.
+- **Modular Go Monolith**: the kernel depends only on interfaces and never imports PostgreSQL, NATS or model SDKs. API, Worker and Scheduler can scale as separate roles without changing domain semantics or state ownership.
+- **Zero production effects during replay**: Workbench uses isolated stores and simulated executors, Eval writes to independent Artifact outputs, and the shared Guard admits only registered read-only projections with `replay_read_only` for production effects.
+
+The Work control plane owns long-lived goals; the same kernel owns their Runs, Steps and Attempts. Work-owned Runs, including flow descendants, investigate through read-only tools. Production changes go through Action Runtime, which binds policy, approval and dispatch to the current Work generation. Run reservation, owner linking and activation retain separate durable recovery boundaries.
+
+Templates may set `repeat_from` to a wait stage. After the machine goal passes its observation window, the control plane atomically records the completed generation's Outcome, increments the generation and installs the next wait. Lifetime Run, Action and cost budgets remain cumulative. `inference-continuous` supplies this pattern for inference TTFT events; each new generation needs its own approval. Unknown effects use read-only inspection and fall back to manual recovery. The automated WorkBench scenario in `internal/workbench/testdata/sglang-continuous.json` uses scripted metrics and an isolated executor for repeatable control-plane regression.
+
+The `inference-incident` template runs a required Mitigation child Work and an optional, read-only RCA child Work concurrently. The caller supplies a machine recovery goal; Mitigation inherits it explicitly through `inherit_success`, while the parent independently verifies the same goal. Recovery and root-cause adjudication remain independent: RCA can continue while verified recovery stands on its own.
+
+Decision Adjudicator v3 canonicalizes inputs and revalidates current ledger evidence before API, scorecard and postmortem consumption. Historical v2 decisions enter current semantics through replay and re-adjudication. Pause scheduling and decision writes, drain older workers, upgrade consumers and workers together, then resume. Rollback retains readers for existing v3 records. Pause repeating Works before rolling back to a version that does not understand `repeat_from`.
+
+### The SRE lifecycle loop
+
+```text
+Observe → Evaluate Goal → Decide → Plan / Replan → Durable Run
+       → Safe Action → Inspect → Outcome → Memory / Improvement → Wait
 ```
 
-- **Claim in a short transaction → execute outside it → commit with the fence**: a worker that lost its lease discards its result, so stale workers cannot overwrite new state.
-- **Gap-free event log + transactional outbox**: state, events and wake-ups commit together; the reconciler recovers anything stuck.
-- **Event plane**: a leased relay tails the event log, JetStream fans events out per run, and the SSE gateway reads the log once before streaming live updates.
-- **The kernel depends only on interfaces**: it never imports PostgreSQL, NATS or a model SDK, so adapters are replaceable and testable.
-
-The Work control plane owns long-lived goals; the same kernel owns their Runs, Steps and Attempts. Work-owned Runs, including flow descendants, investigate through read-only tools. Production changes go through the Action runtime, which binds policy, approval and dispatch to the current Work generation. Run reservation, owner linking and activation retain separate durable recovery boundaries.
-
-Templates may set `repeat_from` to a wait stage. After the machine goal passes its observation window, the control plane atomically records the completed generation's Outcome, increments the generation and installs the next wait. Lifetime Run, Action and cost budgets remain cumulative. `inference-continuous` supplies this pattern for inference TTFT events; each new generation needs its own approval. Unknown effects use read-only inspection and fall back to manual recovery rather than redispatch. The automated WorkBench scenario is in `internal/workbench/testdata/sglang-continuous.json`; it uses scripted metrics and an isolated executor, not a live serving cluster.
-
-The opt-in `inference-incident` template runs a required mitigation child and an optional, read-only RCA child concurrently. It requires a caller-supplied machine recovery goal; mitigation inherits it explicitly through `inherit_success`, while the parent independently verifies the same goal. An inconclusive RCA can remain open after recovery. The existing incident route is unchanged. Cross-child report aggregation and a complete orthogonal Incident status projection are not yet implemented.
-
-Decision adjudicator v3 canonicalizes inputs and revalidates current ledger evidence before API, scorecard and postmortem consumption. Historical v2 decisions remain replayable but require re-adjudication to become current. Pause scheduling and decision writes, drain older workers, upgrade consumers and workers together, then resume; a v2 binary cannot interpret newly written v3 decisions. A binary rollback therefore requires stopping v3 writers and retaining v3 readers for their records, not merely reverting the executable. No SQL migration is required for these additive fields. Pause repeating Works before rolling back to a binary that does not understand `repeat_from`.
+- **Mitigation and RCA are independent**: separate child Works isolate production recovery from read-only analysis. Machine Outcome verifies recovery while DecisionVerdict expresses root cause, avoiding both “tool succeeded, therefore recovered” and “root cause found, therefore recovered.”
+- **One factual foundation**: Postmortem, WorkEval, API and UI consume the same DecisionVerdict, Action Ledger and Outcome. Models organize language rather than inventing conclusions outside the ledger.
+- **Improvements close on evidence**: Improvement Works link incidents to remediation and evaluate real effects through rule tests, stable SLOs, capacity targets or effective configuration.
+- **Low-cost continuous operation**: waiting, timers, state checks and observation windows do not call a model. A new Run starts only when reasoning, replanning or remediation is needed.
+- **Domain capabilities stay outside the kernel**: SRE, GPU, inference serving, observability sources and Action Adapters extend the runtime through Work Templates, Decision Profiles and Plugins.
 
 ### Orchestration DSL
 
@@ -179,7 +218,7 @@ The desktop client does not ask you to choose a profile. An auto session starts 
 
 The planner treats its own inputs as untrusted: the goal, session history, capability lines and a failed attempt's node outputs are enclosed in `<<<DATA>>>` boundaries with chat-template tokens neutralized, and tool descriptions (which come from plugins and tenant MCP servers) that look like injected instructions are withheld from both the prompt and the tool schemas. Any such finding is recorded on the plan and forces a plan review of a generated flow, even with `HARNESS_PLAN_APPROVAL=never`. When a generated flow fails, the run is not failed straight away: up to `HARNESS_PLAN_MAX_REPLANS` times the planner is called again with the failure, the nodes that ran and the side effects that completed, and the new plan runs as a new flow generation (fresh state and child runs; the failed generation stays for audit, and its approvals do not carry over because the plan hash binds the generation).
 
-Plans improve from earlier runs. A run that completes on a model-generated flow (not a fallback, no injection flag, not rejected, not disputed, not marked wrong) is distilled into a *plan exemplar* memory (scoped to the service, deduplicated by content) that follows the normal memory lifecycle; the planner is shown the closest ACTIVE exemplars and reasoning patterns for the goal and services, as untrusted data. Each run records plan metrics (repairs, fallback, replans, review requested/rejected, injection, cache hit), and the canary and candidate gates compare fallback, repair, replan, rejection, success and injection rates against the baseline. Routing tries a hint, the requested mode and named actions, then the regex lists, then a classifier (an n-gram kNN over labelled example goals by default, or an embedding classifier; set `ClassifierFirst` to consult it before the regexes). Every generated or fallback flow is dry-run with simulated successful children before approval: a flow that cannot complete its default path within its own limits is repaired, and side-effect nodes reached without a prior approval are flagged. The plan review carries a readable summary, ordered steps, risks, the dry-run path, and a diff against the previous generation (replan) or the fallback runbook. Agent nodes without pinned tools are pinned to the read-only tools so their risk is not assumed to be the highest. Token estimates use a typical output size, with the worst case reported alongside. Plans without replan or injection flags are cached per tenant and inputs, and a cache hit is re-validated against the current tool catalog. A profile's `planner` section can tighten (never loosen) these settings per tenant: model alias or ladder, approval mode, node/call/token/repair/replan limits, and fallback rules by service or goal pattern.
+Plans improve from earlier runs. A run that completes on a model-generated flow (not a fallback, no injection flag, not rejected, not disputed, not marked wrong) is distilled into a *plan exemplar* memory (scoped to the service, deduplicated by content) that follows the normal memory lifecycle; the planner is shown the closest APPROVED exemplars and reasoning patterns for the goal and services, as untrusted data. Each run records plan metrics (repairs, fallback, replans, review requested/rejected, injection, cache hit), and the canary and candidate gates compare fallback, repair, replan, rejection, success and injection rates against the baseline. Routing tries a hint, the requested mode and named actions, then the regex lists, then a classifier (an n-gram kNN over labelled example goals by default, or an embedding classifier; set `ClassifierFirst` to consult it before the regexes). Every generated or fallback flow is dry-run with simulated successful children before approval: a flow that cannot complete its default path within its own limits is repaired, and side-effect nodes reached without a prior approval are flagged. The plan review carries a readable summary, ordered steps, risks, the dry-run path, and a diff against the previous generation (replan) or the fallback runbook. Agent nodes without pinned tools are pinned to the read-only tools so their risk is not assumed to be the highest. Token estimates use a typical output size, with the worst case reported alongside. Plans without replan or injection flags are cached per tenant and inputs, and a cache hit is re-validated against the current tool catalog. A profile's `planner` section can tighten (never loosen) these settings per tenant: model alias or ladder, approval mode, node/call/token/repair/replan limits, and fallback rules by service or goal pattern.
 
 ## Agent runtime
 
@@ -228,20 +267,20 @@ What the agent remembers, for how long, and how memories are kept current.
 
 - **Notes**: the agent writes memory in its `THOUGHT` line or its conclusion as `"notes":[{"key","value","scope"}]`; writing a key again updates it, an empty value deletes it. The kernel rebuilds notes from the stored decisions, so they survive retries and compaction, and renders them in a `[working memory]` section inside a data boundary. A tier holds at most 24 notes of 500 characters.
 - **Short-term**: the session notes after a run are stored in its result (`memory.session`); the next turn on the same branch starts from the latest completed turn's notes, so a forked branch sees only its own history.
-- **Personal**: when a user-started run completes, its `user` notes create, reinforce, revise (new version) or archive that user's memory for each key (`pref:<key>`, ACTIVE, `restricted`). Personal memory is pinned with the run's retrieved memories and rendered in an `[about the user]` section for that user's runs only; shared retrieval, `harness.memory_search` and other users never see it (admins can list it). Instruction-like text is rejected, and a preference never authorizes an action. Users manage theirs with `GET /api/me/memories`, `PUT|DELETE /api/me/memories/{key}`.
-- **Long-term from the agent**: `long_term` notes of a completed, undisputed run become CANDIDATE memories (VALIDATING when feedback verified the run) with subject `note:<key>`, reviewed like any other.
+- **Personal**: when a user-started run completes, its `user` notes create, reinforce, revise or revoke that user's memory for each key (`pref:<key>`, APPROVED, `restricted`). Owner-scoped semantic preferences use a separate publishing path; other memories cannot use it to bypass machine verification and human approval. Personal memory is rendered in an `[about the user]` section only for that user's runs; shared retrieval and other users never see it. A preference never authorizes an action. Users manage theirs with `GET /api/me/memories`, `PUT|DELETE /api/me/memories/{key}`.
+- **Long-term from the agent**: `long_term` notes of a completed, undisputed run become CANDIDATE memories with subject `note:<key>`. A trusted machine principal writes an immutable verification record for a pinned version through `/verify` and moves it to VERIFIED; an approver then publishes it as APPROVED through `/approve` with `expected_version`. Semantic memories can be recalled as VERIFIED or APPROVED, while procedural memories require APPROVED. CONTESTED, STALE, REVOKED and SUPERSEDED memories are excluded from recall.
 
 ### Updating memory
 
 - **Reinforcement instead of duplicates**: writing the same content again in the same scope, or a near-identical memory with the same subject (embedding cosine ≥ 0.95, or token overlap ≥ 0.85 without a comparable embedding) that is at least as validated, counts a reinforcement on the existing memory (`reinforcements`, `last_reinforced_at`, merged `source_refs`) when it comes from a new source. Reinforced memories rank slightly higher (up to ×1.3).
-- **Revisions**: `PATCH /api/memories/{id}` (approver; `expected_version`, `title` and/or `content`, `reason`) writes a new version: redacted and poison-checked like a new memory, re-embedded and re-indexed, audited, the status unchanged. Earlier versions stay in `agent_memory_versions`, so citations pinned to them still resolve; a revision that would duplicate another memory's content is rejected.
-- **Supersession** (activating a memory retires ACTIVE ones with the same subject and scope), **lifecycle transitions**, feedback and retention work as before. Consolidation is idempotent: a re-run after feedback does not reinforce or revise twice.
+- **Revisions**: `PATCH /api/memories/{id}` (approver; `expected_version`, `title` and/or `content`, `reason`) writes a new version with redaction, poison checks, embeddings and search terms regenerated. Governed memory revisions re-enter CANDIDATE without inheriting earlier verification or approval; personal semantic preferences remain on the owner publishing path. Earlier versions stay in `agent_memory_versions` for audit, but pinned versions are checked against the current version before entering context.
+- **Access and relationships**: Get, List, Search, Personal and pinned-version reads enforce tenant and ACL filters before ranking or truncation; empty ACLs and missing principals deny access by default. Conflict and supersession relationships are explicit and checked for version, tenant and cycles. Feedback-driven consolidation remains idempotent.
 
 ### Memory curation
 
 Long-term memory rots: duplicates pile up, facts change, lessons get refuted, entries go unused. The curator (`internal/curate`) is an offline pass in the spirit of "dreaming", built to be safe in operations:
 
-- **It only proposes.** A suggestion says which memories to set aside and why; an approver applies or dismisses it (`POST /api/memory/curation/{id}/decide`, approver role). Nothing changes before that. Applying sets the memories STALE (out of retrieval) and is reversible; if a memory in a suggestion was edited after it was made, applying fails with `proposal_outdated` and changes nothing.
+- **It only proposes.** A suggestion says which memories to set aside and why; an approver applies or dismisses it (`POST /api/memory/curation/{id}/decide`, approver role). Nothing changes before that. Applying marks memories STALE; restoration requires new evidence, fresh machine verification and the approval required by memory type. The CLI cannot directly republish them. If a memory in a suggestion was edited after it was made, applying fails with `proposal_outdated` and changes nothing.
 - **It writes no text.** It never drafts, merges or rewrites a memory, so a poisoned run cannot get its words into memory through this path.
 - **Evidence is the run record.** Signals, strongest first: `refuted_by_history` (at least 2 later runs about the same service whose independent verification was SUPPORTED refuted the lesson, none confirmed it; runs without a SUPPORTED verdict do not count), `superseded_fact` (same scope and wording, different figures, a newer memory), `duplicate` (token similarity ≥ 85% in one scope; the better-validated, more recent one stays), `unused` (not created, changed, reinforced or retrieved for 90 days). A memory appears in its strongest finding only. Personal memory is never examined.
 - **Idempotent.** A finding is keyed by signal and exact memory versions: it is proposed once, and a dismissed one returns only when a memory in it changes. One pass is capped at 50 proposals.
@@ -249,17 +288,18 @@ Long-term memory rots: duplicates pile up, facts change, lessons get refuted, en
 
 ### Memory search
 
-Pinned memories and historical `harness.memory_search` results are checked again before model context assembly: tenant, current version, lifecycle, expiry, environment and data class must still permit recall. Personal pins additionally require the Run's user owner. Original artifacts remain immutable audit records. This filtering does not yet retract memory-derived free text from older compaction summaries or notes.
+Pinned memories and historical `harness.memory_search` results are checked again before model context assembly: tenant, ACL, current version, lifecycle, expiry, environment and data class must still permit recall. Personal pins additionally require the Run's user owner. Original artifacts remain immutable audit records; historical summaries and notes always remain untrusted context. Current Works, Evidence, DecisionVerdicts and Outcomes remain the authoritative facts.
 
 - **Past-run search**: `harness.run_search` (R0, `query`, optional `service`, `status`, `limit` ≤ 10) searches finished runs — what was asked, the conclusion and the hypotheses — so an agent can find how an earlier investigation ended even if nobody promoted it to a memory. It sees the caller's own chats and non-user runs (triggers, schedules, Works), never another user's chats, skips child runs of a flow and the calling run itself, redacts secrets, and labels results as history rather than evidence. It scans the most recent finished runs (300 by default, 6 s budget) with cached text and says when it was cut short; a database full-text index would lift the bound.
 
 - **Search during the run**: the first reasoning step sees the memories retrieved for the goal. `harness.memory_search` (R0, `query`, optional `service` and `top_k` ≤ 10) runs the same pipeline (hard filters, full-text, vector and dependency branches, RRF, trust and profile exclusions, conflict resolution) with what the agent has learned since: a hypothesis, an error message, a component. Hits are returned as past experience to verify, with their `memory:<id>@<v>` refs; those refs are citable and reach the independent verifier as memory evidence. The stall notice suggests a search when the tool is visible.
-- **Model embeddings**: the `http` embedder calls any OpenAI-compatible `/embeddings` endpoint (`base_url`, `model`, `api_key_env`, `dimensions`, `timeout`) with a small query cache; when it fails, retrieval runs without its vector branch. Vectors are only compared within one embedding model, so after a switch the consolidator's indexer (`index`, default on; `index_batch`, default 50) re-embeds live memories, active ones first, a batch per tick.
+- **Model embeddings**: the `http` embedder calls any OpenAI-compatible `/embeddings` endpoint (`base_url`, `model`, `api_key_env`, `dimensions`, `timeout`) with a small query cache; when it fails, retrieval runs without its vector branch. Vector identity is the complete `(model, version, dimensions)` descriptor; vectors with different descriptors are never compared or deduplicated. After a switch, the consolidator's indexer (`index`, default on; `index_batch`, default 50) rebuilds vectors in batches, APPROVED memories first.
+- **Context boundaries**: the title and content of every pinned memory, including personal preferences and plans, are enclosed in a separate untrusted `<<<DATA>>>` boundary. Forged closing markers and chat-template control tokens are neutralized, and injection indicators are recorded in the PromptManifest. The manifest also records lifecycle, data class, environment, applicability, verification references and the embedding descriptor, but never ACL principals.
 - **Chinese, Japanese and Korean text**: tokenization turns CJK runs into overlapping character bigrams, so full-text search (Postgres stores them in `search_terms`, part of `search_tsv`), the local store's matching and the hashing embedder (`hash-uni-bigram-v2`) find CJK fragments without a word segmenter. The indexer fills in terms for memories written before migration 0018.
 
 ## Reasoning quality
 
-The agent's explicit decision trace (plan, hypotheses with confidence, verification) is scored, reused and improved. Provider-hidden reasoning is never read. Design: `docs/superpowers/specs/2026-11-07-reasoning-quality-and-self-improvement-design.md`.
+The agent's explicit decision trace (plan, hypotheses with confidence, verification) is scored, reused and improved. Scores derive from durable ledgers and inspectable citations, never from provider-hidden reasoning.
 
 - **Measure**: every finished run is scored by the consolidator (and rescored when feedback arrives). The score covers calibration (Brier score of hypotheses that ended VERIFIED/REFUTED), evidence grounding, redundant tool calls, steps to the first verdict, the conclusion verdict and a composite quality. Offline replays are scored the same way, and the release gate fails a candidate whose calibration, grounding, redundancy or quality regresses on the holdout split.
 - **Citation check**: every observation header carries its ref (`obs:step<N>`), as do evidence (`kv:<key>@<v>`) and memories (`memory:<id>@<v>`). The kernel resolves each citation in `supports`, `refutes` and `evidence_refs` against what that request showed the model (aliases such as `obs:4`, `obs:<tool>` or an offload handle map to the canonical form). A citation that names nothing shown is stored as `unresolved:<text>` and does not count as grounding. A hypothesis settled without a resolved citation is an unsupported verdict, and a VERIFIED conclusion where neither the verification nor any verified hypothesis cites a resolved item is self-declared: it is scored and counted as unverified, does not count as success and is not distilled. Citation validity and the unsupported-verdict and unsupported-conclusion rates are summarized, gated in releases and canaries, and drive a `citation` playbook hint in the improvement loop.
@@ -267,10 +307,10 @@ The agent's explicit decision trace (plan, hypotheses with confidence, verificat
 - **Multiple hypotheses and self-consistency**: while investigating, the agent lists its competing hypotheses (id, status, probability) in the THOUGHT line; the kernel rebuilds a hypothesis ledger from the run's decisions and shows it every step, so the agent discriminates between open hypotheses and returns to the next one when the first is refuted. With `HARNESS_REASONING_SAMPLES` > 1 a final task conclusion is sampled that many times and the largest cluster of agreeing conclusions wins; agreement below `HARNESS_REASONING_MIN_AGREEMENT` counts as insufficient and triggers the review.
 - **Post-hoc calibration**: each run records its hypotheses' first stated confidence and how they settled (the independent verdict decides when there is one). An isotonic calibrator per tenant profile is fitted from recent runs (independently judged forecasts preferred); the kernel stores the calibrated confidence next to the stated one, shows the model how often its stated confidences held, and the summary reports ECE and the calibrated Brier score; a rising ECE or contradiction rate fails the gate.
 - **Induced playbook**: with `inducer_model_alias` on the `reasoning_improver` job, the improver shows a model the digests of the weakest runs (hypotheses and how they settled, tools, verifier objections; no raw tool output) and asks for general guidance lines. Lines that name resources or runs, look like instructions, weaken approvals, review, verification or trust rules, or repeat existing lines are rejected; template guidance is the fallback. The candidate still goes through the holdout gate, approval by someone other than the proposer, and the canary.
-- **Reuse**: completed, undisputed runs with a VERIFIED conclusion are distilled into *reasoning patterns*: procedural memories listing the hypotheses checked in order, their verdicts and the tools used until the first verdict. They follow the normal memory lifecycle (CANDIDATE → approval → ACTIVE), so an operator activates every pattern. Each memory's success rate and Wilson lower bound are measured from the runs that retrieved it.
+- **Reuse**: completed, undisputed runs with a VERIFIED conclusion are distilled into *reasoning patterns*: procedural memories listing the hypotheses checked in order, their verdicts and the tools used until the first verdict. They follow the normal memory lifecycle (CANDIDATE → machine verification as VERIFIED → human approval as APPROVED), so an operator approves every pattern. Each memory's success rate and Wilson lower bound are measured from the runs that retrieved it.
 - **Pattern effectiveness**: a pattern is judged against the baseline success rate of the same service (runs that did not see it), not an absolute rate. Explicit citations (`memory:<id>` in evidence or hypothesis refs) decide once there are enough of them. Patterns significantly and materially worse than the baseline are excluded. Excluded patterns are still shown to a small, deterministic share of runs (`reasoning.pattern_probe_rate`, at most 0.2) and are reinstated when those runs reach the baseline. Stale entries are pruned, and the list keeps the strongest cases when it hits its 500-entry limit. Operators can propose an exclusion or reinstatement by hand.
 - **Trace structure**: hypotheses carry a stable `id` used for deduplication across rewording. Confidence coverage and the structured share are measured, gated and diagnosed; a settled hypothesis without a confidence counts as a 0.5 forecast.
-- **Improve**: the `reasoning_improver` job (or `POST /api/reasoning/improve`) diagnoses weak dimensions and underperforming ACTIVE patterns. It proposes a profile candidate that changes only `reasoning.playbook` (fixed, domain-free guidance; at most 2,000 characters, poison-checked, rendered before the trust rules) and `reasoning.patterns_excluded`. Runs behind holdout cases are excluded from the diagnosis. The candidate goes through the existing pipeline: holdout gate, approval by a human other than the proposer, canary with automatic rollback. The canary monitor also rolls back when the canary's reasoning regresses against the control group (default on, at least 20 scored runs per side). The loop never approves, canaries or promotes, and proposes one change at a time.
+- **Improve**: the `reasoning_improver` job (or `POST /api/reasoning/improve`) diagnoses weak dimensions and underperforming APPROVED patterns. It proposes a profile candidate that changes only `reasoning.playbook` (fixed, domain-free guidance; at most 2,000 characters, poison-checked, rendered before the trust rules) and `reasoning.patterns_excluded`. Runs behind holdout cases are excluded from the diagnosis. The candidate goes through the existing pipeline: holdout gate, approval by a human other than the proposer, canary with automatic rollback. The canary monitor also rolls back when the canary's reasoning regresses against the control group (default on, at least 20 scored runs per side). The loop never approves, canaries or promotes, and proposes one change at a time.
 - **Retention**: reasoning scores are kept for `reasoning_retention` (default 90 days) by the `retention` job.
 - **APIs**: `GET /api/reasoning/summary`, `GET /api/reasoning/runs/{run_id}`, `GET /api/reasoning/patterns`, `POST /api/reasoning/patterns/{memory_id}/exclude|reinstate` (operator), `POST /api/reasoning/improve` (admin). The desktop runtime scores and distills the same way and improves only on demand.
 
@@ -380,7 +420,7 @@ HARNESS_PG_TEST_URL=postgres://localhost/harness_test go test -race ./...
 harness work-bench run bench/cases
 ```
 
-The CI gates (RFC §24.3) are below; the workflow file and the benchmark cases are kept local, not in the repository:
+The CI gates are organized around correctness, compatibility, fault recovery and performance budgets:
 
 - **gofmt, go vet** (also with `-tags=integration`).
 - **Unit tests** on SQLite and PostgreSQL, plain and with `-race`.
@@ -402,21 +442,19 @@ PostgreSQL tests (including the control-plane contract tests, which always run o
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "restart checkout after approval"
 ```
 
-## Known limitations
+## Production deployment baseline
 
-- Model routing and KV-cache offload control for vLLM/SGLang are not implemented; serving health, diagnosis and prefill/decode pool scaling are.
-- Artifacts: the filesystem store is single-node; use the `s3` store (S3/MinIO) in production.
-- Offline evaluation uses its own in-memory ledger; its cost is not charged to the tenant budget.
-- Plan replay drives the flow state machine with recorded node results; graphs with bounded loops are compiled and safety-checked but not step-replayed.
-- Plugin config is read at startup; changes need a restart. Observability sources are the exception: they are versioned in the catalog and change online through the API (with rollback).
+- **Storage topology**: Local uses SQLite and local artifacts. Team uses PostgreSQL, S3/MinIO and NATS JetStream, with separate API, Worker and Scheduler roles sharing the same domain contracts.
+- **Artifact retention**: managed retention checks business references, `retain_until` and legal holds before cleanup through recoverable leases. External bucket lifecycle expiry on the same prefix stays disabled so database references and retention policy govern deletion.
+- **Data migration**: follow Expand → Migrate → Verify → Contract. Back up the database and stop writes and artifact cleaners before migration. Memory governance uses PostgreSQL migration 0037 and LocalStore schema v3; upgrade and verify with binaries from the same release.
+- **Plugin governance**: configuration loads at startup and configuration changes roll out through restarts. Observability sources use a versioned catalog with online API changes and rollback. The host centrally manages descriptors, health checks, task supervision, fair concurrency and Drain/Stop.
+- **Evaluation isolation**: offline evaluation uses an independent in-memory ledger, isolated from production tenant budgets. Plan replay drives the flow state machine with recorded node results, with compilation and safety checks for bounded loops.
+- **Safe rollout**: progressively expand automation through deployment tiers, read-only investigation, Shadow, DryRun, approvals, bounded scopes and canaries. Rollback switches activation paths while preserving committed facts and compatible reads.
 
 
 ## Production control plane
 
-The Work engine runs long-lived goals on top of the durable run kernel and
-is enabled by default. Setting `HARNESS_WORK_ENGINE_ENABLED=false` disables the
-capabilities below and leaves the run API unchanged. This section lists what
-the control plane provides for production use.
+The Work engine and Action Runtime are enabled by default; event Shadow mode is off by default. The Work engine runs long-lived goals on the durable run kernel. `HARNESS_WORK_ENGINE_ENABLED=false` disables the capabilities below without changing the run API. `HARNESS_EVENT_SHADOW_MODE=true` explicitly restores the rollout path that records routing without creating Works, and `HARNESS_ACTIONS_ENABLED` controls Action Runtime availability. Production dispatch still requires the governance gate, policy, approvals, target checks, allow-lists and scope checks.
 
 - **Deployment gate.** `HARNESS_DEPLOYMENT_TIER=local|staging|production`.
   `harness validate-config --tier production` evaluates the flags against the
@@ -473,6 +511,16 @@ the control plane provides for production use.
   published prefix; cursor writes recheck lease expiry after acquiring the
   row lock and cannot move backwards. Sinks renew before retrying; external
   delivery remains at least once.
+- **Persistent recovery and delivery.** The Go Work SDK, CLI, Desktop and Web
+  clients persist cursors by server, tenant, principal, stream and resource;
+  cursors advance only after event handling commits and reject regressions or
+  conflicting events at the same sequence. The Work Outbox commits with the
+  state change, while an independent Publisher distributes wake-ups through a
+  message broker with retry backoff and polling as the fallback. Optional
+  source reconciliation uses database checkpoints with fencing tokens,
+  heartbeats and lease-expiry takeover; recovered events reuse the common
+  Ingestor for deduplication and correlation, and a partially failed page never
+  advances its cursor.
 - **AI infrastructure.** UUID-based GPU identity (replacement and MIG
   changes), ECC/NVLink/PCIe signals, TPOT/E2E/cache/prefill/decode signals,
   prefill/decode diagnosis, guarded `serving.scale_prefill|decode`, a cost
