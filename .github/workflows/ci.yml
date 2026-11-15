@@ -181,3 +181,18 @@ jobs:
           if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
       - run: go vet ./...
       - run: go test ./... -count=1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: frontend checks
+        run: |
+          npm --prefix frontend ci --no-audit --no-fund
+          npm --prefix frontend run typecheck
+          npm --prefix frontend test
+          npm --prefix frontend run build
+      - name: next ui build
+        run: go build -tags "desktop,production,nextui" ./...
+      - name: next ui tests
+        run: go test -tags nextui ./... -count=1

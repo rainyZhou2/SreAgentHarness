@@ -361,6 +361,8 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_NATS_URL` | cross-process wake-ups and event delivery |
 | `HARNESS_CONFIG` | plugin config file (YAML/JSON) |
 | `HARNESS_AUTH_MODE` | `dev` / `token` / `oidc` |
+| `HARNESS_OIDC_ISSUER` / `_AUDIENCE` | OIDC issuer and access-token audience |
+| `HARNESS_OIDC_CLIENT_ID` / `_SCOPES` | Desktop SSO public client and scopes (space or comma separated) |
 | `HARNESS_SSE_MODE` | `push` (default) / `poll` |
 | `HARNESS_MODEL_DAILY_BUDGET_USD` | per-tenant daily budget |
 | `HARNESS_REQUIRE_DISTINCT_APPROVER` | the approver cannot be the initiator |

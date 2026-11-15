@@ -21,6 +21,16 @@ cd "$(dirname "$0")"
 out=build/bin
 mkdir -p "$out"
 tags="desktop,production"
+ui="${DESKTOP_UI:-legacy}"
+if [[ "$ui" == "next" ]]; then
+  if [[ -f frontend/package-lock.json ]]; then
+    (cd frontend && npm ci --no-audit --no-fund)
+  else
+    (cd frontend && npm install --no-audit --no-fund)
+  fi
+  (cd frontend && npm run build)
+  tags="$tags,nextui"
+fi
 # DESKTOP_VERSION (set by the release workflow from the tag) overrides the
 # version in settings.go; it is shown in Settings > About and the app bundle.
 version="${DESKTOP_VERSION:-$(sed -n 's/^var Version = "\(.*\)"/\1/p' settings.go)}"
@@ -60,7 +70,15 @@ Darwin)
 </dict></plist>
 PLIST
   bundle_local "$app/Contents/Resources/local"
-  codesign --force --sign - "$app" >/dev/null 2>&1 || true
+  if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --entitlements assets/entitlements.plist \
+      --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/Resources/local/bin/harness"
+    codesign --force --options runtime --timestamp --entitlements assets/entitlements.plist \
+      --sign "$MACOS_SIGN_IDENTITY" "$app"
+    codesign --verify --deep --strict "$app"
+  else
+    codesign --force --sign - "$app" >/dev/null 2>&1 || true
+  fi
   echo "built: $app"
   if [[ "${1:-}" == run ]]; then open "$app"; fi
   ;;

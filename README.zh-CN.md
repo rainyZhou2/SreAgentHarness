@@ -357,6 +357,8 @@ docker compose -f deploy/docker-compose.yml up --build
 | `HARNESS_NATS_URL` | 多进程唤醒与事件分发 |
 | `HARNESS_CONFIG` | 插件配置文件（YAML/JSON） |
 | `HARNESS_AUTH_MODE` | `dev` / `token` / `oidc` |
+| `HARNESS_OIDC_ISSUER` / `_AUDIENCE` | OIDC issuer 与 access token audience |
+| `HARNESS_OIDC_CLIENT_ID` / `_SCOPES` | 桌面 SSO 的 public client 与 scope（空格或逗号分隔） |
 | `HARNESS_SSE_MODE` | `push`（默认）/ `poll` |
 | `HARNESS_MODEL_DAILY_BUDGET_USD` | 每租户日预算 |
 | `HARNESS_REQUIRE_DISTINCT_APPROVER` | 审批人不能是发起人 |
