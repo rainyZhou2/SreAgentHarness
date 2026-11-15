@@ -34,7 +34,7 @@
 | **联网能力** | `web.fetch` 开箱可用；`web.search` 支持 Brave / Tavily / Bing / 通用后端，输出按不可信内容处理 |
 | **评估与演进** | 从真实 Run 录制数据集、离线回放、非劣性门禁、金丝雀与自动回滚 |
 | **事件分发** | 提交事件 → 事件日志 → Relay → JetStream → SSE；断线按游标回补，稳态不查询数据库 |
-| **插件化** | 除状态机、租约、事务提交、Outbox 和核心路由外，其余全部是可替换插件 |
+| **插件化** | 除状态机、租约、事务提交、Outbox 和核心路由外，其余全部是可替换插件；显式 Descriptor、版本兼容、最小权限、严格配置和 Host 生命周期统一治理 |
 
 ## 桌面客户端
 
@@ -85,8 +85,8 @@ go run ./cmd/harness local
 | `harness local init` | 选择模型提供方，用只读请求（不消耗 token）测试密钥，并保存到 `<data>/local.env`（权限 0600）。真实环境变量始终优先于该文件。 |
 | `harness chat` | 终端内交互聊天，审批内联完成（`/approvals`、`/approve N`、`/resume`、`--yes`）；也可连接团队服务端（`-server`、`-token`）。 |
 | `harness memory list \| set KEY VALUE \| rm KEY` | 查看和编辑智能体记住的个人偏好（桌面端在**记忆**页提供同样功能）。 |
-| `harness memory review \| show ID \| approve ID \| reject ID [原因] \| archive ID` | 审核智能体提议记住的内容（CANDIDATE 记忆）。**只有通过审批（ACTIVE）的记忆才会用于之后的运行**，不审核，智能体学到的东西就不会生效。`review` 会显示每条提议将取代哪条旧记忆；ID 可缩写为唯一前缀。桌面端**记忆 → 智能体学到的**标签页提供同样功能，并支持“改写后通过”和待审核数量徽标。 |
-| `harness memory curate \| suggestions \| apply ID \| dismiss ID` | 查找值得搁置的记忆并审核建议（见“记忆整理”）。`apply` 把它们置为 STALE（不再参与检索，可用 `memory approve ID` 恢复）；`dismiss` 保留它们，同一发现不会再次提出。 |
+| `harness memory review \| show ID \| approve ID \| reject ID [原因] \| archive ID` | 审核智能体提议记住的内容（CANDIDATE 与已机器验证的 VERIFIED 记忆）。人工 approve 只接受 VERIFIED，并通过固定版本审批端点发布为 APPROVED；普通 semantic 可召回 VERIFIED/APPROVED，procedural 必须 APPROVED。reject/archive 统一撤销，STALE 不能由 CLI 直接恢复发布。ID 可缩写为唯一前缀。 |
+| `harness memory curate \| suggestions \| apply ID \| dismiss ID` | 查找值得搁置的记忆并审核建议（见“记忆整理”）。`apply` 把它们置为 STALE，恢复需要新证据和重新机器验证；`dismiss` 保留它们，同一发现不会再次提出。 |
 | `harness compact-eval [-runs N]` | 用固定的排障历史衡量压缩器保留了什么：关键事实召回、模型看到的内容、引用保留、注入泄漏。未配置模型时只测确定性基线，并明确说明模型压缩器没有运行。 |
 | `harness local doctor` | 检查数据目录、token、数据库完整性与版本、端口、磁盘占用、模型密钥和 Prometheus；有失败项时退出码为 1。 |
 | `harness local backup [-out F]` | 运行中也能做一致性备份（数据库快照、事件日志、产物）；备份不含 token 和 API key。 |
@@ -139,6 +139,8 @@ PostgreSQL（唯一真相）  +  NATS JetStream（唤醒与事件分发）
 - **无空洞事件日志 + Transactional Outbox**：状态、事件、唤醒消息同事务提交，Reconciler 兜底恢复。
 - **事件平面**：Relay 以租约单活追尾事件日志，JetStream 按 Run 分发；SSE 网关补齐一次后只接收推送。
 - **内核只依赖接口**：不 import PostgreSQL、NATS 或模型 SDK，适配器可独立替换和测试。
+- **统一安全控制面**：Tool、MCP、Sandbox、Artifact、Memory 与 Model Egress 使用同一决策契约；副作用提交在数据库事务内重验审计、审批和撤权。`HARNESS_SECURITY_MODE` 支持 `legacy`、`shadow`、`enforce`，默认保持 Legacy；上线与回退顺序见 [统一安全控制面上线顺序](docs/architecture/SECURITY_ROLLOUT_2026-11-15.md)。
+- **只读 Replay**：Workbench 使用隔离存储与模拟执行器，Eval 回放使用独立 Artifact 输出；通用投影仅接受注册的只读入口，生产副作用返回 `replay_read_only`。
 
 Work 控制面拥有长期目标，同一个 Kernel 拥有其 Run、Step 和 Attempt。Work 所属 Run 及其 Flow 子 Run 通过只读工具调查；生产变更通过 Action Runtime，将策略、审批和派发绑定到当前 Work generation。Run 预留、所有者关联和激活保留各自的持久恢复边界。
 
@@ -179,7 +181,7 @@ flow:
 
 Planner 把自己的输入也视为不可信：目标、会话历史、capability 描述以及失败尝试的节点输出都包在 `<<<DATA>>>` 边界内，并中和聊天模板控制符；工具描述来自插件和租户 MCP，看起来像注入指令的描述会同时从 prompt 和工具 schema 中移除。只要发现可疑输入，就记录在计划上，并强制生成的 flow 走计划审批，即使 `HARNESS_PLAN_APPROVAL=never`。生成的 flow 失败时不会立刻让 Run 失败：最多 `HARNESS_PLAN_MAX_REPLANS` 次，Planner 会拿到失败原因、已执行节点和已完成的副作用重新规划，新计划作为新的 flow generation 执行（全新状态与子 Run；失败的 generation 保留用于审计；plan hash 绑定 generation，旧审批不能复用）。
 
-计划会从历史 Run 中改进。一个在模型生成的 flow 上成功完成的 Run（非 fallback、无注入标记、未被拒绝、无争议、反馈未标错）会被提炼为 *plan exemplar* 记忆（按服务作用域、按内容去重），走正常的记忆生命周期；Planner 会以不可信数据的形式看到与目标和服务最相近的 ACTIVE exemplar 与推理模式。每个 Run 记录计划指标（修复、fallback、重规划、审批请求/拒绝、注入、缓存命中），金丝雀和候选门禁会对比 fallback、修复、重规划、拒绝、成功和注入率。路由依次看 hint、请求的模式、点名的动作、正则列表，最后是分类器（默认对标注样例目标做 n-gram kNN，也可接 embedding 分类器；设置 `ClassifierFirst` 可让分类器先于正则）。每个生成或 fallback 的 flow 在审批前都会用模拟成功的子任务做 dry run：默认路径在自身限制内走不完的 flow 会被修复，未经审批就到达的副作用节点会被标出。计划审批附带可读摘要、有序步骤、风险、dry-run 路径，以及与上一 generation（重规划）或 fallback runbook 的 diff。未固定工具的 agent 节点会被固定到只读工具，不再一律按最高风险估计。Token 估算使用典型输出量，同时给出最坏情况。没有重规划和注入标记的计划按租户与输入缓存，命中后会针对当前工具目录重新校验。Profile 的 `planner` 段可以按租户收紧（不能放宽）这些设置：模型别名或模型阶梯、审批模式、节点/调用/Token/修复/重规划上限，以及按服务或目标正则匹配的 fallback 规则。
+计划会从历史 Run 中改进。一个在模型生成的 flow 上成功完成的 Run（非 fallback、无注入标记、未被拒绝、无争议、反馈未标错）会被提炼为 *plan exemplar* 记忆（按服务作用域、按内容去重），走正常的记忆生命周期；Planner 会以不可信数据的形式看到与目标和服务最相近的 APPROVED exemplar 与推理模式。每个 Run 记录计划指标（修复、fallback、重规划、审批请求/拒绝、注入、缓存命中），金丝雀和候选门禁会对比 fallback、修复、重规划、拒绝、成功和注入率。路由依次看 hint、请求的模式、点名的动作、正则列表，最后是分类器（默认对标注样例目标做 n-gram kNN，也可接 embedding 分类器；设置 `ClassifierFirst` 可让分类器先于正则）。每个生成或 fallback 的 flow 在审批前都会用模拟成功的子任务做 dry run：默认路径在自身限制内走不完的 flow 会被修复，未经审批就到达的副作用节点会被标出。计划审批附带可读摘要、有序步骤、风险、dry-run 路径，以及与上一 generation（重规划）或 fallback runbook 的 diff。未固定工具的 agent 节点会被固定到只读工具，不再一律按最高风险估计。Token 估算使用典型输出量，同时给出最坏情况。没有重规划和注入标记的计划按租户与输入缓存，命中后会针对当前工具目录重新校验。Profile 的 `planner` 段可以按租户收紧（不能放宽）这些设置：模型别名或模型阶梯、审批模式、节点/调用/Token/修复/重规划上限，以及按服务或目标正则匹配的 fallback 规则。
 
 ## Agent 运行时
 
@@ -228,20 +230,20 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 
 - **笔记**：agent 在 `THOUGHT` 行或结论中写 `"notes":[{"key","value","scope"}]`；重复写同一个 key 即更新，值为空即删除。kernel 从已存储的决策重建笔记，因此重试和压缩后依然存在，并在数据边界内以 `[working memory]` 小节呈现。每层最多 24 条、每条 500 字符。
 - **短期记忆**：Run 结束时的会话笔记写入其结果（`memory.session`）；同一分支的下一轮从最近一个完成轮次的笔记开始，因此分叉出的分支只看到自己的历史。
-- **个性化记忆**：用户发起的 Run 完成后，其 `user` 笔记按 key（`pref:<key>`，ACTIVE，`restricted`）为该用户新建、强化、修订（新版本）或归档记忆。个性化记忆与本 Run 检索到的记忆一起固定，只在该用户自己的 Run 中以 `[about the user]` 小节呈现；共享检索、`harness.memory_search` 和其他用户都看不到（管理员可列出）。指令性文本会被拒绝，偏好永远不能授权任何操作。用户通过 `GET /api/me/memories`、`PUT|DELETE /api/me/memories/{key}` 管理自己的偏好。
-- **agent 提议的长期记忆**：已完成且未被否定的 Run 中的 `long_term` 笔记成为 CANDIDATE 记忆（反馈确认后为 VALIDATING），subject 为 `note:<key>`，与其他记忆一样走审核。
+- **个性化记忆**：用户发起的 Run 完成后，其 `user` 笔记按 key（`pref:<key>`，`APPROVED`，`restricted`）为该用户新建、强化、修订或撤销。所有者的语义偏好使用独立发布路径；其他 Memory 不能借此绕过机器验证和人工审批。个性化记忆只在该用户自己的 Run 中以 `[about the user]` 小节呈现，共享检索和其他用户不可见，偏好永远不能授权任何操作。用户通过 `GET /api/me/memories`、`PUT|DELETE /api/me/memories/{key}` 管理自己的偏好。
+- **agent 提议的长期记忆**：已完成且未被否定的 Run 中的 `long_term` 笔记成为 CANDIDATE 记忆，subject 为 `note:<key>`。受信机器主体通过 `/verify` 写入固定版本的不可变验证记录并转为 VERIFIED；审批者再通过 `/approve` 以 `expected_version` 发布为 APPROVED。普通 semantic 可召回 VERIFIED/APPROVED，procedural 仅召回 APPROVED；CONTESTED、STALE、REVOKED、SUPERSEDED 不参与召回。
 
 ### 记忆更新机制
 
 - **强化而非重复**：在同一 scope 中再次写入相同内容，或写入同 subject、近似重复（embedding 余弦 ≥ 0.95；无可比 embedding 时词元重叠 ≥ 0.85）且验证程度不高于已有记忆的内容时，若来源是新的，则记为对已有记忆的一次强化（`reinforcements`、`last_reinforced_at`，合并 `source_refs`）。被强化的记忆排序略微提升（最多 ×1.3）。
-- **修订**：`PATCH /api/memories/{id}`（approver；`expected_version`、`title` 和/或 `content`、`reason`）写入新版本：与新记忆一样脱敏和投毒检查，重新生成向量和检索词，记审计，状态不变。旧版本保留在 `agent_memory_versions` 中，引用旧版本的 ref 仍可解析；修订后与其他记忆内容重复时会被拒绝。
-- **取代**（激活一条记忆会让同 subject、同 scope 的 ACTIVE 记忆变为 SUPERSEDED）、**生命周期迁移**、反馈和保留策略保持不变。整理过程是幂等的：反馈触发的重新整理不会重复强化或修订。
+- **修订**：`PATCH /api/memories/{id}`（approver；`expected_version`、`title` 和/或 `content`、`reason`）写入新版本，执行脱敏和投毒检查并重新生成向量与检索词。受控 Memory 修订后重新进入 CANDIDATE，旧验证和审批不继承；个人语义偏好仍由所有者路径发布。旧版本保留在 `agent_memory_versions` 中用于审计，但固定版本进入上下文前仍会复核当前版本。
+- **访问与关系**：Get、List、Search、Personal 和固定版本读取都在排序、截断前执行租户与 ACL 过滤；空 ACL 和缺失主体默认拒绝。冲突与取代使用显式关系并做版本、租户和环校验；反馈触发的整理保持幂等。
 
 ### 记忆整理
 
 长期记忆会“腐烂”：重复堆积、事实变化、经验被推翻、条目无人使用。整理器（`internal/curate`）是一次离线的“做梦”式整理，按运维场景的要求设计：
 
-- **只提建议。** 建议说明要搁置哪些记忆、为什么；由审批者应用或驳回（`POST /api/memory/curation/{id}/decide`，审批者角色）。在此之前不会有任何改动。应用后记忆变为 STALE（不再参与检索），可恢复；如果建议提出后其中某条记忆被修改，应用会返回 `proposal_outdated` 且不做任何改动。
+- **只提建议。** 建议说明要搁置哪些记忆、为什么；由审批者应用或驳回（`POST /api/memory/curation/{id}/decide`，审批者角色）。在此之前不会有任何改动。应用后记忆变为 STALE；恢复必须基于新证据重新机器验证，再按类型要求审批，CLI 不能直接恢复发布。如果建议提出后其中某条记忆被修改，应用会返回 `proposal_outdated` 且不做任何改动。
 - **不写任何文字。** 它从不起草、合并或改写记忆，所以被污染的运行无法通过这条路径把内容写进记忆。
 - **证据来自运行记录。** 信号按强度排序：`refuted_by_history`（至少 2 次之后的、同一服务的、独立验证为 SUPPORTED 的运行推翻了这条经验，且没有运行支持它；没有 SUPPORTED 结论的运行不算数）、`superseded_fact`（同一范围、措辞相同、数字不同，且有更新的记忆）、`duplicate`（同一范围内词元相似度 ≥ 85%，保留验证更充分、更新的那条）、`unused`（90 天内未创建、修改、强化或被检索）。一条记忆只出现在它最强的发现里；个人记忆从不检查。
 - **幂等。** 一个发现由信号和确切的记忆版本标识：只提出一次，被驳回的发现只有在其中某条记忆变化后才会再出现。单次最多 50 条。
@@ -249,12 +251,13 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 
 ### 记忆检索
 
-固定记忆和历史 `harness.memory_search` 结果在进入模型上下文前重新检查租户、当前版本、生命周期、有效期、环境和数据级别；个人固定记忆还必须属于发起 Run 的用户。原始 Artifact 保留为不可变审计记录。这一过滤尚不能撤回旧压缩摘要或笔记中已衍生的自由文本。
+固定记忆和历史 `harness.memory_search` 结果在进入模型上下文前重新检查租户、ACL、当前版本、生命周期、有效期、环境和数据级别；个人固定记忆还必须属于发起 Run 的用户。原始 Artifact 保留为不可变审计记录。这一过滤尚不能撤回旧压缩摘要或笔记中已衍生的自由文本。
 
 - **历史运行搜索**：`harness.run_search`（R0，`query`，可选 `service`、`status`、`limit` ≤ 10）搜索已结束的运行——当时的问题、结论和假设——这样即使没人把某次排查提升为记忆，智能体也能找到它是怎么结束的。可见范围是调用者自己的对话和非用户发起的运行（触发器、定时、Work），看不到其他用户的对话，跳过 flow 的子运行和调用方自己，会脱敏，并标注为“历史”而非证据。它扫描最近的已结束运行（默认 300 条、6 秒预算），文本带缓存，被截断时会明确说明；数据库全文索引可以去掉这个上限。
 
-- **运行中检索**：第一个推理步看到的是按目标检索出的记忆。`harness.memory_search`（R0，参数 `query`，可选 `service`、`top_k` ≤ 10）用 agent 之后掌握的信息（假设、报错信息、组件）走同一条检索流水线（硬过滤、全文/向量/依赖图三路召回、RRF、信任与 profile 排除、冲突消解）。结果作为"需验证的过往经验"返回，带 `memory:<id>@<v>` ref；这些 ref 可被引用，并作为记忆证据交给独立验证器。工具可见时，停滞提示会建议检索记忆。
-- **模型 embedding**：`http` embedder 调用任意 OpenAI 兼容的 `/embeddings` 接口（`base_url`、`model`、`api_key_env`、`dimensions`、`timeout`），带小型查询缓存；调用失败时检索跳过向量分支。向量只在同一 embedding 模型内比较，因此切换模型后由 consolidator 的 indexer（`index`，默认开启；`index_batch`，默认 50）按批为存活记忆重新生成向量，ACTIVE 优先。
+- **运行中检索**：第一个推理步看到的是按目标检索出的记忆。`harness.memory_search`（R0，参数 `query`，可选 `service`、`top_k` ≤ 10）用 agent 之后掌握的信息（假设、报错信息、组件）走同一条检索流水线（硬过滤、全文/向量/依赖图三路召回、RRF、信任与 profile 排除、冲突消解）。结果作为“需验证的过往经验”返回，带 `memory:<id>@<v>` ref；这些 ref 可被引用，并作为记忆证据交给独立验证器。工具可见时，停滞提示会建议检索记忆。
+- **模型 embedding**：`http` embedder 调用任意 OpenAI 兼容的 `/embeddings` 接口（`base_url`、`model`、`api_key_env`、`dimensions`、`timeout`），带小型查询缓存；调用失败时检索跳过向量分支。向量身份是完整的 `(model, version, dimensions)` 描述符，不同描述符不比较、不去重；切换后由 consolidator 的 indexer（`index`，默认开启；`index_batch`，默认 50）按批重建，APPROVED 优先。
+- **上下文边界**：所有固定 Memory（包括个人偏好与 Plan）的标题和正文都放入独立 `<<<DATA>>>` 不可信边界；伪造结束标记和聊天模板控制符会被中和，注入迹象写入 PromptManifest。清单同时记录状态、数据分级、环境、适用条件、验证引用和 Embedding 描述符，但不包含 ACL 主体。
 - **中日韩文本**：分词把 CJK 连续字符切成重叠的二字组，全文检索（Postgres 写入 `search_terms` 并纳入 `search_tsv`）、本地存储的匹配和哈希 embedder（`hash-uni-bigram-v2`）都能在不依赖分词器的情况下命中 CJK 片段。migration 0018 之前写入的记忆由 indexer 补齐检索词。
 
 ## 推理质量
@@ -267,10 +270,10 @@ Agent 记住什么、记多久，以及记忆如何保持最新。
 - **多假设与自一致性**：调查过程中 agent 在 THOUGHT 行里列出竞争假设（id、状态、概率）；kernel 从本 Run 的决策重建假设账本并在每一步展示，促使 agent 在开放假设间做区分性检查，首个假设被证伪时回到下一个。`HARNESS_REASONING_SAMPLES` > 1 时，最终 task 结论会采样多次，取一致结论最多的一簇；一致率低于 `HARNESS_REASONING_MIN_AGREEMENT` 视为证据不足并触发复核。
 - **事后校准**：每个 Run 记录假设最初声明的置信度及最终结果（有独立结论时以其为准）。按租户 profile 用近期 Run 拟合保序回归校准器（优先使用经独立复核的样本）；kernel 在原始置信度旁记录校准后的值，并告诉模型其声明的置信度过去的实际命中率；summary 报告 ECE 和校准后 Brier，ECE 或被反驳率上升会让门禁不通过。
 - **归纳式 Playbook**：在 `reasoning_improver` 任务上配置 `inducer_model_alias` 后，改进循环会把最差 Run 的摘要（假设及结论、工具、校验器意见，不含原始工具输出）交给模型归纳通用指导语。点名资源或 Run、像注入指令、削弱审批/复核/校验/信任规则、或与已有行重复的条目都会被拒绝；没有可用条目时退回模板指导语。候选版本仍需通过 holdout 门禁、非提议者审批和金丝雀。
-- **复用**：已完成、未被反馈否定且校验结论为 VERIFIED 的 run，会被提炼为*推理模式*，即一条 procedural 记忆。内容是按顺序检验过的假设及各自结论，以及得出首个结论前用到的工具。它走正常的记忆生命周期（CANDIDATE → 审批 → ACTIVE），每条模式都要人工激活。每条记忆的成功率和 Wilson 下界，按检索过它的 run 统计。
+- **复用**：已完成、未被反馈否定且校验结论为 VERIFIED 的 run，会被提炼为*推理模式*，即一条 procedural 记忆。内容是按顺序检验过的假设及各自结论，以及得出首个结论前用到的工具。它走正常的记忆生命周期（CANDIDATE → 机器验证为 VERIFIED → 人工审批为 APPROVED），每条模式都要人工审批。每条记忆的成功率和 Wilson 下界，按检索过它的 run 统计。
 - **模式效果**：按同一服务中没用到该模式的 run 的成功率作为基线来比较，而不是用绝对成功率。模型显式引用（evidence 或假设 refs 里的 `memory:<id>`）的样本足够时，以引用为准。比基线显著且明显更差的模式会被排除。被排除的模式仍按 `reasoning.pattern_probe_rate`（上限 0.2）确定性地放给一小部分 run，这些 run 达到基线就恢复。已失效的条目会被清掉；列表到 500 条上限时，只保留证据最强的。运维人员也可以手动提议排除或恢复。
 - **轨迹结构**：假设带稳定 `id`，换个说法也按同一个算。置信度覆盖率和结构化比例纳入度量、门禁和诊断；已定论但没给置信度的假设按 0.5 预测计。
-- **改进**：`reasoning_improver` 定时任务（或 `POST /api/reasoning/improve`）会诊断薄弱维度和表现差的 ACTIVE 模式，并提出一个 profile 候选版本，只改 `reasoning.playbook` 和 `reasoning.patterns_excluded`。playbook 是固定的、与领域无关的指导，≤2000 字符，经过投毒检查，并放在信任规则之前渲染。诊断时会排除 holdout 用例对应的 run。候选版本走现有流程：holdout 门禁 → 由非提议者的人工审批 → 灰度与自动回滚。灰度监控还会比较灰度组和对照组的推理质量，退化超过阈值就自动回滚；该检查默认开启，两组各至少 20 个已打分 run 才会判定。该循环从不审批、不发起灰度、不晋升，且同一时间只提一个变更。
+- **改进**：`reasoning_improver` 定时任务（或 `POST /api/reasoning/improve`）会诊断薄弱维度和表现差的 APPROVED 模式，并提出一个 profile 候选版本，只改 `reasoning.playbook` 和 `reasoning.patterns_excluded`。playbook 是固定的、与领域无关的指导，≤2000 字符，经过投毒检查，并放在信任规则之前渲染。诊断时会排除 holdout 用例对应的 run。候选版本走现有流程：holdout 门禁 → 由非提议者的人工审批 → 灰度与自动回滚。灰度监控还会比较灰度组和对照组的推理质量，退化超过阈值就自动回滚；该检查默认开启，两组各至少 20 个已打分 run 才会判定。该循环从不审批、不发起灰度、不晋升，且同一时间只提一个变更。
 - **保留期**：`retention` 任务按 `reasoning_retention`（默认 90 天）清理推理分数。
 - **API**：`GET /api/reasoning/summary`、`GET /api/reasoning/runs/{run_id}`、`GET /api/reasoning/patterns`、`POST /api/reasoning/patterns/{memory_id}/exclude|reinstate`（operator）、`POST /api/reasoning/improve`（admin）。桌面端同样打分和提炼，但只在手动触发时改进。
 
@@ -401,10 +404,13 @@ ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/plancheck -goal "审批后重启 check
 ## 已知限制
 
 - vLLM/SGLang 的模型路由与 KV cache offload 控制未实现；推理健康、诊断和 prefill/decode 池扩缩容已实现。
-- Artifact：文件系统实现仅适合单机，生产使用 `s3`（S3/MinIO）存储。
+- Artifact：文件系统实现仅适合单机，生产使用 `s3`（S3/MinIO）存储。受管保留模式统一检查引用、retain_until 和 legal hold，并通过可恢复租约清理；相同前缀的外部 bucket lifecycle 自动到期必须停用，避免绕过引用与 hold。
+- Memory 治理升级使用 PostgreSQL 0037 和 LocalStore schema v3 停机迁移：先停止所有写入与 Artifact 清理器并备份，再启动同版本新二进制；不支持新旧二进制混跑。真实 PostgreSQL、多副本与真实旧数据迁移验收需在目标环境单独执行。
+- 插件动态加载、热切换、版本共存和跨副本全局 Ready 尚未完成。
+- 真实 PostgreSQL、NATS JetStream、多副本故障接管、浏览器进程重启和真实外部来源对账需在目标环境验收；本地测试通过不代表这些生产环境验收已经完成。
 - 离线评估使用独立内存账本，成本不计入租户预算。
 - 计划回放用录制的节点结果驱动 flow 状态机；含有限循环的图会做编译与安全检查，但不做逐步回放。
-- 插件配置在启动时读取，修改后需要重启。可观测数据源例外：它们在目录中带版本，可通过 API 在线变更并回滚。
+- 插件配置在启动时读取，修改后需要重启。可观测数据源例外：它们在目录中带版本，可通过 API 在线变更并回滚。所有插件显式声明 Descriptor 和生命周期；Host 统一启动、健康检查、任务监管与关闭。`MaxConcurrent` 仅约束组件后台任务并按注册顺序公平调度，不限制任意 Provider 方法。配置预检不连接外部服务，但 URL、Provider 参数等部分业务语义仍在初始化时校验。
 
 
 ## 生产控制平面
@@ -418,6 +424,7 @@ Work 引擎与 Action Runtime 默认启用，事件 Shadow 模式默认关闭。
 - **World 质量。** 采集器健康、来源权威度与冲突检测对生产动作失败关闭；过期事实被保留，不会被删除。
 - **Work 图。** 受父 Work 权限上限约束的子 Work、带原子环检测的依赖边、`children` 阶段、取消级联；按证据账本校验的结构化 agent Finding（看独立证据，不按多数票）；Runbook 注册表、由复盘生成的 Improvement Work 和意图路由。
 - **事件与协议。** 带版本的事件信封、签名来源、迟到事件处理、可追溯的关联决策与基于拓扑的线索。稳定的事件契约（`?protocol=1`）、统一的 `/api/works/{id}/view`，以及支持断线续传 `Subscribe` 的 Go SDK。事件、分页和快照声明 schema、contract 与 minimum reader 版本；新 SDK 兼容旧 v1 格式，但遇到不兼容版本、损坏帧或序号缺口会停止读取并保留最后有效 Cursor。终态订阅会读取至所捕获快照的 `LastSeq` 后才结束；此边界之后新增的审计事件需要再次订阅。服务按整包发布和升级，调用方不通过 URL 选择能力代次。Run 事件中继逐条持久化成功前缀，Cursor 在行锁后复核租约且不可倒退；接收器每次重试前续租，外部投递仍为至少一次语义。
+- **持久恢复与分发。** Go Work SDK、CLI、Desktop 及其 Web 界面按服务器、租户、主体、流和资源持久化 Cursor，事件处理提交后才推进，并拒绝序号倒退或同序号事件冲突。Work Outbox 与状态变更同事务提交，独立 Publisher 通过消息代理分发唤醒并支持失败退避，轮询继续兜底。可选来源对账扩展使用带 fencing token 的数据库 Checkpoint、心跳和过期接管，补回事件复用统一 Ingestor 去重与关联；部分页失败不会推进游标。
 - **AI 基础设施。** 基于 UUID 的 GPU 身份（换卡与 MIG 变化）、ECC/NVLink/PCIe 信号、TPOT/E2E/缓存/prefill/decode 信号、prefill/decode 诊断、带守卫的 `serving.scale_prefill|decode`、成本模型，以及 S3/MinIO 制品存储。
 - **规则即代码。** `monitoring.rule_validate`、`monitoring.rule_propose`（R0）和 `monitoring.apply_via_gitops`（R2，仅通过 pull request）。
 

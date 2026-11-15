@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go-sre-harness/internal/protocol"
+	"go-sre-harness/pkg/eventcursor"
 )
 
 // ContractEvents reads a page of the Work timeline in the stable event
@@ -51,12 +52,58 @@ func (c *Client) ContractEvents(ctx context.Context, workID string, afterSeq int
 //	}
 //	if err := <-errs; err != nil { ... }
 func (c *Client) Subscribe(ctx context.Context, workID string, afterSeq int64) (<-chan Event, <-chan error) {
+	return c.subscribe(ctx, workID, afterSeq, nil, eventcursor.Key{})
+}
+
+type SubscriptionIdentity struct {
+	ServerURL string
+	TenantID  string
+	SubjectID string
+}
+
+func (c *Client) SubscribePersistent(ctx context.Context, workID string, store eventcursor.Store, identity SubscriptionIdentity) (<-chan Event, <-chan error) {
+	key := eventcursor.Key{
+		ServerURL:  identity.ServerURL,
+		TenantID:   identity.TenantID,
+		SubjectID:  identity.SubjectID,
+		Stream:     "work",
+		ResourceID: workID,
+		Purpose:    "contract-v1",
+	}
+	return c.subscribe(ctx, workID, 0, store, key)
+}
+
+type eventCommit func(context.Context, Event) error
+
+type commitError struct{ err error }
+
+func (e *commitError) Error() string { return "commit event cursor: " + e.err.Error() }
+func (e *commitError) Unwrap() error { return e.err }
+
+func (c *Client) subscribe(ctx context.Context, workID string, afterSeq int64, store eventcursor.Store, key eventcursor.Key) (<-chan Event, <-chan error) {
 	out := make(chan Event, 64)
 	errs := make(chan error, 1)
 	go func() {
 		defer close(out)
 		defer close(errs)
 		last := afterSeq
+		var commit eventCommit
+		if store != nil {
+			cursor, ok, err := store.Load(ctx, key)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if ok {
+				last = cursor.Sequence
+			}
+			commit = func(ctx context.Context, ev Event) error {
+				if err := store.Advance(ctx, key, ev.Sequence, ev.EventID); err != nil {
+					return &commitError{err: err}
+				}
+				return nil
+			}
+		}
 		var terminalTarget *int64
 		backoff := 500 * time.Millisecond
 		for {
@@ -77,14 +124,14 @@ func (c *Client) Subscribe(ctx context.Context, workID string, afterSeq int64) (
 				}
 			}
 			if err == nil && terminalTarget != nil {
-				err = c.drainTerminal(ctx, workID, &last, *terminalTarget, out)
+				err = c.drainTerminal(ctx, workID, &last, *terminalTarget, out, commit)
 				if err == nil {
 					errs <- nil
 					return
 				}
 			} else if err == nil {
 				var completed bool
-				completed, err = c.stream(ctx, workID, &last, out)
+				completed, err = c.streamCommitted(ctx, workID, &last, out, commit)
 				if completed && ctx.Err() == nil {
 					continue // capture the terminal transaction's full watermark
 				}
@@ -94,6 +141,11 @@ func (c *Client) Subscribe(ctx context.Context, workID string, afterSeq int64) (
 				errs <- nil
 				return
 			case err != nil:
+				var commitErr *commitError
+				if errors.As(err, &commitErr) {
+					errs <- err
+					return
+				}
 				var protocolErr *protocol.Error
 				if errors.As(err, &protocolErr) {
 					errs <- err
@@ -121,7 +173,7 @@ func (c *Client) Subscribe(ctx context.Context, workID string, afterSeq int64) (
 
 // drainTerminal delivers only through the captured terminal watermark. Missing
 // events fail closed; transport failures let Subscribe retry from last.
-func (c *Client) drainTerminal(ctx context.Context, workID string, last *int64, target int64, out chan<- Event) error {
+func (c *Client) drainTerminal(ctx context.Context, workID string, last *int64, target int64, out chan<- Event, commit eventCommit) error {
 	for *last < target {
 		limit := 200
 		if remaining := target - *last; remaining < int64(limit) {
@@ -137,6 +189,11 @@ func (c *Client) drainTerminal(ctx context.Context, workID string, last *int64, 
 		for _, ev := range events {
 			select {
 			case out <- ev:
+				if commit != nil {
+					if err := commit(ctx, ev); err != nil {
+						return err
+					}
+				}
 				*last = ev.Sequence
 			case <-ctx.Done():
 				return ctx.Err()
@@ -149,6 +206,10 @@ func (c *Client) drainTerminal(ctx context.Context, workID string, last *int64, 
 // stream reads one SSE connection. It reports done when the Work
 // completed.
 func (c *Client) stream(ctx context.Context, workID string, last *int64, out chan<- Event) (bool, error) {
+	return c.streamCommitted(ctx, workID, last, out, nil)
+}
+
+func (c *Client) streamCommitted(ctx context.Context, workID string, last *int64, out chan<- Event, commit eventCommit) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/works/"+esc(workID)+"/events/stream?protocol=1", nil)
 	if err != nil {
 		return false, err
@@ -231,6 +292,11 @@ func (c *Client) stream(ctx context.Context, workID string, last *int64, out cha
 			select {
 			case out <- ev:
 				if ev.Durable() {
+					if commit != nil {
+						if err := commit(ctx, ev); err != nil {
+							return false, err
+						}
+					}
 					*last = ev.Sequence
 				}
 			case <-ctx.Done():

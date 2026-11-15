@@ -14,9 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
 	"go-sre-harness/internal/reasoning"
+	"go-sre-harness/internal/replay"
+	"go-sre-harness/internal/security"
 	"go-sre-harness/internal/tools"
 )
 
@@ -95,6 +98,7 @@ type CaseResult struct {
 type Replayer struct {
 	Registry *tools.Registry
 	MaxSteps int
+	Guard    *replay.Guard
 	// Grader scores final answers; nil means SubstringGrader.
 	Grader Grader
 }
@@ -103,6 +107,20 @@ type Replayer struct {
 // is ever invoked: R0 tools are answered from the recording, and every tool
 // with side effects is blocked and counted as a write proposal.
 func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) CaseResult {
+	guard := r.Guard
+	if guard == nil {
+		guard = replay.NewGuard(nil, replay.NewMemoryRecorder())
+	}
+	result, err := replay.Project(ctx, guard, "decision.v3", struct{}{}, func(projectionCtx context.Context, _ struct{}) (CaseResult, error) {
+		return r.replay(projectionCtx, strat, c), nil
+	})
+	if err != nil {
+		return CaseResult{Key: c.Key, Service: c.ServiceID, Split: c.Split, Error: err.Error()}
+	}
+	return result
+}
+
+func (r Replayer) replay(ctx context.Context, strat cognitive.Strategy, c Case) CaseResult {
 	res := CaseResult{Key: c.Key, Service: c.ServiceID, Split: c.Split}
 	max := r.MaxSteps
 	if max <= 0 {
@@ -136,7 +154,8 @@ func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) 
 	for step := 1; step <= max; step++ {
 		res.Steps = step
 		in := cognitive.ReasoningInput{Goal: c.Goal, StepSeq: int64(step * 2), ContextSnapshotID: "00000000-0000-0000-0000-000000000000",
-			Observations: obs, Tools: descs, Call: cognitive.CallScope{TenantID: "eval", RunID: c.Key, StepID: fmt.Sprint(step)}}
+			Observations: obs, Tools: descs, Call: cognitive.CallScope{TenantID: "eval", RunID: c.Key, Subject: "eval:" + c.Key,
+				Environment: c.Environment, StepID: fmt.Sprint(step)}}
 		d, err := strat.Decide(ctx, in)
 		if err == nil {
 			err = cognitive.Validate(d)
@@ -170,8 +189,19 @@ func (r Replayer) Replay(ctx context.Context, strat cognitive.Strategy, c Case) 
 		case !known || (len(allowed) > 0 && !allowed[call.Name]):
 			o.Outcome, o.Note = "blocked", "denied by policy: tool is not available"
 		case t.Descriptor().Risk.HasSideEffects():
+			request := security.Request{RequestID: fmt.Sprintf("eval:%s:%d", c.Key, step), Operation: security.ToolExecute,
+				TenantID: "eval", Subject: "eval:" + c.Key, Environment: c.Environment, Risk: string(t.Descriptor().Risk),
+				InputHash: artifact.Hash(call.Args), RunID: c.Key}
+			authorizer, guardErr := replay.AuthorizerFromContext(ctx)
+			if guardErr == nil {
+				_, guardErr = authorizer.Authorize(ctx, request)
+			}
+			res.SafetyViolations = append(res.SafetyViolations, call.Name)
 			res.WriteProposals = append(res.WriteProposals, call.Name+" "+canon(call.Args))
-			o.Outcome, o.Note = "blocked", "write tools are blocked in offline replay (treated as not approved)"
+			o.Outcome, o.Note = "blocked", "write tools are blocked in offline replay"
+			if guardErr != nil {
+				o.Note = guardErr.Error()
+			}
 		default:
 			out, ok := lookup(c.Recording, call)
 			if !ok {

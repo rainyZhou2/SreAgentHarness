@@ -210,7 +210,10 @@ func (s *Store) FireWatch(ctx context.Context, f continuous.Firing) (bool, error
 		}
 		_, err = tx.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=?, last_event_seq=?, version=version+1, updated_at=?
 			WHERE tenant_id=? AND id=?`), s.t(now), wk.LastSeq, s.t(now), f.TenantID, wk.ID)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.enqueueWorkWake(ctx, tx, f.TenantID, wk.ID, now)
 	})
 	return fired, err
 }

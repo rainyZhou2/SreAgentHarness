@@ -32,6 +32,7 @@ import (
 	"go-sre-harness/internal/eventing"
 	"go-sre-harness/internal/governance"
 	"go-sre-harness/internal/memory"
+	"go-sre-harness/internal/notify"
 	"go-sre-harness/internal/obs"
 	"go-sre-harness/internal/observability"
 	"go-sre-harness/internal/orchestration"
@@ -187,6 +188,7 @@ type Options struct {
 	Metrics    *obs.Registry
 	Log        *slog.Logger
 	Owner      string
+	WorkBroker notify.WorkSubscriber
 	// Embedder embeds Playbook candidates (default: the hashing embedder;
 	// the memory indexer re-embeds for the configured model).
 	Embedder memory.Embedder
@@ -200,18 +202,20 @@ type Options struct {
 
 // Engine is an assembled control plane.
 type Engine struct {
-	API        *workapi.API
-	Service    *orchestration.Service
-	Orch       *orchestration.Orchestrator
-	Reconciler *orchestration.Reconciler
-	Ingestor   *orchestration.Ingestor
-	Actions    *action.Runtime
-	World      *world.Service
+	API            *workapi.API
+	Service        *orchestration.Service
+	Orch           *orchestration.Orchestrator
+	Reconciler     *orchestration.Reconciler
+	SourceRecovery *orchestration.SourceRecovery
+	Ingestor       *orchestration.Ingestor
+	Actions        *action.Runtime
+	World          *world.Service
 	// Playbooks proposes Playbook candidates and records outcome feedback
 	// (nil when the kernel store keeps no memories).
 	Playbooks *playbook.Service
 	// Eval scores Works on the Improvement Loop dimensions.
 	Eval    *workeval.Evaluator
+	Outbox  *cpsql.Store
 	runners []plugin.WorkRunner
 	log     *slog.Logger
 	// Broker is the observability Query Broker.
@@ -222,6 +226,7 @@ type Engine struct {
 	Flags  Flags
 
 	store        *cpsql.Store
+	workBroker   notify.WorkSubscriber
 	metrics      *orchestration.Metrics
 	obsCfg       *ObservabilityConfig
 	authority    provenance.Authority
@@ -372,14 +377,20 @@ func New(o Options) (*Engine, error) {
 		Log: log, Metrics: m, Sources: sources2, Changes: o.Store, Neighbors: neighbors(ws)}
 	svc := &orchestration.Service{Store: o.Store, Runs: runs, Catalog: cat, Clock: clock, Log: log,
 		AllowInlineTemplates: o.Flags.InlineTemplates, Queues: queues}
+	sourceRecovery, err := newSourceRecovery(o, ing)
+	if err != nil {
+		return nil, err
+	}
 	e := &Engine{
-		Service:  svc,
-		Ingestor: ing,
-		Actions:  rt,
-		World:    ws,
-		runners:  runners,
-		log:      log,
-		Launch:   att, Flags: o.Flags, store: o.Store, metrics: m, authority: authority, deployment: o.Deployment,
+		Service:        svc,
+		Ingestor:       ing,
+		SourceRecovery: sourceRecovery,
+		Actions:        rt,
+		World:          ws,
+		Outbox:         o.Store,
+		runners:        runners,
+		log:            log,
+		Launch:         att, Flags: o.Flags, store: o.Store, workBroker: o.WorkBroker, metrics: m, authority: authority, deployment: o.Deployment,
 		requested: requested, schema: o.Schema, capabilities: o.Capabilities, actionDescs: reg.Descriptors(), metricNames: names,
 		Orch: &orchestration.Orchestrator{Store: o.Store, Runs: runs, Actions: rt, Evaluator: ev, Clock: clock, Log: log,
 			Metrics: m, Owner: o.Owner, World: ws, Queues: queues, Pools: pools, Catalog: cat},
@@ -428,6 +439,12 @@ func (e *Engine) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return e.Orch.Run(ctx) })
 	g.Go(func() error { return e.Reconciler.Run(ctx) })
+	if e.SourceRecovery != nil {
+		g.Go(func() error { return e.SourceRecovery.Run(ctx) })
+	}
+	if e.workBroker != nil {
+		g.Go(func() error { return e.runWorkWake(ctx) })
+	}
 	if e.Playbooks != nil {
 		g.Go(func() error { e.sweepPlaybooks(ctx); return nil })
 	}

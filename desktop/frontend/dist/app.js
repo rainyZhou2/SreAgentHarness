@@ -722,10 +722,9 @@ async function watchActive() {
   const t = activeTurn();
   if (!t) return stopWatching();
   if (state.watching === t.run_id) return;
-  const v = state.runs.get(t.run_id);
   state.watching = t.run_id;
   try {
-    await api().WatchRun(t.run_id, v ? v.run.run.last_event_seq : 0);
+    await api().WatchRun(t.run_id, 0);
   } catch (e) {
     state.watching = null;
     toast(errText(e), true);

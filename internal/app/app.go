@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go-sre-harness/internal/api"
+	"go-sre-harness/internal/artifact"
 	"go-sre-harness/internal/auth"
 	"go-sre-harness/internal/cognitive"
 	"go-sre-harness/internal/domain"
@@ -41,7 +42,10 @@ import (
 	"go-sre-harness/internal/plugin"
 	"go-sre-harness/internal/profile"
 	"go-sre-harness/internal/reasoning"
+	"go-sre-harness/internal/sandbox"
 	"go-sre-harness/internal/scheduler"
+	"go-sre-harness/internal/security"
+	"go-sre-harness/internal/securityapi"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/stream"
@@ -97,7 +101,7 @@ func Main() {
 			fmt.Printf("%s (multi=%v): %s\n", k.Name, k.Multi, k.Doc)
 			for _, p := range plugin.Registered() {
 				if p.Kind == k.Name {
-					fmt.Printf("    %-16s %s\n", p.Name, p.Doc)
+					fmt.Printf("    %-16s %s\n", p.Name, p.Description)
 				}
 			}
 		}
@@ -196,12 +200,13 @@ type App struct {
 	Handler http.Handler
 	Config  File
 
-	env     Env
-	log     *slog.Logger
-	broker  plugin.MessageBroker
-	worker  *kernel.Worker
-	sinks   []*eventsink.Dispatcher
-	metrics *obs.Metrics
+	env              Env
+	log              *slog.Logger
+	broker           plugin.MessageBroker
+	worker           *kernel.Worker
+	sinks            []*eventsink.Dispatcher
+	metrics          *obs.Metrics
+	securityListener plugin.Task
 
 	triggerCfgs []trigger.Config
 	triggers    *trigger.Service
@@ -220,8 +225,16 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, err
 	}
 	specs := cfgFile.Plugins
+	securityModeValue, err := securityMode(e)
+	if err != nil {
+		return nil, err
+	}
 
 	metrics := obs.NewMetrics()
+	securityRuntime, err := buildSecurity(pool, cfgFile.Security, securityModeValue, metrics.Reg)
+	if err != nil {
+		return nil, err
+	}
 	cfg := pg.DefaultConfig()
 	cfg.MaxStepsPerRun = e.int("HARNESS_MAX_STEPS_PER_RUN", cfg.MaxStepsPerRun)
 	cfg.ApprovalTTL = e.dur("HARNESS_APPROVAL_TTL", cfg.ApprovalTTL)
@@ -231,6 +244,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	cfg.LockTimeout = e.dur("HARNESS_DB_LOCK_TIMEOUT", cfg.LockTimeout)
 	cfg.StatementTimeout = e.dur("HARNESS_DB_STATEMENT_TIMEOUT", cfg.StatementTimeout)
 	cfg.TxRetries = e.int("HARNESS_DB_TX_RETRIES", cfg.TxRetries)
+	if securityModeValue == security.ModeEnforce {
+		cfg.CommitGuard = pg.NewSecurityCommitGuard(securityRuntime.Service)
+	}
 	store := pg.New(pool, cfg)
 	metrics.Reg.Collect("harness_runs", "Non-terminal runs by status.", func(ctx context.Context, emit func(string, map[string]string, float64)) {
 		if m, err := store.RunsByStatus(ctx); err == nil {
@@ -244,8 +260,13 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	})
 
 	h := plugin.NewHost(mode, log)
+	h.CoreVersion = Version
 	h.Store, h.Metrics, h.Settings = store, metrics, cfgFile.Settings
+	h.MemoryAuthority = cpsql.OpenPostgres(store.Pool())
+	h.Security = securityRuntime.Service
 	h.HTTPAddr = e.str("HARNESS_HTTP_ADDR", "127.0.0.1:8080")
+	listener := securityRuntime.listener()
+	listener.Log = log.With("component", "security_revocations")
 	defer func() {
 		if err != nil {
 			cctx, c := context.WithTimeout(context.Background(), 5*time.Second)
@@ -253,7 +274,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			_ = h.Close(cctx)
 		}
 	}()
-	a = &App{Mode: mode, Host: h, Store: store, Config: cfgFile, env: e, log: log, metrics: metrics}
+	a = &App{Mode: mode, Host: h, Store: store, Config: cfgFile, env: e, log: log, metrics: metrics, securityListener: listener}
 
 	// telemetry
 	exporters, err := plugin.BuildAll(ctx, plugin.Telemetry, h, specs["telemetry"])
@@ -270,6 +291,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if h.Artifacts, err = plugin.BuildOne(ctx, plugin.ArtifactStore, h, specs["artifact_store"]); err != nil {
 		return nil, err
 	}
+	if securityModeValue != security.ModeLegacy {
+		h.Artifacts = artifact.WithSecurity(h.Artifacts, h.Security)
+	}
 	// network policy for everything that dials tenant-controlled URLs
 	allowNets, err := extensions.ParseNetworks(e.str("HARNESS_EXTENSIONS_ALLOW_NETWORKS", ""))
 	if err != nil {
@@ -278,6 +302,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	h.Network = extensions.NetPolicy{Allow: allowNets}
 	// tools
 	h.Tools = tools.NewRegistry()
+	if securityModeValue != security.ModeLegacy {
+		h.Tools.SetSecurity(h.Security, e.str("HARNESS_ENVIRONMENT", e("HARNESS_DEPLOYMENT_TIER")))
+	}
 	sources, err := plugin.BuildAll(ctx, plugin.Tools, h, specs["tools"])
 	if err != nil {
 		return nil, err
@@ -317,6 +344,9 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, err
 	}
 	if sbx != nil {
+		if securityModeValue != security.ModeLegacy {
+			sbx = sandbox.WithSecurity(sbx, h.Security, e.str("HARNESS_ENVIRONMENT", e("HARNESS_DEPLOYMENT_TIER")))
+		}
 		if _, dup := h.Tools.Lookup(sandboxexec.Name); dup {
 			return nil, fmt.Errorf("tool %q is reserved for the harness", sandboxexec.Name)
 		}
@@ -356,6 +386,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		return nil, err
 	}
 	h.Policy = policyGuard(h.Policy)
+	securityRuntime.setPolicyGate(h.Policy)
 	// streaming and broker
 	if h.Deltas, err = plugin.BuildOne(ctx, plugin.StreamBus, h, specs["stream_bus"]); err != nil {
 		return nil, err
@@ -400,6 +431,10 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	// Calls that belong to no run (playbook induction) use the same routes
 	// with an in-memory ledger: they cannot be lease-fenced.
 	h.OfflineGateway = gw.New(route, gw.NewMemLedger(), h.Artifacts, gw.Admission{}, log, providers...)
+	if securityModeValue != security.ModeLegacy {
+		h.Gateway.SetSecurity(h.Security)
+		h.OfflineGateway.SetSecurity(h.Security)
+	}
 	if scorer != nil {
 		h.Gateway.SetScorer(scorer)
 	}
@@ -425,19 +460,22 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		}
 	}
 	if r, ok := retriever.(*memory.Retriever); ok {
-		// Memory applicability follows the run's Work (environment, subjects,
-		// versions) once the work engine is up.
 		r.Env = func(ctx context.Context, tenantID, runID string) (memory.Env, bool) {
 			if a == nil || a.work == nil {
 				return memory.Env{}, false
 			}
 			return a.work.MemoryEnv(ctx, tenantID, runID)
 		}
-		// In-run memory search uses the same pipeline as the first retrieval.
+		var search memsearch.Searcher = r
+		if securityModeValue != security.ModeLegacy {
+			secured := memory.WithSecurityRetriever(r, h.Security)
+			retriever = secured
+			search = secured
+		}
 		if _, dup := h.Tools.Lookup(memsearch.Name); dup {
 			return nil, fmt.Errorf("tool %q is reserved for the harness", memsearch.Name)
 		}
-		h.Tools.Register(memsearch.Tool{Retriever: r})
+		h.Tools.Register(memsearch.Tool{Retriever: search})
 	}
 	// Past-run search: the transcript layer behind memory. It reads finished
 	// runs through the same store and artifacts, scoped to what the calling
@@ -495,11 +533,12 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 	if err != nil {
 		return nil, err
 	}
-	h.Eval = &eval.Service{Store: store, Artifacts: h.Artifacts, Registry: h.Tools, Grader: grader, Log: log,
+	h.Eval = &eval.Service{Store: store, Artifacts: h.Artifacts, ReplayArtifacts: artifact.NewMemory(), Registry: h.Tools, Grader: grader, Log: log,
 		Factory: func(spec profile.Spec) (cognitive.Strategy, error) {
-			// Offline replay gets its own gateway with an in-memory ledger:
-			// replay calls belong to no run and cannot be lease-fenced.
 			g := gw.New(route, gw.NewMemLedger(), h.Artifacts, gw.Admission{}, log, providers...)
+			if securityModeValue != security.ModeLegacy {
+				g.SetSecurity(h.Security)
+			}
 			rt := plugin.StrategyRuntime{Gateway: g, Artifacts: h.Artifacts, Settings: h.Settings}
 			return sel.build(rt, spec)
 		}}
@@ -688,6 +727,7 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 		for _, x := range exts {
 			srv.Extend(x)
 		}
+		srv.Extend(&securityapi.API{Revocations: securityRuntime.Revocations})
 		if a.triggerCfgs != nil {
 			if a.triggers, err = trigger.New(a.triggerCfgs, srv, store, log.With("component", "trigger")); err != nil {
 				return nil, err
@@ -728,7 +768,16 @@ func Build(ctx context.Context, mode string, e Env, pool *pgxpool.Pool, log *slo
 			return nil, err
 		}
 	}
-	log.Info("plugins active", "mode", mode, "plugins", h.Active(), "tools", len(h.Tools.Descriptors()))
+	if securityRuntime.Service.Evaluator == nil {
+		return nil, errors.New("security policy evaluator is not configured")
+	}
+	if err := validateSecurity(securityModeValue, security.Dependencies{
+		Recorder: securityRuntime.Service.Recorder, FreshRevocations: securityRuntime.Service.FreshRevocations,
+		ApprovalVerifier: securityRuntime.Service.Approvals, ToolsDecorated: h.Tools.SecurityEnabled(), CommitGuard: cfg.CommitGuard != nil,
+	}); err != nil {
+		return nil, err
+	}
+	log.Info("plugins active", "mode", mode, "security_mode", securityModeValue, "plugins", h.Active(), "tools", len(h.Tools.Descriptors()))
 	return a, nil
 }
 
@@ -758,10 +807,19 @@ func (a *App) Run(ctx context.Context) error {
 			a.log.Warn("plugin shutdown", "err", err)
 		}
 	}()
+	if err := a.Host.Start(ctx); err != nil {
+		return err
+	}
 	e, log, mode := a.env, a.log, a.Mode
 	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return a.Host.Wait(ctx) })
 	if mode == "all" || mode == "scheduler" {
 		g.Go(func() error { return (&scheduler.Publisher{Store: a.Store, Broker: a.broker, Log: log}).Run(ctx) })
+		if a.work != nil {
+			g.Go(func() error {
+				return (&scheduler.Publisher{Store: a.work.Outbox, Broker: a.broker, Log: log.With("component", "work_outbox")}).Run(ctx)
+			})
+		}
 		for _, d := range a.sinks {
 			g.Go(func() error { return d.Run(ctx) })
 		}
@@ -789,10 +847,10 @@ func (a *App) Run(ctx context.Context) error {
 			return nil
 		})
 	}
-	for id, r := range a.Host.Runners() {
+	if a.securityListener != nil {
 		g.Go(func() error {
-			if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				return fmt.Errorf("%s: %w", id, err)
+			if err := a.securityListener.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				return fmt.Errorf("security revocations: %w", err)
 			}
 			return nil
 		})
@@ -845,13 +903,17 @@ func (a *App) buildWork(ctx context.Context, pool *pgxpool.Pool, srv *api.Server
 	if !flags.Engine {
 		return nil
 	}
+	workBroker, err := workSubscriberFor(a.Mode, a.broker, true)
+	if err != nil {
+		return err
+	}
 	exts, err := plugin.BuildAll(ctx, plugin.WorkExt, a.Host, specs["work_extension"])
 	if err != nil {
 		return err
 	}
 	eng, err := workengine.New(workengine.Options{Store: cpsql.OpenPostgres(pool), Server: srv, Policy: a.Host.Policy,
 		Extensions: exts, Config: a.Config.Work, Flags: flags, Metrics: a.metrics.Reg, Log: a.log,
-		Owner: workengine.Owner(a.Mode), Embedder: a.Host.Embedder,
+		Owner: workengine.Owner(a.Mode), Embedder: a.Host.Embedder, WorkBroker: workBroker,
 		Deployment: deploymentOf(a.Config, a.env, srv.Audit != nil), Capabilities: capabilityNames(a.Config),
 		Schema: func(ctx context.Context) (string, error) {
 			var v string

@@ -21,18 +21,25 @@ import (
 	"go-sre-harness/internal/policy"
 	"go-sre-harness/internal/postmortem"
 	"go-sre-harness/internal/provenance"
+	"go-sre-harness/internal/replay"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/work"
 	"go-sre-harness/internal/workeval"
 	"go-sre-harness/internal/world"
 )
 
+type SideEffectProbes interface {
+	Total() int
+}
+
 // Runner runs cases.
 type Runner struct {
 	// Dir holds the per-case SQLite stores (default: a temp dir, removed
 	// after the case).
-	Dir string
-	Log *slog.Logger
+	Dir      string
+	Log      *slog.Logger
+	Security *replay.Guard
+	Probes   SideEffectProbes
 }
 
 // Result is the outcome of one case.
@@ -84,7 +91,17 @@ type env struct {
 
 // Run executes one case. Errors are infrastructure failures; assertion
 // failures are reported in the result.
-func (r *Runner) Run(ctx context.Context, c Case) (Result, error) {
+func (r *Runner) Run(ctx context.Context, c Case) (result Result, err error) {
+	security := r.Security
+	if security == nil {
+		security = replay.NewGuard(nil, replay.NewMemoryRecorder())
+	}
+	projectionCtx, projection, err := security.Context(ctx, "work.view")
+	if err != nil {
+		return Result{Case: c.Name}, err
+	}
+	defer func() { projection.End(err) }()
+	ctx = projectionCtx
 	if err := c.Normalize(); err != nil {
 		return Result{Case: c.Name}, err
 	}
@@ -101,6 +118,9 @@ func (r *Runner) Run(ctx context.Context, c Case) (Result, error) {
 	res, err := e.simulate()
 	if err != nil {
 		return res, fmt.Errorf("case %s: %w", c.Name, err)
+	}
+	if r.Probes != nil && r.Probes.Total() != 0 {
+		return res, replay.ErrReadOnly
 	}
 	return res, nil
 }

@@ -24,21 +24,22 @@ const StoredSchemaVersion = 1
 type Envelope struct {
 	// ID is the source's own id for the event; (tenant, source, id) is
 	// unique, so redeliveries are deduplicated. It is not a correlation key.
-	ID            string `json:"event_id"`
-	SchemaVersion int    `json:"schema_version"`
-	TenantID      string `json:"tenant_id"`
-	Source        string `json:"source"`
-	Type          string `json:"type"`
-	SubjectRef    string `json:"subject_ref"`
-	CorrelationID string `json:"correlation_id,omitempty"`
-	// DedupKey groups events about "the same problem" (e.g. an alert
-	// fingerprint); independent state changes keep distinct IDs.
-	DedupKey   string            `json:"dedup_key,omitempty"`
-	OccurredAt time.Time         `json:"occurred_at"`
-	ObservedAt time.Time         `json:"observed_at"`
-	ExpiresAt  *time.Time        `json:"expires_at,omitempty"`
-	Confidence float64           `json:"confidence"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	ID             string            `json:"event_id"`
+	SchemaVersion  int               `json:"schema_version"`
+	TenantID       string            `json:"tenant_id"`
+	Source         string            `json:"source"`
+	Type           string            `json:"type"`
+	SubjectRef     string            `json:"subject_ref"`
+	CorrelationID  string            `json:"correlation_id,omitempty"`
+	CorrelationKey string            `json:"correlation_key,omitempty"`
+	CausationID    string            `json:"causation_id,omitempty"`
+	DedupKey       string            `json:"dedup_key,omitempty"`
+	OccurredAt     time.Time         `json:"occurred_at"`
+	ObservedAt     time.Time         `json:"observed_at"`
+	ReceivedAt     time.Time         `json:"received_at"`
+	ExpiresAt      *time.Time        `json:"expires_at,omitempty"`
+	Confidence     float64           `json:"confidence"`
+	Labels         map[string]string `json:"labels,omitempty"`
 	// Payload is the raw event body (untrusted data). Large payloads are
 	// offloaded by the inbox and replaced by PayloadRef.
 	Payload     json.RawMessage `json:"payload,omitempty"`
@@ -101,9 +102,11 @@ func (e *Envelope) Normalize(now time.Time) error {
 		return invalid("subject_ref: %v", err)
 	}
 	e.SubjectRef = ref
-	if len(e.CorrelationID) > MaxIDLen || len(e.DedupKey) > MaxIDLen || len(e.TraceID) > 128 {
-		return invalid("correlation_id/dedup_key/trace_id too long")
+	if len(e.CorrelationID) > MaxIDLen || len(e.CorrelationKey) > MaxIDLen || len(e.CausationID) > MaxIDLen ||
+		len(e.DedupKey) > MaxIDLen || len(e.TraceID) > 128 {
+		return invalid("correlation or causation metadata too long")
 	}
+	e.ReceivedAt = now
 	if e.ObservedAt.IsZero() {
 		e.ObservedAt = now
 	}

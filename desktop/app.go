@@ -16,6 +16,7 @@ import (
 
 	"go-sre-harness/desktop/harness"
 	"go-sre-harness/desktop/localruntime"
+	"go-sre-harness/pkg/eventcursor"
 )
 
 // Settings is the saved connection. The bearer token is kept in memory only
@@ -54,11 +55,12 @@ type Preferences struct {
 type App struct {
 	ctx context.Context
 
-	mu        sync.Mutex
-	settings  Settings
-	client    *harness.Client
-	watchRun  string
-	stopWatch context.CancelFunc
+	mu          sync.Mutex
+	settings    Settings
+	client      *harness.Client
+	cursorStore eventcursor.Store
+	watchRun    string
+	stopWatch   context.CancelFunc
 
 	// emit delivers an event to the UI (Wails runtime events in the window,
 	// server-sent events in browser preview mode).
@@ -433,13 +435,37 @@ func (a *App) WatchRun(runID string, afterSeq int64) error {
 	if err != nil {
 		return err
 	}
+	var who struct {
+		Tenant  string `json:"tenant"`
+		Subject string `json:"subject"`
+	}
+	if err := c.Get(a.ctx, "/api/whoami", &who); err != nil {
+		return fmt.Errorf("load event cursor identity: %w", err)
+	}
+	a.mu.Lock()
+	store := a.cursorStore
+	a.mu.Unlock()
+	if store == nil {
+		store, err = eventcursor.NewFileStore(filepath.Join(filepath.Dir(settingsPath()), "cursors"))
+		if err != nil {
+			return err
+		}
+		a.mu.Lock()
+		if a.cursorStore == nil {
+			a.cursorStore = store
+		} else {
+			store = a.cursorStore
+		}
+		a.mu.Unlock()
+	}
 	a.UnwatchRun()
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.mu.Lock()
 	a.watchRun, a.stopWatch = runID, cancel
 	a.mu.Unlock()
+	identity := harness.SubscriptionIdentity{ServerURL: c.BaseURL, TenantID: who.Tenant, SubjectID: who.Subject}
 	go func() {
-		err := c.StreamEvents(ctx, runID, afterSeq, func(e harness.Event) {
+		err := c.StreamEventsPersistent(ctx, runID, afterSeq, store, identity, func(e harness.Event) {
 			a.emit("run:event", map[string]any{"run_id": runID, "event": e})
 		}, func(d harness.Delta) {
 			a.emit("run:delta", map[string]any{"run_id": runID, "delta": d})

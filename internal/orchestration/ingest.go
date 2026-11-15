@@ -281,7 +281,7 @@ func (in *Ingestor) route(ctx context.Context, rec eventing.Record, dec *eventin
 		payload["notification_suppressed"] = alertProjection.Instance.NotificationSuppressed
 	}
 	req := cpsql.CorrelateRequest{TenantID: env.TenantID, GroupKey: group, Rule: rule.Name, Window: window, Now: now,
-		EventID: rec.InboxID, Payload: payload}
+		EventID: rec.InboxID, CorrelationID: env.CorrelationID, CorrelationKey: env.CorrelationKey, Payload: payload}
 	if dec.Late {
 		// A late event joins the Work that is open for its group; it never
 		// opens a new one and never restarts a closed generation.
@@ -420,7 +420,7 @@ func (in *Ingestor) newWork(rule eventing.Rule, rec eventing.Record) (work.NewWo
 			Description: cpkit.Truncate(fmt.Sprintf("Triggered by %s from %s on %s.", env.Type, env.Source, env.SubjectRef), 500),
 			Labels:      map[string]string{"rule": rule.Name}},
 		Template: tpl, Priority: rule.Priority, Queue: work.Queue(rule.Queue), ActorType: "system", ActorID: "event:" + env.Source,
-		IdempotencyKey: "event:" + rec.InboxID, SourceEvent: rec.InboxID,
+		IdempotencyKey: "event:" + rec.InboxID, SourceEvent: rec.InboxID, CorrelationID: env.CorrelationID, CorrelationKey: env.CorrelationKey,
 		Subjects: []work.SubjectLink{{Kind: "subject", ID: env.SubjectRef}}, Now: in.Clock.Now()}, nil
 }
 

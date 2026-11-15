@@ -89,6 +89,10 @@ type Event struct {
 	RunID                string    `json:"run_id,omitempty"`
 	StepID               string    `json:"step_id,omitempty"`
 	ParentEventID        string    `json:"parent_event_id,omitempty"`
+	CausationID          string    `json:"causation_id,omitempty"`
+	CorrelationID        string    `json:"correlation_id,omitempty"`
+	CorrelationKey       string    `json:"correlation_key,omitempty"`
+	ReceivedAt           time.Time `json:"received_at"`
 	Type                 string    `json:"type"`
 	// Ephemeral events are not persisted and have no sequence.
 	Ephemeral bool            `json:"ephemeral,omitempty"`
@@ -103,8 +107,8 @@ func (e Event) Durable() bool { return !e.Ephemeral && e.Sequence > 0 }
 // name, so a newer server never hides events from an older client — the
 // client skips what it does not know.
 func FromWork(e work.Event) Event {
-	out := Event{SchemaVersion: SchemaVersion, ContractVersion: ContractVersion, MinimumReaderVersion: MinimumReaderVersion, EventID: e.ID, Sequence: e.Seq, OccurredAt: e.OccurredAt, TenantID: e.TenantID,
-		WorkID: e.WorkID, ParentEventID: e.CausationID, Type: e.Type, Payload: e.Payload}
+	out := Event{SchemaVersion: SchemaVersion, ContractVersion: ContractVersion, MinimumReaderVersion: MinimumReaderVersion, EventID: e.ID, Sequence: e.Seq, OccurredAt: e.OccurredAt, ReceivedAt: e.ReceivedAt, TenantID: e.TenantID,
+		WorkID: e.WorkID, ParentEventID: e.CausationID, CausationID: e.CausationID, CorrelationID: e.CorrelationID, CorrelationKey: e.CorrelationKey, Type: e.Type, Payload: e.Payload}
 	var p map[string]any
 	if len(e.Payload) > 0 {
 		_ = json.Unmarshal(e.Payload, &p)

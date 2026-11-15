@@ -127,9 +127,9 @@ func (s *Store) appendEvents(ctx context.Context, tx *sql.Tx, w *work.Work, acto
 			payload = js(map[string]any{"truncated": true, "bytes": len(p)})
 		}
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO work_events (tenant_id, work_id, event_seq, event_id, type,
-			actor_type, actor_id, causation_id, payload, occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)`),
+			actor_type, actor_id, causation_id, correlation_id, correlation_key, payload, occurred_at, received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 			w.TenantID, w.ID, w.LastSeq, cpkit.NewID(), e.Type, actorType, nullStr(actorID), nullStr(e.CausationID),
-			payload, s.t(now)); err != nil {
+			nullStr(e.CorrelationID), nullStr(e.CorrelationKey), payload, s.t(now), s.t(now)); err != nil {
 			return err
 		}
 	}
@@ -492,6 +492,11 @@ func (s *Store) ApplyWork(ctx context.Context, m work.Mutation) (work.Work, erro
 				return err
 			}
 		}
+		if w.WakeAt != nil && !w.WakeAt.After(now) && !w.Status.Terminal() {
+			if err := s.enqueueWorkWake(ctx, tx, w.TenantID, w.ID, now); err != nil {
+				return err
+			}
+		}
 		out = w
 		return nil
 	})
@@ -539,7 +544,7 @@ func (s *Store) ListWorkEvents(ctx context.Context, tenantID, workID string, aft
 		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_seq, event_id, type, actor_type, actor_id, causation_id,
-		payload, occurred_at FROM work_events WHERE tenant_id=? AND work_id=? AND event_seq>? ORDER BY event_seq LIMIT ?`),
+		correlation_id, correlation_key, payload, occurred_at, received_at FROM work_events WHERE tenant_id=? AND work_id=? AND event_seq>? ORDER BY event_seq LIMIT ?`),
 		tenantID, workID, afterSeq, limit)
 	if err != nil {
 		return nil, err
@@ -548,13 +553,14 @@ func (s *Store) ListWorkEvents(ctx context.Context, tenantID, workID string, aft
 	var out []work.Event
 	for rows.Next() {
 		e := work.Event{TenantID: tenantID, WorkID: workID}
-		var actor, cause ns
+		var actor, cause, correlationID, correlationKey ns
 		var payload jb
-		var at ts
-		if err := rows.Scan(&e.Seq, &e.ID, &e.Type, &e.ActorType, &actor, &cause, &payload, &at); err != nil {
+		var at, received ts
+		if err := rows.Scan(&e.Seq, &e.ID, &e.Type, &e.ActorType, &actor, &cause, &correlationID, &correlationKey, &payload, &at, &received); err != nil {
 			return nil, err
 		}
-		e.ActorID, e.CausationID, e.OccurredAt = actor.S(), cause.S(), at.T
+		e.ActorID, e.CausationID, e.CorrelationID, e.CorrelationKey = actor.S(), cause.S(), correlationID.S(), correlationKey.S()
+		e.OccurredAt, e.ReceivedAt = at.T, received.T
 		if len(payload) > 0 {
 			e.Payload = json.RawMessage(payload)
 		}
@@ -815,14 +821,43 @@ func (s *Store) WakeDeferred(ctx context.Context, tenantID string, now time.Time
 	if limit <= 0 {
 		return 0, nil
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=? WHERE tenant_id=? AND id IN (
-		SELECT id FROM agent_works WHERE tenant_id=? AND reason LIKE 'queued: %' AND wake_at IS NOT NULL AND wake_at > ?
-		AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)
-		ORDER BY `+queueRank+`, priority DESC, wake_at LIMIT ?)`), s.t(now), tenantID, tenantID, s.t(now), s.t(now), limit)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	var ids []string
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		ids = ids[:0]
+		rows, err := tx.QueryContext(ctx, s.q(`SELECT id FROM agent_works
+			WHERE tenant_id=? AND reason LIKE 'queued: %' AND wake_at IS NOT NULL AND wake_at > ?
+			AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (lease_until IS NULL OR lease_until < ?)
+			ORDER BY `+queueRank+`, priority DESC, wake_at LIMIT ?`+s.skipLocked()), tenantID, s.t(now), s.t(now), limit)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=? WHERE tenant_id=? AND id=?`),
+				s.t(now), tenantID, id); err != nil {
+				return err
+			}
+			if err := s.enqueueWorkWake(ctx, tx, tenantID, id, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return int64(len(ids)), err
 }
 
 // WorkHasActiveRuns reports whether an open Work has owner runs that were
@@ -904,10 +939,27 @@ func (s *Store) ReleaseWork(ctx context.Context, tenantID, workID, owner string,
 	if s.d == Postgres {
 		at = "CAST(? AS TIMESTAMPTZ)"
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET lease_owner=NULL, lease_until=NULL,
-		wake_at=CASE WHEN status IN ('SUCCEEDED','FAILED','CANCELLED') THEN NULL ELSE `+at+` END
-		WHERE tenant_id=? AND id=? AND lease_owner=?`), s.t(retryAt), tenantID, workID, owner)
-	return err
+	now := s.now()
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET lease_owner=NULL, lease_until=NULL,
+			wake_at=CASE WHEN status IN ('SUCCEEDED','FAILED','CANCELLED') THEN NULL ELSE `+at+` END
+			WHERE tenant_id=? AND id=? AND lease_owner=?`), s.t(retryAt), tenantID, workID, owner)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 || retryAt.After(now) {
+			return err
+		}
+		var status work.Status
+		if err := tx.QueryRowContext(ctx, s.q(`SELECT status FROM agent_works WHERE tenant_id=? AND id=?`), tenantID, workID).Scan(&status); err != nil {
+			return err
+		}
+		if status.Terminal() {
+			return nil
+		}
+		return s.enqueueWorkWake(ctx, tx, tenantID, workID, now)
+	})
 }
 
 // WakeWork asks the orchestrator to look at a Work now (e.g. an approval
@@ -928,7 +980,10 @@ func (s *Store) WakeWork(ctx context.Context, tenantID, workID, reason, actorTyp
 		}
 		_, err = tx.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=?, last_event_seq=?, version=version+1, updated_at=?
 			WHERE tenant_id=? AND id=?`), s.t(now), w.LastSeq, s.t(now), tenantID, workID)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.enqueueWorkWake(ctx, tx, tenantID, workID, now)
 	})
 }
 
@@ -938,14 +993,23 @@ func (s *Store) WakeWork(ctx context.Context, tenantID, workID, reason, actorTyp
 // never conflicts with a pass in progress. It reports whether the wake time
 // moved.
 func (s *Store) WakeWorkQuiet(ctx context.Context, tenantID, workID string, now time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=? WHERE tenant_id=? AND id=?
-		AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUSPENDED','BLOCKED','NEW') AND (wake_at IS NULL OR wake_at > ?)`),
-		s.t(now), tenantID, workID, s.t(now))
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	moved := false
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		moved = false
+		res, err := tx.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=? WHERE tenant_id=? AND id=?
+			AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUSPENDED','BLOCKED','NEW') AND (wake_at IS NULL OR wake_at > ?)`),
+			s.t(now), tenantID, workID, s.t(now))
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		moved = n > 0
+		if !moved {
+			return nil
+		}
+		return s.enqueueWorkWake(ctx, tx, tenantID, workID, now)
+	})
+	return moved, err
 }
 
 // CountByStatus counts Works by kind and status (low-cardinality gauge).

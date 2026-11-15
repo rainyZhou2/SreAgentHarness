@@ -42,14 +42,21 @@ func runIDOf(payload []byte) (string, error) {
 // Local is an in-memory broker. Messages that do not fit are dropped: the
 // reconciler re-wakes idle runs, so loss only adds latency.
 type Local struct {
-	ch chan []byte
+	ch     chan []byte
+	workCh chan []byte
 }
 
-func NewLocal(buffer int) *Local { return &Local{ch: make(chan []byte, buffer)} }
+func NewLocal(buffer int) *Local {
+	return &Local{ch: make(chan []byte, buffer), workCh: make(chan []byte, buffer)}
+}
 
-func (l *Local) Publish(_ context.Context, _, _ string, payload []byte) error {
+func (l *Local) Publish(_ context.Context, subject, _ string, payload []byte) error {
+	ch := l.ch
+	if subject == WorkSubject {
+		ch = l.workCh
+	}
 	select {
-	case l.ch <- payload:
+	case ch <- payload:
 	default:
 	}
 	return nil
@@ -128,6 +135,14 @@ func connectOnce(ctx context.Context, url string) (*JetStream, error) {
 	defer cancel()
 	_, err = js.CreateOrUpdateStream(sctx, jetstream.StreamConfig{
 		Name: StreamName, Subjects: []string{"harness.run.>"}, Retention: jetstream.WorkQueuePolicy,
+		Storage: jetstream.FileStorage, Duplicates: 2 * time.Minute,
+	})
+	if err != nil {
+		nc.Close()
+		return nil, err
+	}
+	_, err = js.CreateOrUpdateStream(sctx, jetstream.StreamConfig{
+		Name: WorkStreamName, Subjects: []string{"harness.work.>"}, Retention: jetstream.WorkQueuePolicy,
 		Storage: jetstream.FileStorage, Duplicates: 2 * time.Minute,
 	})
 	if err != nil {

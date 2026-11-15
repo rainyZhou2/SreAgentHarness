@@ -62,6 +62,10 @@ type Orchestrator struct {
 	// Pools are the shared resource pools (model runs, production actions,
 	// world snapshots); nil means unlimited.
 	Pools *Pools
+
+	wakeOnce sync.Once
+	wake     map[work.Queue]chan struct{}
+
 	// MaxStepsPerClaim bounds immediate transitions in one pass (default 8).
 	MaxStepsPerClaim int
 	// MaxDataClass is the most sensitive data class the model provider may
@@ -190,6 +194,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 // runQueue keeps up to the queue's concurrency Works in flight; a slow Work
 // holds one slot of its own queue only.
 func (o *Orchestrator) runQueue(ctx context.Context, q work.Queue) {
+	o.initWake()
 	lim := o.limit(q)
 	slots := make(chan struct{}, lim.Concurrency)
 	var inflight sync.WaitGroup
@@ -216,6 +221,7 @@ func (o *Orchestrator) runQueue(ctx context.Context, q work.Queue) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-o.wake[q]:
 		case <-t.C:
 		}
 	}

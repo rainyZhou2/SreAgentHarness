@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go-sre-harness/pkg/eventcursor"
 )
 
 // Credentials select how requests authenticate: development headers
@@ -210,15 +212,60 @@ type Delta struct {
 // stream of a finished run, ctx is cancelled or the server rejects the
 // request.
 func (c *Client) StreamEvents(ctx context.Context, runID string, afterSeq int64, fn func(Event), onDelta ...func(Delta)) error {
+	return c.streamEvents(ctx, runID, afterSeq, nil, eventcursor.Key{}, fn, onDelta...)
+}
+
+type SubscriptionIdentity struct {
+	ServerURL string
+	TenantID  string
+	SubjectID string
+}
+
+func (i SubscriptionIdentity) cursorKey(runID string) eventcursor.Key {
+	return eventcursor.Key{
+		ServerURL:  i.ServerURL,
+		TenantID:   i.TenantID,
+		SubjectID:  i.SubjectID,
+		Stream:     "run",
+		ResourceID: runID,
+		Purpose:    "events-v1",
+	}
+}
+
+func (c *Client) StreamEventsPersistent(ctx context.Context, runID string, afterSeq int64, store eventcursor.Store, identity SubscriptionIdentity, fn func(Event), onDelta ...func(Delta)) error {
+	if store == nil {
+		return errors.New("event cursor store is required")
+	}
+	key := identity.cursorKey(runID)
+	cursor, ok, err := store.Load(ctx, key)
+	if err != nil {
+		return err
+	}
+	if ok && cursor.Sequence > afterSeq {
+		afterSeq = cursor.Sequence
+	}
+	return c.streamEvents(ctx, runID, afterSeq, store, key, fn, onDelta...)
+}
+
+type terminalStreamError struct{ err error }
+
+func (e *terminalStreamError) Error() string { return e.err.Error() }
+func (e *terminalStreamError) Unwrap() error { return e.err }
+
+func (c *Client) streamEvents(ctx context.Context, runID string, afterSeq int64, store eventcursor.Store, key eventcursor.Key, fn func(Event), onDelta ...func(Delta)) error {
 	var deltaFn func(Delta)
 	if len(onDelta) > 0 {
 		deltaFn = onDelta[0]
 	}
 	backoff := 500 * time.Millisecond
 	for {
-		got, ended, err := c.streamOnce(ctx, runID, &afterSeq, fn, deltaFn)
+		got, ended, err := c.streamOnceCommitted(ctx, runID, &afterSeq, store, key, fn, deltaFn)
 		if ctx.Err() != nil || ended {
 			return nil
+		}
+		var terminal *terminalStreamError
+		if errors.As(err, &terminal) {
+			return err
 		}
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Status != http.StatusServiceUnavailable {
@@ -239,6 +286,10 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, afterSeq int64,
 // streamOnce reads one connection. ended reports the server's "stream.end"
 // message: the run is finished and every event was delivered.
 func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn func(Event), onDelta func(Delta)) (got, ended bool, err error) {
+	return c.streamOnceCommitted(ctx, runID, after, nil, eventcursor.Key{}, fn, onDelta)
+}
+
+func (c *Client) streamOnceCommitted(ctx context.Context, runID string, after *int64, store eventcursor.Store, key eventcursor.Key, fn func(Event), onDelta func(Delta)) (got, ended bool, err error) {
 	path := "/api/runs/" + url.PathEscape(runID) + "/events/stream"
 	if onDelta != nil {
 		path += "?include_deltas=true"
@@ -260,7 +311,11 @@ func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn 
 		_ = json.Unmarshal(data, e)
 		return false, false, e
 	}
-	err = ParseSSE(resp.Body, func(id, event, data string) {
+	var callbackErr error
+	parseErr := ParseSSE(resp.Body, func(id, event, data string) {
+		if callbackErr != nil {
+			return
+		}
 		if event == "stream.end" {
 			ended = true
 			return
@@ -276,17 +331,26 @@ func (c *Client) streamOnce(ctx context.Context, runID string, after *int64, fn 
 			return
 		}
 		var e Event
-		if json.Unmarshal([]byte(data), &e) != nil {
+		if json.Unmarshal([]byte(data), &e) != nil || e.Seq != *after+1 {
+			callbackErr = &terminalStreamError{err: errors.New("invalid or noncontiguous run event")}
+			_ = resp.Body.Close()
 			return
 		}
-		if e.Seq <= *after {
-			return
+		fn(e)
+		if store != nil {
+			if err := store.Advance(ctx, key, e.Seq, ""); err != nil {
+				callbackErr = &terminalStreamError{err: fmt.Errorf("commit event cursor: %w", err)}
+				_ = resp.Body.Close()
+				return
+			}
 		}
 		*after = e.Seq
 		got = true
-		fn(e)
 	})
-	return got, ended, err
+	if callbackErr != nil {
+		return got, false, callbackErr
+	}
+	return got, ended, parseErr
 }
 
 // ParseSSE reads a text/event-stream and calls fn per dispatched message.

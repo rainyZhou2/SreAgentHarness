@@ -116,7 +116,8 @@ func TestUpcastCurrentAndSourceSignature(t *testing.T) {
 		"subject_ref":"service://prod/search-api","occurred_at":"2026-11-10T13:00:00Z","observed_at":"2026-11-10T13:00:03Z",
 		"correlation_key":"search-api:latency","labels":{"severity":"critical"}}`)
 	e, err := eventing.Upcast(raw)
-	if err != nil || e.ID != "am-1" || e.Source != "alertmanager-prod" || e.DedupKey != "search-api:latency" || e.TenantID != "" {
+	if err != nil || e.ID != "am-1" || e.Source != "alertmanager-prod" || e.CorrelationKey != "search-api:latency" ||
+		e.CorrelationID != "search-api:latency" || e.DedupKey != "" || e.TenantID != "" {
 		t.Fatalf("upcast: %+v %v", e, err)
 	}
 	if _, err := eventing.Upcast([]byte(`{"schema_version":2,"event_id":"x","tenant_id":"evil"}`)); err == nil {

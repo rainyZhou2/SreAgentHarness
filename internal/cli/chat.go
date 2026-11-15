@@ -8,22 +8,28 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"go-sre-harness/pkg/eventcursor"
 )
 
 // Chat is an interactive session on a harness server. Input and output are
 // injected, so the loop is tested without a terminal.
 type Chat struct {
-	C        *Client
-	In       io.Reader
-	Out      io.Writer
-	Session  string // resume this session (empty: create one)
-	Title    string
-	AutoYes  bool // approve without asking (never for R3, which the server denies anyway)
-	lines    chan string
-	pending  []approval
-	streamed bool // text was streamed since the last newline
+	C           *Client
+	In          io.Reader
+	Out         io.Writer
+	Session     string // resume this session (empty: create one)
+	Title       string
+	AutoYes     bool // approve without asking (never for R3, which the server denies anyway)
+	CursorStore eventcursor.Store
+	identity    SubscriptionIdentity
+	lines       chan string
+	pending     []approval
+	streamed    bool // text was streamed since the last newline
 }
 
 type approval struct {
@@ -69,6 +75,20 @@ func (ch *Chat) Run(ctx context.Context) error {
 	}
 	if err := ch.C.Do(ctx, "GET", "/api/whoami", nil, &who); err != nil {
 		return fmt.Errorf("cannot reach the harness at %s: %w", ch.C.BaseURL, err)
+	}
+	ch.identity = SubscriptionIdentity{ServerURL: ch.C.BaseURL, TenantID: who.Tenant, SubjectID: who.Subject}
+	if ch.CursorStore == nil {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("locate event cursor directory: %w", err)
+		}
+		ch.CursorStore, err = eventcursor.NewFileStore(filepath.Join(dir, "sre-harness-cli", "cursors"))
+		if err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(who.Tenant) == "" || strings.TrimSpace(who.Subject) == "" {
+		return errors.New("server returned an incomplete cursor identity")
 	}
 	fmt.Fprintf(ch.Out, "connected to %s as %s (/help for commands)\n", ch.C.BaseURL, who.Subject)
 	if ch.Session == "" {
@@ -219,12 +239,18 @@ func (ch *Chat) turn(ctx context.Context, text string) error {
 	fctx, stop := context.WithCancel(ctx)
 	defer stop()
 	detached := false
-	err := ch.C.Follow(fctx, runID, func(e Event) {
+	onEvent := func(e Event) {
 		if err := ch.onEvent(fctx, runID, e); errors.Is(err, errInputClosed) {
 			detached = true
 			stop()
 		}
-	}, ch.onDelta)
+	}
+	var err error
+	if ch.CursorStore == nil {
+		err = ch.C.Follow(fctx, runID, onEvent, ch.onDelta)
+	} else {
+		err = ch.C.FollowPersistent(fctx, runID, ch.CursorStore, ch.identity, onEvent, ch.onDelta)
+	}
 	ch.endLine()
 	if detached {
 		fmt.Fprintf(ch.Out, "  input closed: run %s is still waiting for approval\n", runID)

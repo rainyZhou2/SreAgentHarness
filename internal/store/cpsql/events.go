@@ -17,6 +17,8 @@ import (
 // same (tenant, source, event id) returns the stored record with
 // created=false and is not processed again (T04).
 func (s *Store) InsertEvent(ctx context.Context, e eventing.Envelope, receivedAt time.Time) (eventing.Record, bool, error) {
+	receivedAt = receivedAt.UTC()
+	e.ReceivedAt = receivedAt
 	rec := eventing.Record{InboxID: cpkit.NewID(), Envelope: e, State: eventing.StateNew, ReceivedAt: receivedAt, UpdatedAt: receivedAt}
 	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO event_inbox (id, tenant_id, source, external_event_id, event_type,
 		subject_ref, correlation_id, dedup_key, envelope, payload_ref, payload_hash, occurred_at, observed_at, received_at,
@@ -212,8 +214,10 @@ type CorrelateRequest struct {
 	// Create, when set, creates a Work if the group has no open one.
 	Create *work.NewWork
 	// EventID is recorded on the Work timeline when attaching.
-	EventID string
-	Payload any
+	EventID        string
+	CorrelationID  string
+	CorrelationKey string
+	Payload        any
 }
 
 // Correlate attaches an event to the open Work of its group or creates one,
@@ -250,7 +254,7 @@ func (s *Store) Correlate(ctx context.Context, req CorrelateRequest) (work.Work,
 				if err != nil {
 					return err
 				}
-				evs := []work.NewEvent{{Type: "work.event_attached", CausationID: req.EventID, Payload: req.Payload}}
+				evs := []work.NewEvent{{Type: "work.event_attached", CausationID: req.EventID, CorrelationID: req.CorrelationID, CorrelationKey: req.CorrelationKey, Payload: req.Payload}}
 				decision = CorrAttached
 				if lim := w.Template.Limits.EventRate(); attached >= lim {
 					decision, evs = CorrThrottled, nil
@@ -272,6 +276,11 @@ func (s *Store) Correlate(ctx context.Context, req CorrelateRequest) (work.Work,
 						return err
 					}
 					w.Version++
+					if decision == CorrAttached {
+						if err := s.enqueueWorkWake(ctx, tx, w.TenantID, w.ID, now); err != nil {
+							return err
+						}
+					}
 				}
 				if _, err := tx.ExecContext(ctx, s.q(`UPDATE work_correlations SET hits=hits+1, last_seen=?, expires_at=?
 					WHERE tenant_id=? AND group_key=?`), s.t(now), s.t(now.Add(req.Window)), req.TenantID, req.GroupKey); err != nil {
@@ -360,10 +369,13 @@ func (s *Store) createWorkTx(ctx context.Context, tx *sql.Tx, n work.NewWork) (w
 		payload["caused_by"] = map[string]any{"incident_id": causal[0].ID, "action_id": causal[1].ID}
 	}
 	if err := s.appendEvents(ctx, tx, &w, n.ActorType, n.ActorID, now, []work.NewEvent{{Type: "work.created",
-		CausationID: n.SourceEvent, Payload: payload}}); err != nil {
+		CausationID: n.SourceEvent, CorrelationID: n.CorrelationID, CorrelationKey: n.CorrelationKey, Payload: payload}}); err != nil {
 		return w, err
 	}
-	return w, s.saveWorkCounters(ctx, tx, w)
+	if err := s.saveWorkCounters(ctx, tx, w); err != nil {
+		return w, err
+	}
+	return w, s.enqueueWorkWake(ctx, tx, w.TenantID, w.ID, now)
 }
 
 // PurgeCorrelations deletes expired correlation groups.

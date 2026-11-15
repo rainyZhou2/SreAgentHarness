@@ -469,7 +469,10 @@ func (s *Store) release(ctx context.Context, tx *sql.Tx, tenantID, upstream, dow
 	}
 	_, err = tx.ExecContext(ctx, s.q(`UPDATE agent_works SET wake_at=?, reason=NULL, last_event_seq=?, version=version+1, updated_at=?
 		WHERE tenant_id=? AND id=?`), s.t(now), w.LastSeq, s.t(now), tenantID, down)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.enqueueWorkWake(ctx, tx, tenantID, down, now)
 }
 
 // CompleteChild settles what depends on a terminal Work. Downstream Works
@@ -555,6 +558,11 @@ func (s *Store) CompleteChild(ctx context.Context, tenantID, childID string, ver
 				THEN wake_at ELSE `+s.tsParam()+` END, last_event_seq=?, version=version+1, updated_at=? WHERE tenant_id=? AND id=?`),
 				s.t(now), p.LastSeq, s.t(now), tenantID, p.ID); err != nil {
 				return err
+			}
+			if p.Status != work.StatusSuspended && p.Status != work.StatusBlocked {
+				if err := s.enqueueWorkWake(ctx, tx, tenantID, p.ID, now); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

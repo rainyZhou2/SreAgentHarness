@@ -295,23 +295,28 @@ type SecondaryIncident struct {
 
 // Event is one committed entry of the Work timeline.
 type Event struct {
-	TenantID    string          `json:"tenant_id"`
-	WorkID      string          `json:"work_id"`
-	Seq         int64           `json:"work_seq"`
-	ID          string          `json:"event_id"`
-	Type        string          `json:"type"`
-	ActorType   string          `json:"actor_type"`
-	ActorID     string          `json:"actor_id,omitempty"`
-	CausationID string          `json:"causation_id,omitempty"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-	OccurredAt  time.Time       `json:"occurred_at"`
+	TenantID       string          `json:"tenant_id"`
+	WorkID         string          `json:"work_id"`
+	Seq            int64           `json:"work_seq"`
+	ID             string          `json:"event_id"`
+	Type           string          `json:"type"`
+	ActorType      string          `json:"actor_type"`
+	ActorID        string          `json:"actor_id,omitempty"`
+	CausationID    string          `json:"causation_id,omitempty"`
+	CorrelationID  string          `json:"correlation_id,omitempty"`
+	CorrelationKey string          `json:"correlation_key,omitempty"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+	ReceivedAt     time.Time       `json:"received_at"`
 }
 
 // NewEvent is an event to append in a mutation.
 type NewEvent struct {
-	Type        string
-	CausationID string
-	Payload     any
+	Type           string
+	CausationID    string
+	CorrelationID  string
+	CorrelationKey string
+	Payload        any
 }
 
 // Errors returned by stores. They map onto HTTP status codes in the API.

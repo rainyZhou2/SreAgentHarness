@@ -281,7 +281,8 @@ func Run(ctx context.Context, cfg Config) error {
 			return ep.ID, ep.ModelID, err
 		}})
 	curator := &curate.Curator{Memories: curatewire.Memories(store), History: runHistory, Store: store}
-	server.Extend(&api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server, Curator: curator})
+	memoryAPI := &api.MemoryAPI{Store: store, Writer: memory.Writer{Embedder: embedder, Artifacts: arts}, Server: server, Curator: curator}
+	server.Extend(memoryAPI)
 	server.Extend(&api.EvalAPI{Service: evalSvc, Store: store, Server: server})
 	// Reasoning quality, pattern library and on-demand improvement. The
 	// desktop runtime never improves on a schedule.
@@ -319,12 +320,13 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	if work != nil {
+		memoryAPI.Governance = &memory.GovernanceService{Store: store, Authority: work.store}
 		work.engine.MirrorTriggers(triggers, work.flags)
 		work.engine.AttachContext(envGatherer)
 		retriever.Env = work.engine.MemoryEnv
 		defer work.close()
 		go func() {
-			if err := work.engine.Run(ctx); err != nil && ctx.Err() == nil {
+			if err := work.run(ctx); err != nil && ctx.Err() == nil {
 				cfg.Log.Error("work engine stopped", "err", err)
 			}
 		}()

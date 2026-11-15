@@ -69,4 +69,10 @@ type WorkRunner interface {
 }
 
 // WorkExt is the extension point.
-var WorkExt = NewKind[WorkExtension]("work_extension", true, "current action executors and outcome metric sources (optional background feeders)")
+var WorkExt = NewKind[WorkExtension](KindInfo{Name: "work_extension", Multi: true, Doc: "current action executors and outcome metric sources (optional background feeders)", ContractVersion: "v1.0.0", AllowedServices: []string{}})
+
+// SourceReconcilers is optionally implemented by a WorkExtension that can
+// recover lost events through read-only, checkpointed source queries.
+type SourceReconcilers interface {
+	SourceReconcilers() map[string]eventing.SourceReconciler
+}

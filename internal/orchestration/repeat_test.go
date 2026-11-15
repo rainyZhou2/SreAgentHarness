@@ -62,9 +62,7 @@ func TestContinuousWorkReturnsToDurableWait(t *testing.T) {
 			t.Fatalf("outcome relabeled: %+v", outs)
 		}
 		// A replacement reconciler/driver uses the same durable watch and state.
-		replacement := *h.orch
-		replacement.Owner = fmt.Sprintf("replacement-%d", cycle)
-		h.orch = &replacement
+		h.orch = replicaOrchestrator(h.orch, fmt.Sprintf("replacement-%d", cycle))
 		h.clock.Add(2 * time.Minute)
 	}
 	_, _, err = h.ing.Ingest(h.ctx, eventing.Envelope{ID: "over-budget", TenantID: "t1", Source: "metrics", Type: "ttft.anomaly", SubjectRef: w.Goal.PrimarySubject(), OccurredAt: h.clock.Now()})

@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go-sre-harness/internal/memory"
 	"go-sre-harness/internal/store/cpsql"
 	"go-sre-harness/internal/store/pg"
 	"go-sre-harness/internal/work"
@@ -180,7 +181,8 @@ func TestUpgradeKeepsOldRecordsReadable(t *testing.T) {
 	if err != nil || string(run.Status) != "COMPLETED" || run.ProfileID != "sre-diagnosis" {
 		t.Fatalf("v1 run after upgrade: %v %+v", err, run)
 	}
-	m, err := store.GetMemory(ctx, tn, memID)
+	memoryCtx := memory.WithAccessContext(ctx, memory.AccessContext{TenantID: tn, Subjects: []string{"role:admin"}})
+	m, err := store.GetMemory(memoryCtx, tn, memID)
 	if err != nil || m.Title != "Roll back checkout" || m.Applicability != nil || m.Verification.SuccessCount != 0 {
 		t.Fatalf("v1 memory after upgrade: %v %+v", err, m)
 	}

@@ -29,6 +29,8 @@ type NewWork struct {
 	ActorID        string
 	IdempotencyKey string
 	SourceEvent    string
+	CorrelationID  string
+	CorrelationKey string
 	Subjects       []SubjectLink
 	Now            time.Time
 }

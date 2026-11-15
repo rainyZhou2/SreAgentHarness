@@ -521,6 +521,17 @@ func TestEventsCreateAndWake(t *testing.T) {
 	}
 }
 
+func replicaOrchestrator(o *Orchestrator, owner string) *Orchestrator {
+	return &Orchestrator{
+		Store: o.Store, Runs: o.Runs, Actions: o.Actions, Evaluator: o.Evaluator,
+		Clock: o.Clock, Log: o.Log, Metrics: o.Metrics, OnClose: o.OnClose,
+		Owner: owner, Lease: o.Lease, Poll: o.Poll, RunPoll: o.RunPoll,
+		Queues: o.Queues, Pools: o.Pools, MaxStepsPerClaim: o.MaxStepsPerClaim,
+		MaxDataClass: o.MaxDataClass, maxClassSet: o.maxClassSet,
+		World: o.World, Catalog: o.Catalog, Checks: o.Checks,
+	}
+}
+
 // Two orchestrator replicas never process one Work concurrently.
 func TestReplicasShareWork(t *testing.T) {
 	h := newHarness(t, domain.RiskR1)
@@ -528,10 +539,9 @@ func TestReplicasShareWork(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		ids = append(ids, h.create("incident", nil).ID)
 	}
-	o2 := *h.orch
-	o2.Owner = "o2"
+	o2 := replicaOrchestrator(h.orch, "o2")
 	var wg sync.WaitGroup
-	for _, o := range []*Orchestrator{h.orch, &o2} {
+	for _, o := range []*Orchestrator{h.orch, o2} {
 		wg.Add(1)
 		go func(o *Orchestrator) {
 			defer wg.Done()

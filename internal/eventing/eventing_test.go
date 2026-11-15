@@ -47,6 +47,19 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+func TestNormalizeAssignsServerReceivedAt(t *testing.T) {
+	e := valid()
+	e.ReceivedAt = now.Add(-24 * time.Hour)
+	e.CausationID = "cause-1"
+	e.CorrelationKey = "group-1"
+	if err := e.Normalize(now); err != nil {
+		t.Fatal(err)
+	}
+	if !e.ReceivedAt.Equal(now) || e.CausationID != "cause-1" || e.CorrelationKey != "group-1" {
+		t.Fatalf("normalized timestamps and causal links: %+v", e)
+	}
+}
+
 func TestPredicate(t *testing.T) {
 	e := valid()
 	_ = e.Normalize(now)

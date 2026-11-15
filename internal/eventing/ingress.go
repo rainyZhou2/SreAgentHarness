@@ -24,6 +24,10 @@ type WireEnvelope struct {
 	ExpiresAt      *time.Time        `json:"expires_at,omitempty"`
 	TraceID        string            `json:"trace_id,omitempty"`
 	CorrelationKey string            `json:"correlation_key,omitempty"`
+	CorrelationID  string            `json:"correlation_id,omitempty"`
+	CausationID    string            `json:"causation_id,omitempty"`
+	DedupKey       string            `json:"dedup_key,omitempty"`
+	ReceivedAt     time.Time         `json:"received_at,omitempty"`
 	PayloadRef     string            `json:"payload_ref,omitempty"`
 	PayloadDigest  string            `json:"payload_digest,omitempty"`
 	Payload        json.RawMessage   `json:"payload,omitempty"`
@@ -39,8 +43,12 @@ func upcastWire(raw []byte) (Envelope, error) {
 	if v.PayloadDigest != "" && len(v.Payload) > 0 && cpkit.HashBytes(v.Payload) != v.PayloadDigest {
 		return Envelope{}, invalid("payload does not match payload_digest")
 	}
+	correlationID := v.CorrelationID
+	if correlationID == "" {
+		correlationID = v.CorrelationKey
+	}
 	return Envelope{ID: v.EventID, SchemaVersion: StoredSchemaVersion, Source: v.SourceID, Type: v.Type, SubjectRef: v.SubjectRef,
-		OccurredAt: v.OccurredAt, ObservedAt: v.ObservedAt, ExpiresAt: v.ExpiresAt, TraceID: v.TraceID,
-		DedupKey: v.CorrelationKey, CorrelationID: v.CorrelationKey, PayloadRef: v.PayloadRef, PayloadHash: v.PayloadDigest,
-		Payload: v.Payload, Labels: v.Labels, Confidence: v.Confidence}, nil
+		OccurredAt: v.OccurredAt, ObservedAt: v.ObservedAt, ReceivedAt: v.ReceivedAt, ExpiresAt: v.ExpiresAt, TraceID: v.TraceID,
+		DedupKey: v.DedupKey, CorrelationKey: v.CorrelationKey, CorrelationID: correlationID, CausationID: v.CausationID,
+		PayloadRef: v.PayloadRef, PayloadHash: v.PayloadDigest, Payload: v.Payload, Labels: v.Labels, Confidence: v.Confidence}, nil
 }

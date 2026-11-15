@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go-sre-harness/pkg/eventcursor"
 )
 
 // Client is a minimal bearer-token client for the harness API.
@@ -127,16 +129,61 @@ type Delta struct {
 // finished), ctx is cancelled or the server refuses. It reconnects from the
 // last seen event. onEvent may block (for example to ask the user).
 func (c *Client) Follow(ctx context.Context, runID string, onEvent func(Event), onDelta func(Delta)) error {
-	after := int64(0)
+	return c.follow(ctx, runID, 0, nil, eventcursor.Key{}, onEvent, onDelta)
+}
+
+type SubscriptionIdentity struct {
+	ServerURL string
+	TenantID  string
+	SubjectID string
+}
+
+func (i SubscriptionIdentity) cursorKey(runID string) eventcursor.Key {
+	return eventcursor.Key{
+		ServerURL:  strings.TrimRight(strings.TrimSpace(i.ServerURL), "/"),
+		TenantID:   i.TenantID,
+		SubjectID:  i.SubjectID,
+		Stream:     "run",
+		ResourceID: runID,
+		Purpose:    "events-v1",
+	}
+}
+
+func (c *Client) FollowPersistent(ctx context.Context, runID string, store eventcursor.Store, identity SubscriptionIdentity, onEvent func(Event), onDelta func(Delta)) error {
+	if store == nil {
+		return errors.New("event cursor store is required")
+	}
+	key := identity.cursorKey(runID)
+	cursor, ok, err := store.Load(ctx, key)
+	if err != nil {
+		return err
+	}
+	var after int64
+	if ok {
+		after = cursor.Sequence
+	}
+	return c.follow(ctx, runID, after, store, key, onEvent, onDelta)
+}
+
+type terminalFollowError struct{ err error }
+
+func (e *terminalFollowError) Error() string { return e.err.Error() }
+func (e *terminalFollowError) Unwrap() error { return e.err }
+
+func (c *Client) follow(ctx context.Context, runID string, after int64, store eventcursor.Store, key eventcursor.Key, onEvent func(Event), onDelta func(Delta)) error {
 	backoff := 500 * time.Millisecond
 	failures := 0
 	for {
-		got, ended, err := c.followOnce(ctx, runID, &after, onEvent, onDelta)
+		got, ended, err := c.followOnceCommitted(ctx, runID, &after, store, key, onEvent, onDelta)
 		if ended {
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		var terminal *terminalFollowError
+		if errors.As(err, &terminal) {
+			return err
 		}
 		var ae *APIError
 		if errors.As(err, &ae) && ae.Status != http.StatusServiceUnavailable {
@@ -157,6 +204,10 @@ func (c *Client) Follow(ctx context.Context, runID string, onEvent func(Event), 
 }
 
 func (c *Client) followOnce(ctx context.Context, runID string, after *int64, onEvent func(Event), onDelta func(Delta)) (got, ended bool, err error) {
+	return c.followOnceCommitted(ctx, runID, after, nil, eventcursor.Key{}, onEvent, onDelta)
+}
+
+func (c *Client) followOnceCommitted(ctx context.Context, runID string, after *int64, store eventcursor.Store, key eventcursor.Key, onEvent func(Event), onDelta func(Delta)) (got, ended bool, err error) {
 	r, err := c.req(ctx, http.MethodGet, "/api/runs/"+url.PathEscape(runID)+"/events/stream?include_deltas=true", nil)
 	if err != nil {
 		return false, false, err
@@ -174,7 +225,11 @@ func (c *Client) followOnce(ctx context.Context, runID string, after *int64, onE
 		_ = json.Unmarshal(data, e)
 		return false, false, e
 	}
-	err = parseSSE(resp.Body, func(event, data string) {
+	var callbackErr error
+	parseErr := parseSSE(resp.Body, func(event, data string) {
+		if callbackErr != nil {
+			return
+		}
 		switch event {
 		case "stream.end":
 			ended = true
@@ -185,15 +240,27 @@ func (c *Client) followOnce(ctx context.Context, runID string, after *int64, onE
 			}
 		default:
 			var e Event
-			if data == "" || json.Unmarshal([]byte(data), &e) != nil || e.Seq <= *after {
+			if data == "" || json.Unmarshal([]byte(data), &e) != nil || e.Seq != *after+1 {
+				callbackErr = &terminalFollowError{err: errors.New("invalid or noncontiguous run event")}
+				_ = resp.Body.Close()
 				return
+			}
+			onEvent(e)
+			if store != nil {
+				if err := store.Advance(ctx, key, e.Seq, ""); err != nil {
+					callbackErr = &terminalFollowError{err: fmt.Errorf("commit event cursor: %w", err)}
+					_ = resp.Body.Close()
+					return
+				}
 			}
 			*after = e.Seq
 			got = true
-			onEvent(e)
 		}
 	})
-	return got, ended, err
+	if callbackErr != nil {
+		return got, false, callbackErr
+	}
+	return got, ended, parseErr
 }
 
 func parseSSE(r io.Reader, fn func(event, data string)) error {
