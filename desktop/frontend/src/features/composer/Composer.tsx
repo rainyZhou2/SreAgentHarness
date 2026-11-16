@@ -16,6 +16,7 @@ import { modelDisplayName, presetFor, type ModelRecord } from "../../lib/modelCa
 import { qk } from "../../lib/queryKeys";
 import { useUiStore } from "../../state/uiStore";
 import { useConnection } from "../connect/ConnectionContext";
+import { ModelAccountGroup } from "./ModelAccountGroup";
 import { SessionGoalBar } from "./SessionGoalBar";
 import { SlashMenu } from "./SlashMenu";
 import { useSlashData, type SlashItem } from "./useSlashData";
@@ -196,9 +197,9 @@ export function Composer() {
   });
 
   const selectModel = useMutation({
-    mutationFn: async (target: ModelRecord) => {
+    mutationFn: async ({ account, modelID }: { account: ModelRecord; modelID: string }) => {
       for (const other of configuredModels) {
-        if (other.name !== target.name && other.spec.default) {
+        if (other.name !== account.name && other.spec.default) {
           await bridge.putExtension(
             "models",
             other.name,
@@ -210,18 +211,22 @@ export function Composer() {
       }
       await bridge.putExtension(
         "models",
-        target.name,
-        { ...target.spec, default: true },
-        target.enabled,
-        target.version,
+        account.name,
+        { ...account.spec, model: modelID, default: true },
+        account.enabled,
+        account.version,
       );
-      return target;
+      return { account, modelID };
     },
-    onSuccess: (target) => {
+    onSuccess: ({ account, modelID }) => {
       void queryClient.invalidateQueries({ queryKey: qk.extensions(scope) });
       void queryClient.invalidateQueries({ queryKey: qk.slash(scope) });
-      showNotice(t("models.selected", { model: target.name }));
-      setInfoDialog(null);
+      void queryClient.invalidateQueries({ queryKey: ["provider-models", scope, account.name] });
+      showNotice(
+        t("models.selected", {
+          model: modelDisplayName({ ...account.spec, model: modelID }, presetFor(account.spec)),
+        }),
+      );
       setModelMenuOpen(false);
     },
   });
@@ -358,25 +363,20 @@ export function Composer() {
     configuredModels.find((record) => record.spec.model === currentModel);
   const modelLabel = currentRecord ? currentRecord.spec.model : currentModel;
   const canManageModels = whoami?.roles?.includes("admin") ?? false;
-  const modelGroups = useMemo(() => {
-    const groups = new Map<
-      string,
-      { label: string; entries: Array<{ record: ModelRecord; name: string }> }
-    >();
-    for (const record of configuredModels) {
-      const preset = presetFor(record.spec);
-      const group = groups.get(preset.id) ?? { label: preset.name, entries: [] };
-      const name = modelDisplayName(record.spec, preset);
-      const existing = group.entries.findIndex((entry) => entry.record.spec.model === record.spec.model);
-      if (existing === -1) {
-        group.entries.push({ record, name });
-      } else if (record.spec.default || record.name === currentRecord?.name) {
-        group.entries[existing] = { record, name };
-      }
-      groups.set(preset.id, group);
+  const accountLabels = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const account of configuredModels) {
+      const preset = presetFor(account.spec);
+      totals.set(preset.id, (totals.get(preset.id) ?? 0) + 1);
     }
-    return Array.from(groups.values());
-  }, [configuredModels, currentRecord]);
+    const seen = new Map<string, number>();
+    return configuredModels.map((account) => {
+      const preset = presetFor(account.spec);
+      const index = (seen.get(preset.id) ?? 0) + 1;
+      seen.set(preset.id, index);
+      return `${preset.name} ${t("models.account")}${(totals.get(preset.id) ?? 0) > 1 ? ` ${index}` : ""}`;
+    });
+  }, [configuredModels, t]);
   const role = roleKey(whoami?.roles);
   const turns = session?.turns ?? 0;
 
@@ -570,38 +570,32 @@ export function Composer() {
               </button>
               {modelMenuOpen ? (
                 <div className="composer-model-menu" role="menu">
-                  {modelGroups.length === 0 ? (
+                  {configuredModels.length === 0 ? (
                     <p className="composer-model-menu__empty">{t("models.noModels")}</p>
                   ) : (
-                    modelGroups.map((group) => (
-                      <div className="composer-model-group" key={group.label} role="group" aria-label={group.label}>
-                        <div className="composer-model-group__label">{group.label}</div>
-                        {group.entries.map((entry) => {
-                          const selected = entry.record.spec.model === currentModel;
-                          return (
-                            <button
-                              key={`${entry.record.name}-${entry.name}`}
-                              type="button"
-                              role="menuitemradio"
-                              aria-checked={selected}
-                              className="composer-model-menu__item"
-                              data-selected={selected}
-                              disabled={!canManageModels || !entry.record.enabled || selectModel.isPending}
-                              onClick={() => {
-                                if (selected) {
-                                  setModelMenuOpen(false);
-                                  return;
-                                }
-                                selectModel.mutate(entry.record);
-                              }}
-                            >
-                              <span>{entry.name}</span>
-                              {selected ? <Icon name="check" size={15} /> : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ))
+                    configuredModels.map((account, index) => {
+                      const preset = presetFor(account.spec);
+                      return (
+                        <ModelAccountGroup
+                          key={account.name}
+                          scope={scope}
+                          account={account}
+                          preset={preset}
+                          label={accountLabels[index] ?? preset.name}
+                          currentModel={currentModel}
+                          selectedRecordName={currentRecord?.name}
+                          canEdit={canManageModels}
+                          selecting={selectModel.isPending}
+                          onSelect={(target, modelID) => {
+                            if (target.name === currentRecord?.name && modelID === currentModel) {
+                              setModelMenuOpen(false);
+                              return;
+                            }
+                            selectModel.mutate({ account: target, modelID });
+                          }}
+                        />
+                      );
+                    })
                   )}
                   {!canManageModels ? <p className="composer-model-menu__note">{t("models.adminOnly")}</p> : null}
                   {selectModel.error ? (

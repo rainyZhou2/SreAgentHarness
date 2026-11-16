@@ -191,7 +191,7 @@ describe("Composer", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /model-a/ }));
     expect(await screen.findByRole("menu")).toBeInTheDocument();
-    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(screen.getByText(/OpenAI/)).toBeInTheDocument();
     expect(screen.getAllByText("model-a").length).toBeGreaterThan(0);
   });
 

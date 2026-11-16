@@ -1,0 +1,11 @@
+.composer-model-group__note {
+  margin: 2px 8px 5px;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+.composer-model-menu__hint {
+  margin-left: 6px;
+  color: var(--color-text-subtle);
+  font-size: 10.5px;
+}
