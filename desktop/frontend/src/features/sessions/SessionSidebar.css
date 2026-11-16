@@ -532,3 +532,39 @@ html.native .session-sidebar__brand button {
 .session-sidebar[data-collapsed="true"] .session-sidebar__search {
   display: none;
 }
+
+.session-sidebar__nav-label {
+  padding: 0 8px 3px;
+  color: var(--color-text-subtle);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+}
+
+.session-sidebar__avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.session-sidebar__avatar .session-sidebar__status-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--color-surface);
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__avatar {
+  width: 28px;
+  height: 28px;
+}

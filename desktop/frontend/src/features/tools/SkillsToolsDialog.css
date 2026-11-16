@@ -1,0 +1,141 @@
+.dialog--tools {
+  width: min(720px, 100%);
+  max-height: min(86vh, 760px);
+}
+
+.tools-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  margin: var(--space-3) 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.tools-tabs button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.tools-tabs button[aria-selected="true"] {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-1);
+}
+
+.tools-tabs button span {
+  color: var(--color-text-subtle);
+  font-size: 10.5px;
+}
+
+.tools-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.tools-search > svg {
+  position: absolute;
+  left: 10px;
+  color: var(--color-text-subtle);
+  pointer-events: none;
+}
+
+.tools-search .input {
+  padding-left: 32px;
+}
+
+.tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tools-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tools-row:last-child {
+  border-bottom: 0;
+}
+
+.tools-row__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+}
+
+.tools-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tools-row__name {
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.tools-row__description {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tools-toggle,
+.tools-state {
+  flex: none;
+  min-width: 58px;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.tools-toggle {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.tools-toggle[data-on="true"] {
+  border-color: color-mix(in srgb, var(--color-success) 40%, var(--color-border));
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.tools-toggle:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tools-state {
+  color: var(--color-text-subtle);
+}

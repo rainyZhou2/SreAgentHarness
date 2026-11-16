@@ -11,6 +11,8 @@ import { ContextDrawer } from "../features/drawer/ContextDrawer";
 import { SessionSidebar } from "../features/sessions/SessionSidebar";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
 import { TraceView } from "../features/trace/TraceView";
+import { SkillsToolsDialog } from "../features/tools/SkillsToolsDialog";
+import { MemoryDialog } from "../features/memory/MemoryDialog";
 import "./AppShell.css";
 
 export function AppShell() {
@@ -19,6 +21,8 @@ export function AppShell() {
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const approvalsOpen = useUiStore((state) => state.approvalsOpen);
   const worksOpen = useUiStore((state) => state.worksOpen);
+  const toolsOpen = useUiStore((state) => state.toolsOpen);
+  const memoryOpen = useUiStore((state) => state.memoryOpen);
   const notice = useUiStore((state) => state.notice);
   const clearNotice = useUiStore((state) => state.clearNotice);
   const setCurrentSession = useUiStore((state) => state.setCurrentSession);
@@ -62,6 +66,8 @@ export function AppShell() {
       {settingsOpen ? <SettingsDialog /> : null}
       {worksOpen ? <WorksInbox /> : null}
       {approvalsOpen ? <ApprovalInbox /> : null}
+      {toolsOpen ? <SkillsToolsDialog /> : null}
+      {memoryOpen ? <MemoryDialog /> : null}
       {notice ? (
         <div className="app-notice" role="status">
           <span>{notice}</span>

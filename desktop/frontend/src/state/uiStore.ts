@@ -26,6 +26,8 @@ interface UiState {
   settingsOpen: boolean;
   approvalsOpen: boolean;
   worksOpen: boolean;
+  toolsOpen: boolean;
+  memoryOpen: boolean;
   notice: string | null;
   drafts: Record<string, string>;
 
@@ -41,6 +43,10 @@ interface UiState {
   closeApprovals: () => void;
   openWorks: () => void;
   closeWorks: () => void;
+  openTools: () => void;
+  closeTools: () => void;
+  openMemory: () => void;
+  closeMemory: () => void;
   showNotice: (notice: string) => void;
   clearNotice: () => void;
   setDraft: (key: string, text: string) => void;
@@ -74,6 +80,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   settingsOpen: false,
   approvalsOpen: false,
   worksOpen: false,
+  toolsOpen: false,
+  memoryOpen: false,
   notice: null,
   drafts: {},
 
@@ -112,6 +120,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   closeApprovals: () => set({ approvalsOpen: false }),
   openWorks: () => set({ worksOpen: true }),
   closeWorks: () => set({ worksOpen: false }),
+  openTools: () => set({ toolsOpen: true }),
+  closeTools: () => set({ toolsOpen: false }),
+  openMemory: () => set({ memoryOpen: true }),
+  closeMemory: () => set({ memoryOpen: false }),
   showNotice: (notice) => set({ notice }),
   clearNotice: () => set({ notice: null }),
 

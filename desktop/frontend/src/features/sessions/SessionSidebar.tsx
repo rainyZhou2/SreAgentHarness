@@ -35,6 +35,8 @@ export function SessionSidebar() {
   const setCurrentSession = useUiStore((state) => state.setCurrentSession);
   const openApprovals = useUiStore((state) => state.openApprovals);
   const openWorks = useUiStore((state) => state.openWorks);
+  const openTools = useUiStore((state) => state.openTools);
+  const openMemory = useUiStore((state) => state.openMemory);
   const openSettings = useUiStore((state) => state.openSettings);
   const showNotice = useUiStore((state) => state.showNotice);
   const deferredSearch = useDeferredValue(search);
@@ -48,6 +50,7 @@ export function SessionSidebar() {
   const accountMode = mode === "remote" ? t("connection.remoteMode") : t("connection.localMode");
   const accountName =
     mode === "remote" ? subject || whoami?.tenant || t("common.notAvailable") : t("connection.localWorkspace");
+  const accountInitial = accountName.slice(0, 1).toUpperCase();
   const roles = whoami?.roles?.join(", ") ?? "";
   const approvalsCount = approvals.data?.approvals.length ?? 0;
   const worksCount = works.data?.items.length ?? 0;
@@ -280,6 +283,9 @@ export function SessionSidebar() {
       </nav>
 
       <div className="session-sidebar__footer">
+        {collapsed ? null : (
+          <div className="session-sidebar__nav-label">{t("sidebar.toolsGroup")}</div>
+        )}
         <div className="session-sidebar__nav">
           <button
             type="button"
@@ -314,14 +320,37 @@ export function SessionSidebar() {
               </span>
             ) : null}
           </button>
+          <button
+            type="button"
+            className="session-sidebar__approvals"
+            onClick={openTools}
+            aria-label={t("sidebar.skillsTools")}
+            title={collapsed ? t("sidebar.skillsTools") : undefined}
+          >
+            <Icon name="sparkles" />
+            {collapsed ? null : <span>{t("sidebar.skillsTools")}</span>}
+          </button>
+          <button
+            type="button"
+            className="session-sidebar__approvals"
+            onClick={openMemory}
+            aria-label={t("sidebar.memory")}
+            title={collapsed ? t("sidebar.memory") : undefined}
+          >
+            <Icon name="book" />
+            {collapsed ? null : <span>{t("sidebar.memory")}</span>}
+          </button>
         </div>
 
         <div className="session-sidebar__account-card" title={roles}>
-          <span
-            className="session-sidebar__status-dot"
-            data-online={!offline}
-            aria-hidden="true"
-          />
+          <span className="session-sidebar__avatar" aria-hidden="true">
+            {accountInitial}
+            <span
+              className="session-sidebar__status-dot"
+              data-online={!offline}
+              aria-hidden="true"
+            />
+          </span>
           {collapsed ? null : (
             <div className="session-sidebar__account-main">
               <span className="session-sidebar__account-mode">

@@ -105,6 +105,22 @@ export const bridge = {
     return getAppBridge().RunSteps(runID, expandIO);
   },
 
+  async setToolEnabled(name: string, enabled: boolean): Promise<unknown> {
+    return getAppBridge().SetToolEnabled(name, enabled);
+  },
+
+  async myMemories(): Promise<unknown> {
+    return getAppBridge().MyMemories();
+  },
+
+  async setMyMemory(key: string, value: string): Promise<unknown> {
+    return getAppBridge().SetMyMemory(key, value);
+  },
+
+  async deleteMyMemory(key: string): Promise<void> {
+    await getAppBridge().DeleteMyMemory(key);
+  },
+
   async getSettings(): Promise<Settings> {
     return parseSettings(await getAppBridge().GetSettings());
   },

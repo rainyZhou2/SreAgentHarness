@@ -31,6 +31,7 @@ export function SettingsDialog() {
   const closeSettings = useUiStore((state) => state.closeSettings);
   const { settings, whoami, mode } = useConnection();
   const [theme, setTheme] = useState<ThemePreference>(() => readThemePreference());
+  const [section, setSection] = useState<"account" | "general" | "models" | "network" | "governance">("account");
   const [governanceOpen, setGovernanceOpen] = useState(false);
   const [proxyURL, setProxyURL] = useState(settings.network?.proxy_url ?? "");
   const [caPath, setCaPath] = useState(settings.network?.ca_cert_path ?? "");
@@ -40,6 +41,9 @@ export function SettingsDialog() {
   const [diagnostics, setDiagnostics] = useState<Record<string, unknown> | null>(null);
   const roles = whoami?.roles ?? [];
   const admin = roles.includes("admin");
+  const accountName =
+    mode === "remote" ? whoami?.subject || whoami?.tenant || t("common.notAvailable") : t("connection.localWorkspace");
+  const accountInitial = accountName.slice(0, 1).toUpperCase();
 
   function changeLanguage(next: LocalePreference) {
     setPreference(next);
@@ -83,7 +87,44 @@ export function SettingsDialog() {
 
   return (
     <Dialog title={t("settings.title")} onClose={closeSettings} wide className="dialog--settings">
-      <div className="settings-content">
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label={t("settings.title")}>
+          {([
+            ["account", "pulse", t("settings.accountSection")],
+            ["general", "sparkles", t("settings.general")],
+            ["models", "cpu", t("models.title")],
+            ["network", "sliders", t("settings.network")],
+            ...(admin ? [["governance", "target", t("governance.title")] as const] : []),
+          ] as const).map(([key, icon, label]) => (
+            <button
+              key={key}
+              type="button"
+              className="settings-nav__item"
+              aria-current={section === key ? "page" : undefined}
+              onClick={() => setSection(key)}
+            >
+              <Icon name={icon} size={16} />
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="settings-content" data-section={section}>
+          <div data-panel="account">
+            <div className="settings-profile">
+              <span className="settings-profile__avatar" aria-hidden="true">
+                {accountInitial}
+              </span>
+              <div>
+                <strong>{accountName}</strong>
+                <span>
+                  {mode === "remote"
+                    ? t("connection.remoteMode")
+                    : t("connection.localMode")}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div data-panel="general">
         <div className="settings-preferences">
           <section className="settings-card" aria-labelledby="settings-language-heading">
             <header className="settings-card__head">
@@ -137,7 +178,9 @@ export function SettingsDialog() {
             </div>
           </section>
         </div>
+          </div>
 
+          <div data-panel="account">
         <section className="settings-card" aria-labelledby="settings-connection-heading">
           <header className="settings-card__head">
             <span className="settings-card__icon" aria-hidden="true">
@@ -185,10 +228,6 @@ export function SettingsDialog() {
             ) : (
               <>
                 <div>
-                  <dt>{t("settings.workspace")}</dt>
-                  <dd>{t("connection.localWorkspace")}</dd>
-                </div>
-                <div>
                   <dt>{t("settings.dataLocation")}</dt>
                   <dd className="mono">{settings.local_data_dir || t("common.notAvailable")}</dd>
                 </div>
@@ -196,8 +235,13 @@ export function SettingsDialog() {
             )}
           </dl>
         </section>
+          </div>
 
+          <div data-panel="models">
         <ModelSettings canEdit={admin} />
+          </div>
+
+          <div data-panel="network">
 
         <section className="settings-card" aria-labelledby="settings-network-heading">
           <header className="settings-card__head">
@@ -250,18 +294,32 @@ export function SettingsDialog() {
             </button>
           </div>
         </section>
+          </div>
 
+          <div data-panel="governance">
+            <section className="settings-card">
+              <header className="settings-card__head">
+                <span className="settings-card__icon" aria-hidden="true">
+                  <Icon name="target" />
+                </span>
+                <div>
+                  <h3>{t("governance.title")}</h3>
+                  <p>{t("settings.governanceHint")}</p>
+                </div>
+              </header>
+              <div className="settings-actions">
+                <button type="button" className="btn btn-sm" onClick={() => setGovernanceOpen(true)}>
+                  {t("governance.open")}
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
       </div>
 
       <footer className="settings-footer">
         <span className="note">{t("settings.appliesImmediately")}</span>
         <div className="settings-footer__actions">
-          {admin ? (
-            <button type="button" className="btn btn-sm" onClick={() => setGovernanceOpen(true)}>
-              <Icon name="target" />
-              {t("governance.open")}
-            </button>
-          ) : null}
           <button type="button" className="btn btn-primary" onClick={closeSettings}>
             {t("settings.dismiss")}
           </button>

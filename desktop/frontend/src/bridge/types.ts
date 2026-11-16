@@ -184,6 +184,23 @@ export interface ParsedTranscript {
   skippedTurns: number;
 }
 
+export interface ToolInfo {
+  name: string;
+  description?: string;
+  risk?: string;
+  enabled?: boolean;
+  allowed_by_profile?: boolean;
+}
+
+export interface PersonalMemory {
+  id?: string;
+  subject?: string;
+  title?: string;
+  content?: string;
+  version?: number;
+  updated_at?: string;
+}
+
 export interface RunThought {
   id?: string;
   seq: number;
@@ -481,6 +498,10 @@ export interface AppBridge {
   TestModel(name: string, spec: Record<string, unknown> | null): Promise<unknown>;
   ListModels(name: string, spec: Record<string, unknown> | null): Promise<unknown>;
   RunSteps(runID: string, expandIO: boolean): Promise<unknown>;
+  SetToolEnabled(name: string, enabled: boolean): Promise<unknown>;
+  MyMemories(): Promise<unknown>;
+  SetMyMemory(key: string, value: string): Promise<unknown>;
+  DeleteMyMemory(key: string): Promise<void>;
   ListWorks(status: string, kind: string, limit: number): Promise<unknown>;
   WorkView(id: string): Promise<unknown>;
   WorkCommand(
