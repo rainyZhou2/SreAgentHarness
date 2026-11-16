@@ -1,16 +1,16 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 
-import { bridge } from "../../bridge/bridge";
 import { toDesktopError } from "../../bridge/errors";
 import { Icon } from "../../components/ui/Icon";
 import { ErrorMessage } from "../../components/ui/ErrorState";
+import { useModelCatalog } from "../../hooks/useModelCatalog";
 import { useI18n } from "../../i18n/I18nProvider";
 import { qk } from "../../lib/queryKeys";
 import { useUiStore } from "../../state/uiStore";
 import { useConnection } from "../connect/ConnectionContext";
 import { ModelEditorDialog } from "./ModelEditorDialog";
-import { parseModelCatalog, presetFor, type ModelRecord } from "./modelCatalog";
+import { presetFor, type ModelRecord } from "../../lib/modelCatalog";
 import "./ModelSettings.css";
 
 export function ModelSettings({ canEdit }: { canEdit: boolean }) {
@@ -20,12 +20,8 @@ export function ModelSettings({ canEdit }: { canEdit: boolean }) {
   const showNotice = useUiStore((state) => state.showNotice);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ModelRecord | null>(null);
-  const query = useQuery({
-    queryKey: qk.extensions(scope),
-    queryFn: () => bridge.extensions(),
-    staleTime: 15_000,
-  });
-  const catalog = useMemo(() => parseModelCatalog(query.data), [query.data]);
+  const query = useModelCatalog(scope);
+  const { catalog } = query;
   const current = catalog.current;
   const currentModel = current?.model ?? "";
   const configured = current?.tenant_configured ?? false;
@@ -107,7 +103,7 @@ export function ModelSettings({ canEdit }: { canEdit: boolean }) {
                 title={t("models.edit")}
               >
                 <span className="settings-model-row__mark" aria-hidden="true">
-                  {preset.name.slice(0, 2)}
+                  {preset.mark}
                 </span>
                 <span className="settings-model-row__main">
                   <span className="mono">{model.name}</span>

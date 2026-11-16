@@ -5,7 +5,7 @@ import { toDesktopError, type DesktopError } from "../../bridge/errors";
 import { Dialog } from "../../components/ui/Dialog";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
-import { MODEL_PRESETS, presetFor, type ModelPreset, type ModelRecord } from "./modelCatalog";
+import { MODEL_PRESETS, presetFor, type ModelPreset, type ModelRecord } from "../../lib/modelCatalog";
 import "./ModelEditorDialog.css";
 
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];

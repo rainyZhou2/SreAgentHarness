@@ -35,6 +35,7 @@ export interface ModelCatalog {
 export interface ModelPreset {
   id: string;
   name: string;
+  mark: string;
   provider: "openai" | "anthropic" | "gemini";
   baseURL: string;
   models: string[];
@@ -47,6 +48,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "openai",
     name: "OpenAI",
+    mark: "AI",
     provider: "openai",
     baseURL: "https://api.openai.com/v1",
     models: ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-terra"],
@@ -56,6 +58,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "anthropic",
     name: "Anthropic Claude",
+    mark: "A",
     provider: "anthropic",
     baseURL: "",
     models: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
@@ -64,6 +67,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "gemini",
     name: "Google Gemini",
+    mark: "G",
     provider: "gemini",
     baseURL: "",
     models: ["gemini-flash-latest", "gemini-pro-latest", "gemini-3.8-flash"],
@@ -72,6 +76,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "deepseek",
     name: "DeepSeek",
+    mark: "DS",
     provider: "openai",
     baseURL: "https://api.deepseek.com/v1",
     models: ["deepseek-v4-pro", "deepseek-v4-flash"],
@@ -80,6 +85,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "qwen",
     name: "Qwen (Alibaba Cloud)",
+    mark: "通",
     provider: "openai",
     baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     models: ["qwen3.7-plus", "qwen3.7-max", "qwen3.6-flash"],
@@ -88,6 +94,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "custom",
     name: "OpenAI-compatible / self-hosted",
+    mark: "</>",
     provider: "openai",
     baseURL: "",
     models: [],

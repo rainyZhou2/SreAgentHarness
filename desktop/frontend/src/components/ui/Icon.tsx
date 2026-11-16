@@ -19,7 +19,8 @@ export type IconName =
   | "trash"
   | "target"
   | "download"
-  | "chevron-down";
+  | "chevron-down"
+  | "check";
 
 const paths: Record<IconName, ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
@@ -58,6 +59,7 @@ const paths: Record<IconName, ReactNode> = {
   "chevron-left": <path d="m15 6-6 6 6 6" />,
   "chevron-right": <path d="m9 6 6 6-6 6" />,
   "chevron-down": <path d="m6 9 6 6 6-6" />,
+  check: <path d="m5 12 5 5L19 7" />,
   shield: <path d="M12 3 19 6v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z" />,
   cpu: (
     <>

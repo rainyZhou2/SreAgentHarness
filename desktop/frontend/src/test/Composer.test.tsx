@@ -19,10 +19,13 @@ const connection: ConnectionContextValue = {
   refreshHealth: vi.fn(async () => undefined) as unknown as ConnectionContextValue["refreshHealth"],
 };
 
-function renderComposer(sessionID: string | null = null) {
+function renderComposer(
+  sessionID: string | null = null,
+  whoami: ConnectionContextValue["whoami"] = testWhoami,
+) {
   useUiStore.setState({ currentSessionId: sessionID, drafts: {} });
   return renderWithProviders(
-    <ConnectionContext.Provider value={connection}>
+    <ConnectionContext.Provider value={{ ...connection, whoami }}>
       <Composer />
     </ConnectionContext.Provider>,
   );
@@ -104,11 +107,73 @@ describe("Composer", () => {
     expect(await screen.findByText(/2 steps/)).toBeInTheDocument();
   });
 
+  it("switches the workspace model from the picker", async () => {
+    const putExtension = vi.fn(async () => ({}));
+    installMockBridge({
+      Extensions: async () => ({
+        models: [
+          {
+            name: "model-a",
+            enabled: true,
+            version: 1,
+            spec: {
+              provider: "openai",
+              preset: "openai",
+              model: "model-a",
+              base_url: "https://api.openai.com/v1",
+              default: true,
+            },
+          },
+          {
+            name: "model-b",
+            enabled: true,
+            version: 2,
+            spec: {
+              provider: "openai",
+              preset: "openai",
+              model: "model-b",
+              base_url: "https://api.openai.com/v1",
+            },
+          },
+        ],
+        current_model: { model: "model-a", tenant_configured: true },
+      }),
+      PutExtension: putExtension,
+    });
+
+    renderComposer(null, { ...testWhoami, roles: ["admin"] });
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-a/ }));
+    fireEvent.click(await screen.findByRole("radio", { name: /model-b/ }));
+
+    await waitFor(() => expect(putExtension).toHaveBeenCalledTimes(2));
+    expect(putExtension).toHaveBeenLastCalledWith(
+      "models",
+      "model-b",
+      expect.objectContaining({ model: "model-b", default: true }),
+      true,
+      2,
+    );
+  });
+
   it("opens effective permission and model details from the chips", async () => {
     installMockBridge({
       Extensions: async () => ({
         skills: [],
-        models: [{ name: "model-a", enabled: true }],
+        models: [
+          {
+            name: "model-a",
+            enabled: true,
+            version: 1,
+            spec: {
+              provider: "openai",
+              preset: "openai",
+              model: "model-a",
+              base_url: "https://api.openai.com/v1",
+              default: true,
+            },
+          },
+        ],
         current_model: { model: "model-a" },
       }),
       Tools: async () => ({
@@ -124,8 +189,8 @@ describe("Composer", () => {
     expect(await screen.findByText(/1 \/ 1/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "model-a" }));
-    expect(await screen.findByText("Model routing")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /model-a/ }));
+    expect(await screen.findByText("Choose a model")).toBeInTheDocument();
     expect(screen.getAllByText("model-a").length).toBeGreaterThan(0);
   });
 

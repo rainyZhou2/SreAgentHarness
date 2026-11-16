@@ -8,9 +8,11 @@ import { Dialog } from "../../components/ui/Dialog";
 import { ErrorMessage } from "../../components/ui/ErrorState";
 import { Icon } from "../../components/ui/Icon";
 import { useSessionsQuery } from "../../hooks/useSessionsQuery";
+import { useModelCatalog } from "../../hooks/useModelCatalog";
 import { useProjectionQuery } from "../../hooks/useProjectionQuery";
 import { useI18n } from "../../i18n/I18nProvider";
 import { formatNumber, truncateTitle } from "../../lib/format";
+import { presetFor, type ModelRecord } from "../../lib/modelCatalog";
 import { qk } from "../../lib/queryKeys";
 import { useUiStore } from "../../state/uiStore";
 import { useConnection } from "../connect/ConnectionContext";
@@ -68,6 +70,7 @@ export function Composer() {
   const setDraft = useUiStore((state) => state.setDraft);
   const clearDraft = useUiStore((state) => state.clearDraft);
   const setSearch = useUiStore((state) => state.setSearch);
+  const openSettings = useUiStore((state) => state.openSettings);
   const showNotice = useUiStore((state) => state.showNotice);
 
   const draftKey = currentSessionId ?? "home";
@@ -86,6 +89,7 @@ export function Composer() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [infoDialog, setInfoDialog] = useState<"permission" | "model" | null>(null);
   const slashData = useSlashData(scope, true);
+  const modelCatalog = useModelCatalog(scope);
   const sessionsQuery = useSessionsQuery(scope, currentSessionId !== null);
   const session = sessionsQuery.data?.sessions.find((item) => item.id === currentSessionId);
   const latestRunID = session?.latest_run_id ?? "";
@@ -186,6 +190,36 @@ export function Composer() {
     onError: (cause) => {
       const normalized = toDesktopError(cause);
       showNotice(`${t("sidebar.actionFailed")}: ${normalized.message}`);
+    },
+  });
+
+  const selectModel = useMutation({
+    mutationFn: async (target: ModelRecord) => {
+      for (const other of configuredModels) {
+        if (other.name !== target.name && other.spec.default) {
+          await bridge.putExtension(
+            "models",
+            other.name,
+            { ...other.spec, default: false },
+            other.enabled,
+            other.version,
+          );
+        }
+      }
+      await bridge.putExtension(
+        "models",
+        target.name,
+        { ...target.spec, default: true },
+        target.enabled,
+        target.version,
+      );
+      return target;
+    },
+    onSuccess: (target) => {
+      void queryClient.invalidateQueries({ queryKey: qk.extensions(scope) });
+      void queryClient.invalidateQueries({ queryKey: qk.slash(scope) });
+      showNotice(t("models.selected", { model: target.name }));
+      setInfoDialog(null);
     },
   });
 
@@ -291,7 +325,14 @@ export function Composer() {
     services.trim() !== "" ||
     windowStart !== "" ||
     windowEnd !== "";
-  const modelName = slashData.data?.currentModel ?? "";
+  const configuredModels = modelCatalog.catalog.models;
+  const currentModel = modelCatalog.catalog.current?.model ?? slashData.data?.currentModel ?? "";
+  const currentRecord =
+    configuredModels.find((record) => record.spec.default) ??
+    configuredModels.find((record) => record.spec.model === currentModel && record.enabled) ??
+    configuredModels.find((record) => record.spec.model === currentModel);
+  const modelLabel = currentRecord ? currentRecord.spec.model : currentModel;
+  const canManageModels = whoami?.roles?.includes("admin") ?? false;
   const role = roleKey(whoami?.roles);
   const turns = session?.turns ?? 0;
 
@@ -477,7 +518,7 @@ export function Composer() {
               onClick={() => setInfoDialog("model")}
             >
               <Icon name="cpu" />
-              <span>{modelName !== "" ? modelName : t("composer.model")}</span>
+              <span>{modelLabel !== "" ? modelLabel : t("composer.model")}</span>
               <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
             </button>
           </div>
@@ -541,31 +582,80 @@ export function Composer() {
       ) : null}
 
       {infoDialog === "model" ? (
-        <Dialog title={t("composer.modelTitle")} onClose={() => setInfoDialog(null)}>
-          <dl className="composer-info">
-            <div>
-              <dt>{t("composer.modelCurrent")}</dt>
-              <dd className="mono">{modelName || "—"}</dd>
+        <Dialog title={t("models.pickerTitle")} onClose={() => setInfoDialog(null)}>
+          <p className="note">{t("models.pickerHint")}</p>
+          {configuredModels.length === 0 ? (
+            <div className="composer-model-empty">
+              <p className="note">{t("models.noModels")}</p>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => {
+                  setInfoDialog(null);
+                  openSettings();
+                }}
+              >
+                {t("models.openSettings")}
+              </button>
             </div>
-          </dl>
-          <h3 className="composer-info__heading">{t("composer.modelAvailable")}</h3>
-          {(slashData.data?.models ?? []).length === 0 ? (
-            <p className="note">{t("composer.modelEmpty")}</p>
           ) : (
-            <ul className="composer-model-list">
-              {(slashData.data?.models ?? []).map((model) => (
-                <li
-                  key={model.name}
-                  data-current={model.name === modelName}
-                  data-disabled={!model.enabled}
-                >
-                  <span className="mono">{model.name}</span>
-                  {!model.enabled ? <span className="note">disabled</span> : null}
-                </li>
-              ))}
-            </ul>
+            <div className="composer-model-picker" role="radiogroup" aria-label={t("models.pickerTitle")}>
+              {configuredModels.map((record) => {
+                const preset = presetFor(record.spec);
+                const selected = record.name === currentRecord?.name;
+                return (
+                  <button
+                    key={record.name}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    className="composer-model-option"
+                    data-selected={selected}
+                    disabled={!canManageModels || !record.enabled || selectModel.isPending}
+                    onClick={() => {
+                      if (selected) {
+                        setInfoDialog(null);
+                        return;
+                      }
+                      selectModel.mutate(record);
+                    }}
+                  >
+                    <span className="composer-model-option__mark" aria-hidden="true">
+                      {preset.mark}
+                    </span>
+                    <span className="composer-model-option__main">
+                      <strong className="mono">{record.spec.model}</strong>
+                      <span>
+                        {preset.name} · {record.name}
+                        {record.spec.base_url ? ` · ${record.spec.base_url}` : ""}
+                      </span>
+                    </span>
+                    <span className="chip" data-kind={record.spec.default ? "default" : "fallback"}>
+                      {record.spec.default ? t("models.default") : t("models.fallback")}
+                    </span>
+                    {selected ? <Icon name="check" size={16} /> : null}
+                  </button>
+                );
+              })}
+            </div>
           )}
-          <p className="note">{t("composer.modelNote")}</p>
+          {!canManageModels ? <p className="note">{t("models.adminOnly")}</p> : null}
+          {selectModel.error ? <ErrorMessage error={toDesktopError(selectModel.error)} /> : null}
+          <div className="composer-model-footer">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setInfoDialog(null);
+                openSettings();
+              }}
+            >
+              {t("models.manage")}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => setInfoDialog(null)}>
+              {t("common.close")}
+            </button>
+          </div>
         </Dialog>
       ) : null}
     </div>
