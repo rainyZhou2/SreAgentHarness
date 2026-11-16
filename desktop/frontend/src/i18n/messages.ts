@@ -928,7 +928,7 @@ export const zh: Record<MessageKey, string> = {
   "approvals.failed": "决定未被记录。",
   "approvals.note": "审批绑定到意图哈希和当前 Run 版本。",
 
-  "works.title": "长期 Work",
+  "works.title": "长期工作",
   "works.open": "打开 Works",
   "works.filterActive": "进行中",
   "works.filterClosed": "已结束",

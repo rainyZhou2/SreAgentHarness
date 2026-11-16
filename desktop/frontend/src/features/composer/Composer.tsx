@@ -468,6 +468,7 @@ export function Composer() {
             >
               <Icon name="shield" />
               <span>{t(`composer.role.${role}`)}</span>
+              <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
             </button>
             <button
               type="button"
@@ -477,6 +478,7 @@ export function Composer() {
             >
               <Icon name="cpu" />
               <span>{modelName !== "" ? modelName : t("composer.model")}</span>
+              <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
             </button>
           </div>
           <button

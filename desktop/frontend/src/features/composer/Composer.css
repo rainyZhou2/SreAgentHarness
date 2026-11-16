@@ -88,7 +88,7 @@
   height: 28px;
   border: 0;
   border-radius: 50%;
-  background: transparent;
+  background: var(--color-surface-muted);
   color: var(--color-text-muted);
   cursor: pointer;
   transition: background-color var(--fast, 120ms) ease, color var(--fast, 120ms) ease;
@@ -158,6 +158,10 @@
 .composer__pill span {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.composer__pill-chevron {
+  opacity: 0.55;
 }
 
 .composer__pill:hover {

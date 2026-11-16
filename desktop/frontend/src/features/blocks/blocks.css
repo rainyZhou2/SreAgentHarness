@@ -12,6 +12,47 @@
   box-shadow: var(--shadow-1);
 }
 
+.conclusion-block {
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+.reasoning-block {
+  padding: 0;
+  overflow: hidden;
+}
+
+.reasoning-block__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.reasoning-block__summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning-block__chevron {
+  transition: transform var(--fast, 120ms) ease;
+}
+
+.reasoning-block[open] .reasoning-block__chevron {
+  transform: rotate(90deg);
+}
+
+.reasoning-block__text {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-4);
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .block-card--quiet {
   background: var(--color-surface-muted);
   box-shadow: none;

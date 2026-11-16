@@ -63,6 +63,8 @@
   width: 100%;
   justify-content: flex-start;
   gap: var(--space-2);
+  color: var(--color-text);
+  font-weight: 500;
 }
 
 .session-sidebar[data-collapsed="true"] .session-sidebar__new {
@@ -242,8 +244,10 @@
   white-space: nowrap;
 }
 
-.session-sidebar__settings {
+.session-sidebar__footer .session-sidebar__settings {
   justify-content: flex-start;
+  width: 100%;
+  text-align: left;
 }
 
 .session-sidebar[data-collapsed="true"] .session-sidebar__settings {

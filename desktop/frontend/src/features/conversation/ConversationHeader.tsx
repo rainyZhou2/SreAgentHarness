@@ -18,7 +18,7 @@ export function ConversationHeader() {
   return (
     <header className="conversation-header">
       <div className="conversation-header__title">
-        <h1>{currentSessionId === null ? t("app.title") : title}</h1>
+        <h1>{currentSessionId === null ? t("sidebar.newChat") : title}</h1>
         {current?.active_turns ? (
           <StatusBadge tone="info" label={t("session.active")} />
         ) : null}

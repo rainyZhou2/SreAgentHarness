@@ -71,7 +71,7 @@ export function SessionSidebar() {
       <div className="session-sidebar__actions">
         <button
           type="button"
-          className="btn btn-primary session-sidebar__new"
+          className="btn session-sidebar__new"
           onClick={() => {
             setCurrentSession(null);
             setSearch("");
