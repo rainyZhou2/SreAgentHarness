@@ -775,24 +775,43 @@ export function Composer() {
       </div>
 
       {infoDialog === "permission" ? (
-        <Dialog title={t("composer.permissionTitle")} onClose={() => setInfoDialog(null)}>
-          <dl className="composer-info">
+        <Dialog
+          title={t("composer.permissionTitle")}
+          onClose={() => setInfoDialog(null)}
+          className="dialog--permission"
+        >
+          <div className="permission-summary">
+            <span className="permission-summary__icon" aria-hidden="true">
+              <Icon name="shield" size={20} />
+            </span>
             <div>
-              <dt>{t("composer.permissionRole")}</dt>
-              <dd>{t(`composer.role.${role}`)}</dd>
+              <strong>{t(`composer.role.${role}`)}</strong>
+              <span>{t("composer.permissionLocked")}</span>
+            </div>
+            <span className="permission-summary__status">
+              <span className="session-sidebar__status-dot" data-online="true" aria-hidden="true" />
+              {t("connection.connected")}
+            </span>
+          </div>
+
+          <div className="permission-grid">
+            <div>
+              <span>{t("composer.permissionRole")}</span>
+              <strong>{t(`composer.role.${role}`)}</strong>
             </div>
             <div>
-              <dt>{t("composer.permissionTools")}</dt>
-              <dd>
+              <span>{t("composer.permissionTools")}</span>
+              <strong>
                 {slashData.data?.enabledToolCount ?? 0} / {slashData.data?.toolCount ?? 0}
-              </dd>
+              </strong>
             </div>
             <div>
-              <dt>{t("composer.permissionProfile")}</dt>
-              <dd className="mono">{slashData.data?.profile || "—"}</dd>
+              <span>{t("composer.permissionProfile")}</span>
+              <strong className="mono">{slashData.data?.profile || "—"}</strong>
             </div>
-          </dl>
-          <p className="note">{t("composer.permissionNote")}</p>
+          </div>
+
+          <p className="permission-note">{t("composer.permissionNote")}</p>
         </Dialog>
       ) : null}
 
