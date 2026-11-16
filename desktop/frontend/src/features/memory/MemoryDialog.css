@@ -93,3 +93,38 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.dialog--memory .dialog-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.memory-list {
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.memory-row {
+  padding: 10px 8px;
+  border-bottom: 0;
+  border-radius: 9px;
+}
+
+.memory-row:hover {
+  background: var(--color-surface-muted);
+}
+
+.memory-row__value {
+  padding-left: 0;
+}
+
+.memory-form__grid .input {
+  width: 100%;
+}
+
+.memory-list {
+  flex: 1;
+  min-height: 0;
+}

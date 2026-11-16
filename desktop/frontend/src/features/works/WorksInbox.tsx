@@ -93,7 +93,7 @@ export function WorksInbox() {
   const actions = detail?.actions ?? [];
 
   return (
-    <Dialog title={t("works.title")} onClose={closeWorks} wide>
+    <Dialog title={t("works.title")} onClose={closeWorks} wide className="dialog--works">
       <div className="works-inbox">
         <aside className="works-list" aria-label={t("works.title")}>
           <div className="works-list__filters" role="tablist">

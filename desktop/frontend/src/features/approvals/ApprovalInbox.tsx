@@ -62,10 +62,11 @@ export function ApprovalInbox() {
   });
 
   const approvals = query.data?.approvals ?? [];
+  const highRisk = approvals.filter((approval) => approval.risk_class === "R2" || approval.risk_class === "R3").length;
   const busy = mutation.isPending;
 
   return (
-    <Dialog title={t("approvals.title")} onClose={closeApprovals} wide>
+    <Dialog title={t("approvals.title")} onClose={closeApprovals} wide className="dialog--approvals">
       {query.isPending ? (
         <StatePanel tone="loading" title={t("approvals.loading")} compact />
       ) : null}
@@ -79,11 +80,29 @@ export function ApprovalInbox() {
         <p className="note note--warning">{t("common.partialData")}</p>
       ) : null}
 
+      {approvals.length > 0 ? (
+        <div className="approval-summary">
+          <div>
+            <span>{t("approvals.pending")}</span>
+            <strong>{approvals.length}</strong>
+          </div>
+          <div data-tone={highRisk > 0 ? "danger" : undefined}>
+            <span>{t("approvals.highRisk")}</span>
+            <strong>{highRisk}</strong>
+          </div>
+        </div>
+      ) : null}
+
       <ul className="approval-list">
         {approvals.map((approval) => {
           const active = decision?.approval.id === approval.id;
           return (
-            <li key={approval.id} className="approval-card" data-active={active}>
+            <li
+                key={approval.id}
+                className="approval-card"
+                data-active={active}
+                data-risk={approval.risk_class.toLowerCase()}
+              >
               <div className="approval-card__head">
                 <span className={`chip risk risk--${approval.risk_class.toLowerCase()}`}>
                   {approval.risk_class}
