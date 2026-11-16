@@ -5,9 +5,11 @@ package localruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +76,8 @@ func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 	m.status = "starting"
 	m.mu.Unlock()
 
+	m.terminateStale()
+
 	plain, data, err := newToken()
 	if err != nil {
 		m.setStatus("failed")
@@ -91,6 +95,7 @@ func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 	base, err := m.startCore(ctx, tokenFile)
 	if err != nil {
 		_ = os.Remove(tokenFile)
+		_ = os.Remove(m.runtimeFile(stateFile))
 		m.setStatus("failed")
 		return Endpoint{}, err
 	}
@@ -102,7 +107,61 @@ func (m *Manager) Start(ctx context.Context) (Endpoint, error) {
 		pid = m.core.Process.Pid
 	}
 	m.mu.Unlock()
+	state := runtimeState{PID: pid, URL: base, StartedAt: time.Now().UTC()}
+	if data, err := json.Marshal(state); err == nil {
+		_ = os.WriteFile(m.runtimeFile(stateFile), data, 0o600)
+	}
 	return Endpoint{URL: base, Token: plain, PID: pid}, nil
+}
+
+const stateFile = "runtime.json"
+
+// runtimeState lets the next app process find and stop a core that outlived
+// the window (for example after a force-quit or a crash).
+type runtimeState struct {
+	PID       int       `json:"pid"`
+	URL       string    `json:"url"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+func (m *Manager) terminateStale() {
+	path := m.runtimeFile(stateFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var state runtimeState
+	if json.Unmarshal(data, &state) != nil || state.PID <= 0 || state.URL == "" || !probeCore(state.URL) {
+		_ = os.Remove(path)
+		return
+	}
+	if process, err := os.FindProcess(state.PID); err == nil {
+		_ = process.Kill()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !probeCore(state.URL) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = os.Remove(path)
+	_ = os.Remove(m.runtimeFile("tokens.json"))
+}
+
+func probeCore(rawURL string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // Stop terminates the core. It is safe to call twice.
@@ -116,6 +175,7 @@ func (m *Manager) Stop(_ context.Context) error {
 	m.mu.Unlock()
 
 	_ = m.stopCore()
+	_ = os.Remove(m.runtimeFile(stateFile))
 	_ = os.Remove(m.runtimeFile("tokens.json"))
 	m.closeLogs()
 	m.mu.Lock()

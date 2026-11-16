@@ -88,6 +88,14 @@ func NewApp() *App {
 	return &App{secrets: localruntime.DefaultSecretStore()}
 }
 
+func (a *App) focusWindow() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.WindowShow(a.ctx)
+	runtime.WindowUnminimise(a.ctx)
+}
+
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.native = a.emit == nil

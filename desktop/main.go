@@ -37,6 +37,12 @@ func main() {
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
 		Bind:             []interface{}{app},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "dev.sreharness.desktop",
+			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
+				app.focusWindow()
+			},
+		},
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WindowIsTranslucent:  true,
