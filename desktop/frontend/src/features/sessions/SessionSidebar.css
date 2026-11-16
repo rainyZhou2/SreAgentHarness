@@ -568,3 +568,169 @@ html.native .session-sidebar__brand button {
   width: 28px;
   height: 28px;
 }
+
+/* Larger, calmer sidebar proportions. */
+.session-sidebar {
+  padding: 14px 12px 10px;
+  gap: 12px;
+}
+
+.session-sidebar__brand {
+  min-height: 36px;
+}
+
+.session-sidebar__logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.session-sidebar__name {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.session-sidebar__new {
+  min-height: 40px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: 13px;
+}
+
+.session-sidebar .session-sidebar__search-input {
+  height: 37px;
+  font-size: 13px;
+}
+
+.session-sidebar__search-icon {
+  left: 11px;
+}
+
+.session-sidebar__search-input {
+  padding-left: 37px;
+}
+
+.session-sidebar__filters {
+  min-height: 32px;
+}
+
+.session-sidebar__list {
+  gap: 3px;
+}
+
+.session-group__label {
+  padding: 4px 8px 3px;
+  font-size: 11px;
+}
+
+.session-item {
+  padding: 8px 11px;
+  border-radius: 8px;
+}
+
+.session-item__title {
+  font-size: 13px;
+}
+
+.session-item__meta {
+  font-size: 11px;
+}
+
+.session-sidebar__footer {
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.session-sidebar__nav-label {
+  padding: 0 9px 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-subtle);
+}
+
+.session-sidebar__nav {
+  gap: 2px;
+}
+
+.session-sidebar__approvals {
+  min-height: 37px;
+  padding: 6px 10px;
+  gap: 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.session-sidebar__approvals .ui-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.session-sidebar__badge {
+  min-width: 21px;
+  height: 21px;
+  padding-inline: 5px;
+  font-size: 11px;
+}
+
+.session-sidebar__account-card {
+  margin-top: 4px;
+  padding: 13px 8px 5px;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  gap: 10px;
+}
+
+.session-sidebar__avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.session-sidebar__account-main {
+  gap: 2px;
+}
+
+.session-sidebar__account-name {
+  font-size: 13.5px;
+  font-weight: 650;
+}
+
+.session-sidebar__account-mode {
+  font-size: 11.5px;
+}
+
+.session-sidebar__account-status {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--color-text-subtle);
+}
+
+.session-sidebar__account-status[data-online="true"] {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 16%, transparent);
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__footer {
+  gap: 6px;
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__approvals {
+  min-height: 38px;
+  padding: 6px 0;
+}
+
+.session-sidebar[data-collapsed="true"] .session-sidebar__account-card {
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 0 4px;
+}

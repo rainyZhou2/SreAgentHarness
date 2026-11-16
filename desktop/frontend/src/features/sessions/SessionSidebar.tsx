@@ -340,34 +340,35 @@ export function SessionSidebar() {
             <Icon name="book" />
             {collapsed ? null : <span>{t("sidebar.memory")}</span>}
           </button>
+          <button
+            type="button"
+            className="session-sidebar__approvals"
+            onClick={openSettings}
+            aria-label={t("sidebar.settings")}
+            title={collapsed ? t("sidebar.settings") : undefined}
+          >
+            <Icon name="settings" />
+            {collapsed ? null : <span>{t("sidebar.settings")}</span>}
+          </button>
         </div>
 
         <div className="session-sidebar__account-card" title={roles}>
           <span className="session-sidebar__avatar" aria-hidden="true">
             {accountInitial}
-            <span
-              className="session-sidebar__status-dot"
-              data-online={!offline}
-              aria-hidden="true"
-            />
           </span>
           {collapsed ? null : (
             <div className="session-sidebar__account-main">
+              <span className="session-sidebar__account-name">{accountName}</span>
               <span className="session-sidebar__account-mode">
                 {offline ? t("connection.offline") : accountMode}
               </span>
-              <span className="session-sidebar__account-name">{accountName}</span>
             </div>
           )}
-          <button
-            type="button"
-            className="session-sidebar__account-settings"
-            onClick={openSettings}
-            aria-label={t("sidebar.settings")}
-            title={t("sidebar.settings")}
-          >
-            <Icon name="globe" size={15} />
-          </button>
+          <span
+            className="session-sidebar__account-status"
+            data-online={!offline}
+            aria-hidden="true"
+          />
         </div>
       </div>
     </aside>
