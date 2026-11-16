@@ -78,6 +78,28 @@ export const bridge = {
     return getAppBridge().Tools();
   },
 
+  async putExtension(
+    kind: string,
+    name: string,
+    spec: Record<string, unknown>,
+    enabled: boolean,
+    expectedVersion: number,
+  ): Promise<unknown> {
+    return getAppBridge().PutExtension(kind, name, spec, enabled, expectedVersion);
+  },
+
+  async deleteExtension(kind: string, name: string): Promise<void> {
+    await getAppBridge().DeleteExtension(kind, name);
+  },
+
+  async testModel(name: string, spec: Record<string, unknown> | null): Promise<unknown> {
+    return getAppBridge().TestModel(name, spec);
+  },
+
+  async listModels(name: string, spec: Record<string, unknown> | null): Promise<unknown> {
+    return getAppBridge().ListModels(name, spec);
+  },
+
   async getSettings(): Promise<Settings> {
     return parseSettings(await getAppBridge().GetSettings());
   },

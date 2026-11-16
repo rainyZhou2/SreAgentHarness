@@ -1,0 +1,122 @@
+.dialog--model-editor {
+  width: min(720px, 100%);
+  max-height: min(90vh, 860px);
+}
+
+.model-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.model-editor__preset {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.model-editor__preset .field {
+  flex: 1;
+}
+
+.model-editor__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.model-editor__inline {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.model-editor__inline .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-editor__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 104px;
+  overflow-y: auto;
+}
+
+.model-editor__chips .chip {
+  cursor: pointer;
+}
+
+.model-editor__chips .chip[data-active="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.model-editor__advanced {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.model-editor__advanced summary {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.model-editor__advanced .model-editor__grid {
+  margin-top: var(--space-2);
+}
+
+.model-editor__checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.model-editor__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text);
+  font-size: 12.5px;
+}
+
+.model-editor__check input {
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.model-editor__test {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.note--success {
+  color: var(--color-success);
+}
+
+.model-editor__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.model-editor__footer .spacer {
+  flex: 1;
+}
+
+@media (max-width: 640px) {
+  .model-editor__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

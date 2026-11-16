@@ -435,6 +435,16 @@ export interface AppBridge {
   ListAudit(limit: number): Promise<unknown>;
   ListRoleBindings(): Promise<unknown>;
   ListRevocations(limit: number): Promise<unknown>;
+  PutExtension(
+    kind: string,
+    name: string,
+    spec: Record<string, unknown>,
+    enabled: boolean,
+    expectedVersion: number,
+  ): Promise<unknown>;
+  DeleteExtension(kind: string, name: string): Promise<void>;
+  TestModel(name: string, spec: Record<string, unknown> | null): Promise<unknown>;
+  ListModels(name: string, spec: Record<string, unknown> | null): Promise<unknown>;
   ListWorks(status: string, kind: string, limit: number): Promise<unknown>;
   WorkView(id: string): Promise<unknown>;
   WorkCommand(

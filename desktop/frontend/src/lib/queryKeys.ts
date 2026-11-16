@@ -9,6 +9,7 @@ export const qk = {
   sessions: (scope: string) => ["sessions", scope] as const,
   approvals: (scope: string) => ["approvals", scope] as const,
   slash: (scope: string) => ["slash", scope] as const,
+  extensions: (scope: string) => ["extensions", scope] as const,
   works: (scope: string) => ["works", scope] as const,
   work: (scope: string, workID: string) => ["work", scope, workID] as const,
   transcript: (scope: string, sessionID: string) => ["transcript", scope, sessionID] as const,

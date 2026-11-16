@@ -11,6 +11,7 @@ import type { LocalePreference, MessageKey } from "../../i18n/messages";
 import { useUiStore } from "../../state/uiStore";
 import { useConnection } from "../connect/ConnectionContext";
 import { GovernanceDialog } from "./GovernanceDialog";
+import { ModelSettings } from "./ModelSettings";
 import "./SettingsDialog.css";
 
 const languageOptions: Array<{ value: LocalePreference; label: MessageKey }> = [
@@ -180,6 +181,8 @@ export function SettingsDialog() {
             </div>
           </dl>
         </section>
+
+        <ModelSettings canEdit={admin} />
 
         <section className="settings-card" aria-labelledby="settings-network-heading">
           <header className="settings-card__head">
