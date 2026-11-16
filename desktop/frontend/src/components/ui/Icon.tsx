@@ -21,7 +21,8 @@ export type IconName =
   | "download"
   | "chevron-down"
   | "check"
-  | "external";
+  | "external"
+  | "search";
 
 const paths: Record<IconName, ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
@@ -62,6 +63,12 @@ const paths: Record<IconName, ReactNode> = {
   "chevron-down": <path d="m6 9 6 6 6-6" />,
   check: <path d="m5 12 5 5L19 7" />,
   external: <path d="M14 4h6v6M20 4l-9 9M10 5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-5" />,
+  search: (
+    <>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-4-4" />
+    </>
+  ),
   shield: <path d="M12 3 19 6v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z" />,
   cpu: (
     <>
