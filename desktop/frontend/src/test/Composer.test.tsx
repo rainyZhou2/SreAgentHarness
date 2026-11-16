@@ -144,7 +144,7 @@ describe("Composer", () => {
     renderComposer(null, { ...testWhoami, roles: ["admin"] });
 
     fireEvent.click(await screen.findByRole("button", { name: /model-a/ }));
-    fireEvent.click(await screen.findByRole("radio", { name: /model-b/ }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /model-b/ }));
 
     await waitFor(() => expect(putExtension).toHaveBeenCalledTimes(2));
     expect(putExtension).toHaveBeenLastCalledWith(
@@ -190,7 +190,8 @@ describe("Composer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
     fireEvent.click(screen.getByRole("button", { name: /model-a/ }));
-    expect(await screen.findByText("Choose a model")).toBeInTheDocument();
+    expect(await screen.findByRole("menu")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
     expect(screen.getAllByText("model-a").length).toBeGreaterThan(0);
   });
 

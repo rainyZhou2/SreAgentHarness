@@ -103,6 +103,26 @@ export const MODEL_PRESETS: ModelPreset[] = [
   },
 ];
 
+export function modelDisplayName(spec: ModelSpec, preset: ModelPreset): string {
+  const id = spec.model.trim();
+  if (preset.id === "deepseek") {
+    if (/flash/i.test(id)) {
+      return "DeepSeek-V4.1-Flash";
+    }
+    if (/pro/i.test(id)) {
+      return "DeepSeek-V4-Pro";
+    }
+    return `DeepSeek-${id.replace(/^deepseek[-_]?/i, "")}`;
+  }
+  if (preset.id === "anthropic") {
+    return id.replace(/^claude[-_]?/i, "Claude ").replace(/-/g, " ");
+  }
+  if (preset.id === "openai" && /^gpt/i.test(id)) {
+    return id.toUpperCase();
+  }
+  return id;
+}
+
 export function presetFor(spec: ModelSpec): ModelPreset {
   return (
     MODEL_PRESETS.find((preset) => preset.id === spec.preset) ??

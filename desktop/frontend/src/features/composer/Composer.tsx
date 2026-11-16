@@ -12,7 +12,7 @@ import { useModelCatalog } from "../../hooks/useModelCatalog";
 import { useProjectionQuery } from "../../hooks/useProjectionQuery";
 import { useI18n } from "../../i18n/I18nProvider";
 import { formatNumber, truncateTitle } from "../../lib/format";
-import { presetFor, type ModelRecord } from "../../lib/modelCatalog";
+import { modelDisplayName, presetFor, type ModelRecord } from "../../lib/modelCatalog";
 import { qk } from "../../lib/queryKeys";
 import { useUiStore } from "../../state/uiStore";
 import { useConnection } from "../connect/ConnectionContext";
@@ -87,7 +87,9 @@ export function Composer() {
   const [slash, setSlash] = useState<SlashState | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [infoDialog, setInfoDialog] = useState<"permission" | "model" | null>(null);
+  const [infoDialog, setInfoDialog] = useState<"permission" | null>(null);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const modelWrapRef = useRef<HTMLDivElement>(null);
   const slashData = useSlashData(scope, true);
   const modelCatalog = useModelCatalog(scope);
   const sessionsQuery = useSessionsQuery(scope, currentSessionId !== null);
@@ -220,6 +222,7 @@ export function Composer() {
       void queryClient.invalidateQueries({ queryKey: qk.slash(scope) });
       showNotice(t("models.selected", { model: target.name }));
       setInfoDialog(null);
+      setModelMenuOpen(false);
     },
   });
 
@@ -320,6 +323,28 @@ export function Composer() {
     submit(draft);
   }
 
+  useEffect(() => {
+    if (!modelMenuOpen) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (!modelWrapRef.current?.contains(event.target as Node)) {
+        setModelMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [modelMenuOpen]);
+
   const hasContext =
     environment.trim() !== "" ||
     services.trim() !== "" ||
@@ -333,6 +358,25 @@ export function Composer() {
     configuredModels.find((record) => record.spec.model === currentModel);
   const modelLabel = currentRecord ? currentRecord.spec.model : currentModel;
   const canManageModels = whoami?.roles?.includes("admin") ?? false;
+  const modelGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      { label: string; entries: Array<{ record: ModelRecord; name: string }> }
+    >();
+    for (const record of configuredModels) {
+      const preset = presetFor(record.spec);
+      const group = groups.get(preset.id) ?? { label: preset.name, entries: [] };
+      const name = modelDisplayName(record.spec, preset);
+      const existing = group.entries.findIndex((entry) => entry.record.spec.model === record.spec.model);
+      if (existing === -1) {
+        group.entries.push({ record, name });
+      } else if (record.spec.default || record.name === currentRecord?.name) {
+        group.entries[existing] = { record, name };
+      }
+      groups.set(preset.id, group);
+    }
+    return Array.from(groups.values());
+  }, [configuredModels, currentRecord]);
   const role = roleKey(whoami?.roles);
   const turns = session?.turns ?? 0;
 
@@ -511,16 +555,75 @@ export function Composer() {
               <span>{t(`composer.role.${role}`)}</span>
               <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
             </button>
-            <button
-              type="button"
-              className="composer__pill"
-              title={t("composer.model")}
-              onClick={() => setInfoDialog("model")}
-            >
-              <Icon name="cpu" />
-              <span>{modelLabel !== "" ? modelLabel : t("composer.model")}</span>
-              <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
-            </button>
+            <div className="composer__model-wrap" ref={modelWrapRef}>
+              <button
+                type="button"
+                className="composer__pill"
+                title={t("composer.model")}
+                aria-haspopup="menu"
+                aria-expanded={modelMenuOpen}
+                onClick={() => setModelMenuOpen((open) => !open)}
+              >
+                <Icon name="cpu" />
+                <span>{modelLabel !== "" ? modelLabel : t("composer.model")}</span>
+                <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
+              </button>
+              {modelMenuOpen ? (
+                <div className="composer-model-menu" role="menu">
+                  {modelGroups.length === 0 ? (
+                    <p className="composer-model-menu__empty">{t("models.noModels")}</p>
+                  ) : (
+                    modelGroups.map((group) => (
+                      <div className="composer-model-group" key={group.label} role="group" aria-label={group.label}>
+                        <div className="composer-model-group__label">{group.label}</div>
+                        {group.entries.map((entry) => {
+                          const selected = entry.record.spec.model === currentModel;
+                          return (
+                            <button
+                              key={`${entry.record.name}-${entry.name}`}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              className="composer-model-menu__item"
+                              data-selected={selected}
+                              disabled={!canManageModels || !entry.record.enabled || selectModel.isPending}
+                              onClick={() => {
+                                if (selected) {
+                                  setModelMenuOpen(false);
+                                  return;
+                                }
+                                selectModel.mutate(entry.record);
+                              }}
+                            >
+                              <span>{entry.name}</span>
+                              {selected ? <Icon name="check" size={15} /> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))
+                  )}
+                  {!canManageModels ? <p className="composer-model-menu__note">{t("models.adminOnly")}</p> : null}
+                  {selectModel.error ? (
+                    <p className="composer-model-menu__note" role="alert">
+                      {toDesktopError(selectModel.error).message}
+                    </p>
+                  ) : null}
+                  <div className="composer-model-menu__footer">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        setModelMenuOpen(false);
+                        openSettings();
+                      }}
+                    >
+                      {t("models.manage")}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
           <button
             type="button"
@@ -581,83 +684,6 @@ export function Composer() {
         </Dialog>
       ) : null}
 
-      {infoDialog === "model" ? (
-        <Dialog title={t("models.pickerTitle")} onClose={() => setInfoDialog(null)}>
-          <p className="note">{t("models.pickerHint")}</p>
-          {configuredModels.length === 0 ? (
-            <div className="composer-model-empty">
-              <p className="note">{t("models.noModels")}</p>
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => {
-                  setInfoDialog(null);
-                  openSettings();
-                }}
-              >
-                {t("models.openSettings")}
-              </button>
-            </div>
-          ) : (
-            <div className="composer-model-picker" role="radiogroup" aria-label={t("models.pickerTitle")}>
-              {configuredModels.map((record) => {
-                const preset = presetFor(record.spec);
-                const selected = record.name === currentRecord?.name;
-                return (
-                  <button
-                    key={record.name}
-                    type="button"
-                    role="radio"
-                    aria-checked={selected}
-                    className="composer-model-option"
-                    data-selected={selected}
-                    disabled={!canManageModels || !record.enabled || selectModel.isPending}
-                    onClick={() => {
-                      if (selected) {
-                        setInfoDialog(null);
-                        return;
-                      }
-                      selectModel.mutate(record);
-                    }}
-                  >
-                    <span className="composer-model-option__mark" aria-hidden="true">
-                      {preset.mark}
-                    </span>
-                    <span className="composer-model-option__main">
-                      <strong className="mono">{record.spec.model}</strong>
-                      <span>
-                        {preset.name} · {record.name}
-                        {record.spec.base_url ? ` · ${record.spec.base_url}` : ""}
-                      </span>
-                    </span>
-                    <span className="chip" data-kind={record.spec.default ? "default" : "fallback"}>
-                      {record.spec.default ? t("models.default") : t("models.fallback")}
-                    </span>
-                    {selected ? <Icon name="check" size={16} /> : null}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {!canManageModels ? <p className="note">{t("models.adminOnly")}</p> : null}
-          {selectModel.error ? <ErrorMessage error={toDesktopError(selectModel.error)} /> : null}
-          <div className="composer-model-footer">
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={() => {
-                setInfoDialog(null);
-                openSettings();
-              }}
-            >
-              {t("models.manage")}
-            </button>
-            <button type="button" className="btn btn-sm" onClick={() => setInfoDialog(null)}>
-              {t("common.close")}
-            </button>
-          </div>
-        </Dialog>
-      ) : null}
     </div>
   );
 }
