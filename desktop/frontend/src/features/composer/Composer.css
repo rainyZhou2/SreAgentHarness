@@ -45,7 +45,16 @@
     inset 0 1px 0 var(--glass-edge),
     0 1px 2px rgb(0 0 0 / 5%),
     0 14px 34px -28px rgb(0 0 0 / 28%),
-    0 0 0 4px var(--color-accent-soft);
+    0 0 0 3px color-mix(in srgb, var(--color-accent) 12%, transparent);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.composer__input,
+.composer__input:focus,
+.composer__input:focus-visible {
+  outline: none;
 }
 
 .composer__input {
@@ -60,6 +69,17 @@
   outline: none;
   font-size: 14px;
   line-height: 1.55;
+  caret-color: var(--color-accent);
+}
+
+.composer__input::placeholder {
+  color: var(--color-text-subtle);
+}
+
+.composer__box {
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .composer__footer {
