@@ -11,11 +11,13 @@ export function Dialog({
   onClose,
   children,
   wide = false,
+  className,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  className?: string;
 }) {
   const { t } = useI18n();
   const headingID = useId();
@@ -32,7 +34,7 @@ export function Dialog({
       }}
     >
       <div
-        className={wide ? "dialog dialog--wide" : "dialog"}
+        className={[wide ? "dialog dialog--wide" : "dialog", className].filter(Boolean).join(" ")}
         role="dialog"
         aria-modal="true"
         aria-labelledby={headingID}

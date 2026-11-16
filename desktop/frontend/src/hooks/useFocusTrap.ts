@@ -32,8 +32,7 @@ export function useFocusTrap(
     if (!container) {
       return;
     }
-    const items = focusableElements(container);
-    (items[0] ?? container).focus();
+    container.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {

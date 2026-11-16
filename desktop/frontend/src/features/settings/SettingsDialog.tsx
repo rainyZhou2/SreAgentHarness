@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { bridge } from "../../bridge/bridge";
 import { toDesktopError, type DesktopError } from "../../bridge/errors";
+import { Icon } from "../../components/ui/Icon";
 import { ErrorMessage } from "../../components/ui/ErrorState";
 import { Dialog } from "../../components/ui/Dialog";
 import { applyTheme, readThemePreference, type ThemePreference } from "../../hooks/useTheme";
@@ -36,13 +37,12 @@ export function SettingsDialog() {
   const [networkNotice, setNetworkNotice] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [diagnostics, setDiagnostics] = useState<Record<string, unknown> | null>(null);
-  const roles = whoami?.roles?.join(", ") ?? "";
-  const admin = whoami?.roles?.includes("admin") ?? false;
+  const roles = whoami?.roles ?? [];
+  const admin = roles.includes("admin");
 
   function changeLanguage(next: LocalePreference) {
     setPreference(next);
     if (next === "en" || next === "zh") {
-      // The desktop service persists the choice; the UI already switched.
       void bridge.setLanguage(next).catch(() => undefined);
     }
   }
@@ -81,116 +81,173 @@ export function SettingsDialog() {
   }
 
   return (
-    <Dialog title={t("settings.title")} onClose={closeSettings}>
-      <div className="settings-sections">
-        <fieldset className="settings-group">
-          <legend>{t("settings.language")}</legend>
-          {languageOptions.map((option) => (
-            <label key={option.value} className="settings-radio">
-              <input
-                type="radio"
-                name="settings-language"
-                value={option.value}
-                checked={preference === option.value}
-                onChange={() => changeLanguage(option.value)}
-              />
-              <span>{t(option.label)}</span>
-            </label>
-          ))}
-        </fieldset>
+    <Dialog title={t("settings.title")} onClose={closeSettings} wide className="dialog--settings">
+      <div className="settings-content">
+        <div className="settings-preferences">
+          <section className="settings-card" aria-labelledby="settings-language-heading">
+            <header className="settings-card__head">
+              <span className="settings-card__icon" aria-hidden="true">
+                <Icon name="globe" />
+              </span>
+              <div>
+                <h3 id="settings-language-heading">{t("settings.language")}</h3>
+                <p>{t("settings.languageHint")}</p>
+              </div>
+            </header>
+            <div className="settings-options" role="radiogroup" aria-labelledby="settings-language-heading">
+              {languageOptions.map((option) => (
+                <label key={option.value} className="settings-option">
+                  <input
+                    type="radio"
+                    name="settings-language"
+                    value={option.value}
+                    checked={preference === option.value}
+                    onChange={() => changeLanguage(option.value)}
+                  />
+                  <span>{t(option.label)}</span>
+                </label>
+              ))}
+            </div>
+          </section>
 
-        <fieldset className="settings-group">
-          <legend>{t("settings.appearance")}</legend>
-          <span className="field-label">{t("settings.theme")}</span>
-          {themeOptions.map((option) => (
-            <label key={option.value} className="settings-radio">
-              <input
-                type="radio"
-                name="settings-theme"
-                value={option.value}
-                checked={theme === option.value}
-                onChange={() => changeTheme(option.value)}
-              />
-              <span>{t(option.label)}</span>
-            </label>
-          ))}
-        </fieldset>
+          <section className="settings-card" aria-labelledby="settings-appearance-heading">
+            <header className="settings-card__head">
+              <span className="settings-card__icon" aria-hidden="true">
+                <Icon name="sparkles" />
+              </span>
+              <div>
+                <h3 id="settings-appearance-heading">{t("settings.appearance")}</h3>
+                <p>{t("settings.appearanceHint")}</p>
+              </div>
+            </header>
+            <div className="settings-options" role="radiogroup" aria-labelledby="settings-appearance-heading">
+              {themeOptions.map((option) => (
+                <label key={option.value} className="settings-option">
+                  <input
+                    type="radio"
+                    name="settings-theme"
+                    value={option.value}
+                    checked={theme === option.value}
+                    onChange={() => changeTheme(option.value)}
+                  />
+                  <span>{t(option.label)}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+        </div>
 
-        <section className="settings-group" aria-labelledby="settings-connection-heading">
-          <h3 id="settings-connection-heading">{t("settings.connection")}</h3>
-          <dl className="kv-list">
-            <dt className="kv-key">{t("settings.mode")}</dt>
-            <dd className="kv-value">
-              {mode === "remote" ? t("connection.remote") : t("connection.local")}
-            </dd>
-            <dt className="kv-key">{t("connection.serverUrl")}</dt>
-            <dd className="kv-value mono">{settings.server_url || t("common.notAvailable")}</dd>
-            <dt className="kv-key">{t("settings.account")}</dt>
-            <dd className="kv-value">{whoami?.subject ?? t("common.notAvailable")}</dd>
-            <dt className="kv-key">{t("settings.tenant")}</dt>
-            <dd className="kv-value">{whoami?.tenant ?? settings.creds.tenant ?? t("common.notAvailable")}</dd>
-            <dt className="kv-key">{t("settings.roles")}</dt>
-            <dd className="kv-value">{roles || t("common.notAvailable")}</dd>
+        <section className="settings-card" aria-labelledby="settings-connection-heading">
+          <header className="settings-card__head">
+            <span className="settings-card__icon" aria-hidden="true">
+              <Icon name="pulse" />
+            </span>
+            <div>
+              <h3 id="settings-connection-heading">{t("settings.connection")}</h3>
+              <p>{t("settings.connectionHint")}</p>
+            </div>
+          </header>
+          <dl className="settings-info">
+            <div>
+              <dt>{t("settings.mode")}</dt>
+              <dd>{mode === "remote" ? t("connection.remote") : t("connection.local")}</dd>
+            </div>
+            <div>
+              <dt>{t("connection.serverUrl")}</dt>
+              <dd className="mono">{settings.server_url || t("common.notAvailable")}</dd>
+            </div>
+            <div>
+              <dt>{t("settings.account")}</dt>
+              <dd>{whoami?.subject ?? t("common.notAvailable")}</dd>
+            </div>
+            <div>
+              <dt>{t("settings.tenant")}</dt>
+              <dd className="mono">{whoami?.tenant ?? settings.creds.tenant ?? t("common.notAvailable")}</dd>
+            </div>
+            <div>
+              <dt>{t("settings.roles")}</dt>
+              <dd className="settings-role-list">
+                {roles.length === 0 ? (
+                  <span>{t("common.notAvailable")}</span>
+                ) : (
+                  roles.map((role) => (
+                    <span className="chip" key={role}>
+                      {role}
+                    </span>
+                  ))
+                )}
+              </dd>
+            </div>
           </dl>
         </section>
+
+        <section className="settings-card" aria-labelledby="settings-network-heading">
+          <header className="settings-card__head">
+            <span className="settings-card__icon" aria-hidden="true">
+              <Icon name="sliders" />
+            </span>
+            <div>
+              <h3 id="settings-network-heading">{t("settings.network")}</h3>
+              <p>{t("settings.networkHint")}</p>
+            </div>
+          </header>
+          <div className="settings-field-grid">
+            <label className="field">
+              <span className="field-label">{t("settings.proxyUrl")}</span>
+              <input
+                className="input"
+                value={proxyURL}
+                onChange={(event) => setProxyURL(event.target.value)}
+                placeholder="http://proxy.example.com:8080"
+                spellCheck={false}
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">{t("settings.caCertPath")}</span>
+              <input
+                className="input"
+                value={caPath}
+                onChange={(event) => setCaPath(event.target.value)}
+                placeholder="/etc/ssl/certs/enterprise-ca.pem"
+                spellCheck={false}
+              />
+            </label>
+          </div>
+          {networkError ? <ErrorMessage error={networkError} /> : null}
+          {networkNotice ? <p className="note">{networkNotice}</p> : null}
+          {diagnostics ? (
+            <p className="note" role="status">
+              {diagnostics.ok ? t("settings.networkOk") : t("settings.networkFailed")}
+              {typeof diagnostics.status === "number" ? ` · HTTP ${diagnostics.status}` : ""}
+              {typeof diagnostics.latency_ms === "number" ? ` · ${diagnostics.latency_ms} ms` : ""}
+              {typeof diagnostics.error === "string" ? ` · ${diagnostics.error}` : ""}
+            </p>
+          ) : null}
+          <div className="settings-actions">
+            <button type="button" className="btn btn-sm" onClick={() => void testNetwork()} disabled={testing}>
+              {testing ? t("common.loading") : t("settings.testNetwork")}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => void saveNetwork()}>
+              {t("common.save")}
+            </button>
+          </div>
+        </section>
+
       </div>
 
-      <section className="settings-group" aria-labelledby="settings-network-heading">
-        <h3 id="settings-network-heading">{t("settings.network")}</h3>
-        <label className="field">
-          <span className="field-label">{t("settings.proxyUrl")}</span>
-          <input
-            className="input"
-            value={proxyURL}
-            onChange={(event) => setProxyURL(event.target.value)}
-            placeholder="http://proxy.example.com:8080"
-            spellCheck={false}
-          />
-        </label>
-        <label className="field">
-          <span className="field-label">{t("settings.caCertPath")}</span>
-          <input
-            className="input"
-            value={caPath}
-            onChange={(event) => setCaPath(event.target.value)}
-            placeholder="/etc/ssl/certs/enterprise-ca.pem"
-            spellCheck={false}
-          />
-        </label>
-        <p className="note">{t("settings.networkHint")}</p>
-        {networkError ? <ErrorMessage error={networkError} /> : null}
-        {networkNotice ? <p className="note">{networkNotice}</p> : null}
-        {diagnostics ? (
-          <p className="note" role="status">
-            {diagnostics.ok ? t("settings.networkOk") : t("settings.networkFailed")}
-            {typeof diagnostics.status === "number" ? ` · HTTP ${diagnostics.status}` : ""}
-            {typeof diagnostics.latency_ms === "number" ? ` · ${diagnostics.latency_ms} ms` : ""}
-            {typeof diagnostics.error === "string" ? ` · ${diagnostics.error}` : ""}
-          </p>
-        ) : null}
-        <div className="settings-actions">
-          <button type="button" className="btn btn-sm" onClick={() => void testNetwork()} disabled={testing}>
-            {testing ? t("common.loading") : t("settings.testNetwork")}
-          </button>
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => void saveNetwork()}>
-            {t("common.save")}
+      <footer className="settings-footer">
+        <span className="note">{t("settings.appliesImmediately")}</span>
+        <div className="settings-footer__actions">
+          {admin ? (
+            <button type="button" className="btn btn-sm" onClick={() => setGovernanceOpen(true)}>
+              <Icon name="target" />
+              {t("governance.open")}
+            </button>
+          ) : null}
+          <button type="button" className="btn btn-primary" onClick={closeSettings}>
+            {t("settings.dismiss")}
           </button>
         </div>
-      </section>
-
-      {admin ? (
-        <section className="settings-group" aria-labelledby="settings-governance-heading">
-          <h3 id="settings-governance-heading">{t("governance.title")}</h3>
-          <button type="button" className="btn btn-sm" onClick={() => setGovernanceOpen(true)}>
-            {t("governance.open")}
-          </button>
-        </section>
-      ) : null}
-
-      <footer className="settings-footer">
-        <button type="button" className="btn btn-primary" onClick={closeSettings}>
-          {t("settings.dismiss")}
-        </button>
       </footer>
       {governanceOpen ? <GovernanceDialog onClose={() => setGovernanceOpen(false)} /> : null}
     </Dialog>
