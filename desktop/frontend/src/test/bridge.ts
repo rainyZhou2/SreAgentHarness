@@ -34,6 +34,7 @@ export function createMockBridge(overrides: Partial<AppBridge> = {}): AppBridge 
     DeleteExtension: async () => undefined,
     TestModel: async () => ({ model: "model-test", reply: "ok", latency_ms: 1 }),
     ListModels: async () => ({ models: [] }),
+    RunSteps: async () => ({ steps: [] }),
     ListAudit: async () => ({ entries: [] }),
     ListRoleBindings: async () => ({ bindings: [] }),
     ListRevocations: async () => ({ revocations: [] }),

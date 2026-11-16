@@ -10,10 +10,12 @@ import { ConversationViewport } from "../features/conversation/ConversationViewp
 import { ContextDrawer } from "../features/drawer/ContextDrawer";
 import { SessionSidebar } from "../features/sessions/SessionSidebar";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
+import { TraceView } from "../features/trace/TraceView";
 import "./AppShell.css";
 
 export function AppShell() {
   const drawer = useUiStore((state) => state.drawer);
+  const workspaceView = useUiStore((state) => state.workspaceView);
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const approvalsOpen = useUiStore((state) => state.approvalsOpen);
   const worksOpen = useUiStore((state) => state.worksOpen);
@@ -47,8 +49,14 @@ export function AppShell() {
       <SessionSidebar />
       <main className="workspace">
         <ConversationHeader />
-        <ConversationViewport />
-        <Composer />
+        {workspaceView === "trace" ? (
+          <TraceView />
+        ) : (
+          <>
+            <ConversationViewport />
+            <Composer />
+          </>
+        )}
       </main>
       <ContextDrawer />
       {settingsOpen ? <SettingsDialog /> : null}

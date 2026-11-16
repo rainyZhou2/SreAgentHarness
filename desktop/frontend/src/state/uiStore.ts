@@ -9,6 +9,8 @@ import type {
 
 const SIDEBAR_KEY = "sre.ui.sidebarCollapsed";
 
+export type WorkspaceView = "conversation" | "trace";
+
 export type DrawerState =
   | { type: "evidence"; runId: string; block: EvidenceBlockData }
   | { type: "action"; runId: string; runVersion: number; block: ActionBlockData }
@@ -19,6 +21,7 @@ interface UiState {
   sidebarCollapsed: boolean;
   search: string;
   currentSessionId: string | null;
+  workspaceView: WorkspaceView;
   drawer: DrawerState | null;
   settingsOpen: boolean;
   approvalsOpen: boolean;
@@ -29,6 +32,7 @@ interface UiState {
   toggleSidebar: () => void;
   setSearch: (search: string) => void;
   setCurrentSession: (sessionID: string | null) => void;
+  setWorkspaceView: (view: WorkspaceView) => void;
   openDrawer: (drawer: DrawerState) => void;
   closeDrawer: () => void;
   openSettings: () => void;
@@ -65,6 +69,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   sidebarCollapsed: readSidebarCollapsed(),
   search: "",
   currentSessionId: null,
+  workspaceView: "conversation",
   drawer: null,
   settingsOpen: false,
   approvalsOpen: false,
@@ -81,7 +86,9 @@ export const useUiStore = create<UiState>((set, get) => ({
   setSearch: (search) => set({ search }),
 
   setCurrentSession: (sessionID) =>
-    set({ currentSessionId: sessionID, search: get().search }),
+    set({ currentSessionId: sessionID, search: get().search, workspaceView: "conversation" }),
+
+  setWorkspaceView: (workspaceView) => set({ workspaceView }),
 
   openDrawer: (drawer) => {
     const active = document.activeElement;

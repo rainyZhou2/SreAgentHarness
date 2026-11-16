@@ -100,6 +100,10 @@ export const bridge = {
     return getAppBridge().ListModels(name, spec);
   },
 
+  async runSteps(runID: string, expandIO = true): Promise<unknown> {
+    return getAppBridge().RunSteps(runID, expandIO);
+  },
+
   async getSettings(): Promise<Settings> {
     return parseSettings(await getAppBridge().GetSettings());
   },

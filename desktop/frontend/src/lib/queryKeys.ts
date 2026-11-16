@@ -14,5 +14,6 @@ export const qk = {
   work: (scope: string, workID: string) => ["work", scope, workID] as const,
   transcript: (scope: string, sessionID: string) => ["transcript", scope, sessionID] as const,
   projection: (scope: string, runID: string) => ["projection", scope, runID] as const,
+  runSteps: (scope: string, runID: string) => ["run-steps", scope, runID] as const,
   projections: (scope: string) => ["projection", scope] as const,
 };

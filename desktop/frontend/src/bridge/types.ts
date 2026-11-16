@@ -184,6 +184,33 @@ export interface ParsedTranscript {
   skippedTurns: number;
 }
 
+export interface RunThought {
+  id?: string;
+  seq: number;
+  kind: string;
+  summary: string;
+  status?: string;
+  confidence?: number;
+  structured?: boolean;
+  attrs?: Record<string, unknown>;
+  refs?: Array<{ ref: string; relation: string }>;
+}
+
+export interface RunStep {
+  id: string;
+  run_id?: string;
+  seq: number;
+  kind: string;
+  executor_name: string;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
+  input?: unknown;
+  output?: unknown;
+  thoughts?: RunThought[];
+  capabilities?: Array<{ ref: string; role: string }>;
+}
+
 export interface TurnContext {
   environment: string;
   services: string[];
@@ -445,6 +472,7 @@ export interface AppBridge {
   DeleteExtension(kind: string, name: string): Promise<void>;
   TestModel(name: string, spec: Record<string, unknown> | null): Promise<unknown>;
   ListModels(name: string, spec: Record<string, unknown> | null): Promise<unknown>;
+  RunSteps(runID: string, expandIO: boolean): Promise<unknown>;
   ListWorks(status: string, kind: string, limit: number): Promise<unknown>;
   WorkView(id: string): Promise<unknown>;
   WorkCommand(

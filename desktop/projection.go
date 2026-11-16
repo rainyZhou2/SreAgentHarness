@@ -20,3 +20,13 @@ func (a *App) GetRunProjection(runID string) (projection.View, error) {
 	err = c.Get(a.ctx, "/api/runs/"+url.PathEscape(runID)+"/projection", &out)
 	return out, err
 }
+
+// RunSteps returns the ordered execution trace of a run, including thoughts,
+// tool inputs/outputs and capability references.
+func (a *App) RunSteps(runID string, expandIO bool) (map[string]any, error) {
+	path := "/api/runs/" + url.PathEscape(runID) + "/steps"
+	if expandIO {
+		path += "?expand=io"
+	}
+	return a.get(path)
+}
