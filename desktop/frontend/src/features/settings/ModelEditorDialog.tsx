@@ -3,12 +3,82 @@ import { useState } from "react";
 import { bridge } from "../../bridge/bridge";
 import { toDesktopError, type DesktopError } from "../../bridge/errors";
 import { Dialog } from "../../components/ui/Dialog";
-import { ErrorMessage } from "../../components/ui/ErrorState";
 import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { MODEL_PRESETS, presetFor, type ModelPreset, type ModelRecord } from "./modelCatalog";
 import "./ModelEditorDialog.css";
 
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
+
+type ProviderErrorKind = "auth" | "notFound" | "rate" | "unavailable" | "network" | "generic";
+
+const ERROR_COPY: Record<ProviderErrorKind, [MessageKey, MessageKey]> = {
+  auth: ["models.error.authTitle", "models.error.authBody"],
+  notFound: ["models.error.notFoundTitle", "models.error.notFoundBody"],
+  rate: ["models.error.rateTitle", "models.error.rateBody"],
+  unavailable: ["models.error.unavailableTitle", "models.error.unavailableBody"],
+  network: ["models.error.networkTitle", "models.error.networkBody"],
+  generic: ["models.error.genericTitle", "models.error.genericBody"],
+};
+
+function classifyProviderError(raw: string): ProviderErrorKind {
+  const text = raw.toLowerCase();
+  if (
+    text.includes("401") ||
+    text.includes("403") ||
+    text.includes("authentication") ||
+    text.includes("invalid_api_key") ||
+    text.includes("api key") ||
+    text.includes("unauthorized")
+  ) {
+    return "auth";
+  }
+  if (text.includes("429") || text.includes("rate limit") || text.includes("rate_limit")) {
+    return "rate";
+  }
+  if (text.includes("404") || text.includes("not_found") || text.includes("not found")) {
+    return "notFound";
+  }
+  if (
+    text.includes("500") ||
+    text.includes("502") ||
+    text.includes("503") ||
+    text.includes("504") ||
+    text.includes("unavailable") ||
+    text.includes("overloaded")
+  ) {
+    return "unavailable";
+  }
+  if (
+    text.includes("dial tcp") ||
+    text.includes("no such host") ||
+    text.includes("connection refused") ||
+    text.includes("timeout") ||
+    text.includes("certificate") ||
+    text.includes("tls")
+  ) {
+    return "network";
+  }
+  return "generic";
+}
+
+function ProviderErrorNotice({ error }: { error: DesktopError }) {
+  const { t } = useI18n();
+  const kind = classifyProviderError(error.message);
+  const [titleKey, bodyKey] = ERROR_COPY[kind];
+  return (
+    <div className="model-editor__error" role="alert">
+      <div>
+        <strong>{t(titleKey)}</strong>
+        <p>{t(bodyKey)}</p>
+      </div>
+      <details>
+        <summary>{t("models.error.detail")}</summary>
+        <pre>{error.message}</pre>
+      </details>
+    </div>
+  );
+}
 
 function uniqueName(base: string, names: string[]): string {
   const taken = new Set(names);
@@ -392,27 +462,28 @@ export function ModelEditorDialog({
           ) : null}
         </details>
 
-        <div className="model-editor__test">
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => void testConnection()}
-            disabled={testing || saving}
-          >
-            {testing ? t("models.testing") : t("models.test")}
-          </button>
-          {testResult ? (
-            <span className="note note--success">
-              {t("models.testOk", {
-                model: testResult.model ?? modelID,
-                reply: testResult.reply ?? "",
-                ms: testResult.latency_ms ?? 0,
-              })}
-            </span>
-          ) : null}
-        </div>
+        <div className="model-editor__status">
+          <div className="model-editor__test">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void testConnection()}
+              disabled={testing || saving}
+            >
+              {testing ? t("models.testing") : t("models.test")}
+            </button>
+            {testResult ? (
+              <span className="note note--success">
+                {t("models.testOk", {
+                  model: testResult.model ?? modelID,
+                  reply: testResult.reply ?? "",
+                  ms: testResult.latency_ms ?? 0,
+                })}
+              </span>
+            ) : null}
+          </div>
 
-        <div className="model-editor__checks">
+          <div className="model-editor__checks">
           <label className="model-editor__check">
             <input
               type="checkbox"
@@ -431,9 +502,10 @@ export function ModelEditorDialog({
             />
             {t("models.enabledCheck")}
           </label>
+          </div>
         </div>
 
-        {error ? <ErrorMessage error={error} /> : null}
+        {error ? <ProviderErrorNotice error={error} /> : null}
 
         <footer className="model-editor__footer">
           {model ? (
@@ -454,7 +526,7 @@ export function ModelEditorDialog({
       {confirmDelete ? (
         <Dialog title={t("models.deleteTitle")} onClose={() => setConfirmDelete(false)}>
           <p className="note">{t("models.deleteBody")}</p>
-          {error ? <ErrorMessage error={error} /> : null}
+          {error ? <ProviderErrorNotice error={error} /> : null}
           <div className="dialog-actions">
             <button type="button" className="btn btn-sm" onClick={() => setConfirmDelete(false)}>
               {t("common.cancel")}
