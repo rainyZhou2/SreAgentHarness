@@ -410,7 +410,9 @@ export function Composer() {
     configuredModels.find((record) => record.spec.default) ??
     configuredModels.find((record) => record.spec.model === currentModel && record.enabled) ??
     configuredModels.find((record) => record.spec.model === currentModel);
-  const modelLabel = currentRecord ? currentRecord.spec.model : currentModel;
+  const modelLabel = currentRecord
+    ? modelDisplayName({ ...currentRecord.spec, model: currentModel }, presetFor(currentRecord.spec))
+    : currentModel;
   const canManageModels = whoami?.roles?.includes("admin") ?? false;
   const accountLabels = useMemo(() => {
     const totals = new Map<string, number>();
@@ -681,7 +683,6 @@ export function Composer() {
                   setPermissionMenuOpen(false);
                 }}
               >
-                <Icon name="cpu" />
                 <span>{modelLabel !== "" ? modelLabel : t("composer.model")}</span>
                 <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
               </button>

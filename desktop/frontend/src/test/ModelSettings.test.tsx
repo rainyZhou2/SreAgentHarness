@@ -77,7 +77,7 @@ describe("ModelSettings", () => {
       </ConnectionContext.Provider>,
     );
 
-    expect(await screen.findByText("gpt-6.1-sol")).toBeInTheDocument();
+    expect((await screen.findAllByText("GPT-6.1-SOL")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /openai-prod/ }));
     expect(await screen.findByText("Edit model")).toBeInTheDocument();
     expect(screen.getByDisplayValue("gpt-6.1-sol")).toBeInTheDocument();

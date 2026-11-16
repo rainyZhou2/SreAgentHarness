@@ -10,7 +10,7 @@ import { qk } from "../../lib/queryKeys";
 import { useUiStore } from "../../state/uiStore";
 import { useConnection } from "../connect/ConnectionContext";
 import { ModelEditorDialog } from "./ModelEditorDialog";
-import { presetFor, type ModelRecord } from "../../lib/modelCatalog";
+import { modelDisplayName, presetFor, type ModelRecord } from "../../lib/modelCatalog";
 import "./ModelSettings.css";
 
 export function ModelSettings({ canEdit }: { canEdit: boolean }) {
@@ -25,10 +25,13 @@ export function ModelSettings({ canEdit }: { canEdit: boolean }) {
   const current = catalog.current;
   const currentModel = current?.model ?? "";
   const configured = current?.tenant_configured ?? false;
+  const currentRecord = catalog.models.find((model) => model.spec.model === currentModel);
   const currentLabel =
     !configured && (currentModel === "" || currentModel === "rule-based-sre")
       ? t("models.notConfigured")
-      : currentModel;
+      : currentRecord
+        ? modelDisplayName(currentRecord.spec, presetFor(currentRecord.spec))
+        : currentModel;
 
   function refresh() {
     void queryClient.invalidateQueries({ queryKey: qk.extensions(scope) });
@@ -106,9 +109,9 @@ export function ModelSettings({ canEdit }: { canEdit: boolean }) {
                   {preset.mark}
                 </span>
                 <span className="settings-model-row__main">
-                  <span className="mono">{model.name}</span>
+                  <span>{modelDisplayName(model.spec, preset)}</span>
                   <span className="note">
-                    {preset.name} · {model.spec.model}
+                    {preset.name} · {model.spec.model} · {model.name}
                     {model.spec.base_url ? ` · ${model.spec.base_url}` : ""}
                   </span>
                 </span>
