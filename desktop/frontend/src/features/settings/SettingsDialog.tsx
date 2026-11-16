@@ -151,34 +151,49 @@ export function SettingsDialog() {
           <dl className="settings-info">
             <div>
               <dt>{t("settings.mode")}</dt>
-              <dd>{mode === "remote" ? t("connection.remote") : t("connection.local")}</dd>
+              <dd>{mode === "remote" ? t("connection.remoteMode") : t("connection.localMode")}</dd>
             </div>
-            <div>
-              <dt>{t("connection.serverUrl")}</dt>
-              <dd className="mono">{settings.server_url || t("common.notAvailable")}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.account")}</dt>
-              <dd>{whoami?.subject ?? t("common.notAvailable")}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.tenant")}</dt>
-              <dd className="mono">{whoami?.tenant ?? settings.creds.tenant ?? t("common.notAvailable")}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.roles")}</dt>
-              <dd className="settings-role-list">
-                {roles.length === 0 ? (
-                  <span>{t("common.notAvailable")}</span>
-                ) : (
-                  roles.map((role) => (
-                    <span className="chip" key={role}>
-                      {role}
-                    </span>
-                  ))
-                )}
-              </dd>
-            </div>
+            {mode === "remote" ? (
+              <>
+                <div>
+                  <dt>{t("connection.serverUrl")}</dt>
+                  <dd className="mono">{settings.server_url || t("common.notAvailable")}</dd>
+                </div>
+                <div>
+                  <dt>{t("settings.account")}</dt>
+                  <dd>{whoami?.subject ?? t("common.notAvailable")}</dd>
+                </div>
+                <div>
+                  <dt>{t("settings.tenant")}</dt>
+                  <dd className="mono">{whoami?.tenant ?? settings.creds.tenant ?? t("common.notAvailable")}</dd>
+                </div>
+                <div>
+                  <dt>{t("settings.roles")}</dt>
+                  <dd className="settings-role-list">
+                    {roles.length === 0 ? (
+                      <span>{t("common.notAvailable")}</span>
+                    ) : (
+                      roles.map((role) => (
+                        <span className="chip" key={role}>
+                          {role}
+                        </span>
+                      ))
+                    )}
+                  </dd>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <dt>{t("settings.workspace")}</dt>
+                  <dd>{t("connection.localWorkspace")}</dd>
+                </div>
+                <div>
+                  <dt>{t("settings.dataLocation")}</dt>
+                  <dd className="mono">{settings.local_data_dir || t("common.notAvailable")}</dd>
+                </div>
+              </>
+            )}
           </dl>
         </section>
 

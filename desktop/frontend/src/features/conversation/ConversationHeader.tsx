@@ -16,6 +16,7 @@ export function ConversationHeader() {
   const title = current?.title && current.title.trim() !== "" ? current.title : t("session.untitled");
   const subject = whoami?.subject ?? "";
   const roles = whoami?.roles?.length ? whoami.roles.join(", ") : "";
+  const account = mode === "remote" ? subject : "";
 
   return (
     <header className="conversation-header">
@@ -27,9 +28,9 @@ export function ConversationHeader() {
           ) : null}
         </div>
         <div className="conversation-header__meta">
-          {subject ? (
+          {account ? (
             <span className="conversation-header__account" title={roles}>
-              {subject}
+              {account}
             </span>
           ) : null}
           <span className="chip">{mode === "remote" ? t("connection.remote") : t("connection.local")}</span>

@@ -45,6 +45,9 @@ export function SessionSidebar() {
   const sessions = sessionsQuery.data?.sessions ?? [];
   const error = sessionsQuery.error ? toDesktopError(sessionsQuery.error) : null;
   const subject = whoami?.subject ?? "";
+  const accountMode = mode === "remote" ? t("connection.remoteMode") : t("connection.localMode");
+  const accountName =
+    mode === "remote" ? subject || whoami?.tenant || t("common.notAvailable") : t("connection.localWorkspace");
   const roles = whoami?.roles?.join(", ") ?? "";
   const approvalsCount = approvals.data?.approvals.length ?? 0;
   const worksCount = works.data?.items.length ?? 0;
@@ -322,13 +325,9 @@ export function SessionSidebar() {
           {collapsed ? null : (
             <div className="session-sidebar__account-main">
               <span className="session-sidebar__account-mode">
-                {offline
-                  ? t("connection.offline")
-                  : mode === "remote"
-                    ? t("connection.remote")
-                    : t("connection.local")}
+                {offline ? t("connection.offline") : accountMode}
               </span>
-              <span className="session-sidebar__account-name">{subject || t("common.notAvailable")}</span>
+              <span className="session-sidebar__account-name">{accountName}</span>
             </div>
           )}
           <button

@@ -361,7 +361,7 @@ html.native .session-sidebar__brand button {
   pointer-events: none;
 }
 
-.session-sidebar__search-input {
+.session-sidebar .session-sidebar__search-input {
   height: 34px;
   padding-left: 36px;
   padding-right: 28px;
