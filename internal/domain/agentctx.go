@@ -26,6 +26,9 @@ type GoalContext struct {
 	Services   []string          `json:"services,omitempty"`
 	Incident   string            `json:"incident,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
+	// Attachments are user-supplied text context (for example attached text
+	// files). Prompts treat them as untrusted data.
+	Attachments []string `json:"attachments,omitempty"`
 	// Source names the creator, e.g. "api", "trigger:alertmanager".
 	Source string `json:"source,omitempty"`
 	// Mode is an optional routing hint for auto runs: "react" or "flow".

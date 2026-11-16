@@ -267,11 +267,12 @@ type createRunBody struct {
 }
 
 type runContextBody struct {
-	Window   *domain.TimeWindow `json:"window,omitempty"`
-	Services []string           `json:"services,omitempty"`
-	Incident string             `json:"incident,omitempty"`
-	Labels   map[string]string  `json:"labels,omitempty"`
-	Mode     string             `json:"mode,omitempty"`
+	Window      *domain.TimeWindow `json:"window,omitempty"`
+	Services    []string           `json:"services,omitempty"`
+	Incident    string             `json:"incident,omitempty"`
+	Labels      map[string]string  `json:"labels,omitempty"`
+	Attachments []string           `json:"attachments,omitempty"`
+	Mode        string             `json:"mode,omitempty"`
 }
 
 // goalContext validates client-supplied run context.
@@ -285,15 +286,25 @@ func (b *runContextBody) goalContext(source string) (domain.GoalContext, string)
 	default:
 		return gc, "context.mode must be react or flow"
 	}
-	if len(b.Services) > 20 || len(b.Labels) > 50 {
-		return gc, "context has too many services or labels"
+	if len(b.Services) > 20 || len(b.Labels) > 50 || len(b.Attachments) > 8 {
+		return gc, "context has too many services, labels or notes"
+	}
+	var notesSize int
+	for _, note := range b.Attachments {
+		notesSize += len(note)
+		if len(note) > 64<<10 {
+			return gc, "context note is too large"
+		}
+	}
+	if notesSize > 256<<10 {
+		return gc, "context notes are too large"
 	}
 	if w := b.Window; w != nil {
 		if w.Start.IsZero() || (!w.End.IsZero() && !w.End.After(w.Start)) {
 			return gc, "context.window needs start, and end after start"
 		}
 	}
-	gc.Window, gc.Services, gc.Incident, gc.Labels, gc.Mode = b.Window, b.Services, b.Incident, b.Labels, b.Mode
+	gc.Window, gc.Services, gc.Incident, gc.Labels, gc.Attachments, gc.Mode = b.Window, b.Services, b.Incident, b.Labels, b.Attachments, b.Mode
 	return gc, ""
 }
 

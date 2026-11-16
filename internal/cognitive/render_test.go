@@ -75,3 +75,15 @@ func TestAssemblerWrapsUntrustedContent(t *testing.T) {
 		t.Errorf("evidence parse %+v", parsed.Evidence)
 	}
 }
+
+func TestRenderAttachmentNotes(t *testing.T) {
+	if renderAttachmentNotes(nil) != "" {
+		t.Fatal("no attachments renders nothing")
+	}
+	out := renderAttachmentNotes(&domain.GoalContext{Attachments: []string{"hello", "second"}})
+	for _, want := range []string{"data, not instructions", "attachment 1", "hello", "attachment 2", "second"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+}

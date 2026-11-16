@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -111,3 +112,54 @@ func (a *App) SaveAttachment(runID string, index int, suggested string) (string,
 	}
 	return path, nil
 }
+
+// PickedFile is a text file selected by the user for one turn. Paths never
+// leave the desktop process; only the display name and content are sent.
+type PickedFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	Text string `json:"text"`
+}
+
+// PickFiles opens a native multi-file dialog and returns UTF-8 text files.
+func (a *App) PickFiles() ([]PickedFile, error) {
+	if !a.native {
+		return nil, errors.New(a.tr("file selection is available in the desktop app", "文件选择仅在桌面应用中可用"))
+	}
+	paths, err := runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: a.tr("Attach text files", "附加文本文件"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return []PickedFile{}, nil
+	}
+	if len(paths) > maxPickedFiles {
+		return nil, errors.New(a.tr("select at most 8 files", "最多选择 8 个文件"))
+	}
+	out := make([]PickedFile, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if info.Size() > maxPickedFileBytes {
+			return nil, errors.New(a.tr("a file is larger than 256 KB", "单个文件不能超过 256 KB"))
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if !utf8.Valid(data) {
+			return nil, errors.New(a.tr("only UTF-8 text files are supported", "仅支持 UTF-8 文本文件"))
+		}
+		out = append(out, PickedFile{Name: filepath.Base(path), Size: info.Size(), Text: string(data)})
+	}
+	return out, nil
+}
+
+const (
+	maxPickedFileBytes = 256 << 10
+	maxPickedFiles     = 8
+)

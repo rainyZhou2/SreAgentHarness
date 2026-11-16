@@ -28,6 +28,7 @@ import type {
   ParsedTranscript,
   ParsedWorks,
   NetworkSettings,
+  PickedFile,
   Settings,
   TurnContext,
   Whoami,
@@ -140,6 +141,10 @@ export const bridge = {
 
   async locked(): Promise<boolean> {
     return getAppBridge().Locked();
+  },
+
+  async pickFiles(): Promise<PickedFile[]> {
+    return getAppBridge().PickFiles();
   },
 
   async disconnect(): Promise<void> {

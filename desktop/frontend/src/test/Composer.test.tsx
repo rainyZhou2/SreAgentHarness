@@ -185,6 +185,7 @@ describe("Composer", () => {
     renderComposer();
 
     fireEvent.click(screen.getByRole("button", { name: "Approver" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "View effective permissions" }));
     expect(await screen.findByText("Effective permissions")).toBeInTheDocument();
     expect(await screen.findByText(/1 \/ 1/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
@@ -193,6 +194,32 @@ describe("Composer", () => {
     expect(await screen.findByRole("menu")).toBeInTheDocument();
     expect(screen.getByText(/OpenAI/)).toBeInTheDocument();
     expect(screen.getAllByText("model-a").length).toBeGreaterThan(0);
+  });
+
+  it("attaches a text file to the next turn", async () => {
+    const sendTurn = vi.fn(async () => ({
+      turn: { id: "turn-1", run_id: "run-1" },
+    }));
+    installMockBridge({
+      CreateSession: async () => ({ session: { id: "session-1" } }),
+      SendTurn: sendTurn,
+      PickFiles: async () => [{ name: "notes.txt", size: 5, text: "hello" }],
+    });
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Attach text file" }));
+    expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "summarize the file" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+    expect(sendTurn).toHaveBeenCalledWith(
+      "session-1",
+      "summarize the file",
+      expect.objectContaining({ attachments: ["File: notes.txt\nhello"] }),
+    );
   });
 
   it("sends the pinned environment, services and window with the turn", async () => {

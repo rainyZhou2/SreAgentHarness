@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 
 import { bridge } from "../../bridge/bridge";
 import { toDesktopError, type DesktopError } from "../../bridge/errors";
-import type { TurnContext } from "../../bridge/types";
+import type { PickedFile, TurnContext } from "../../bridge/types";
 import { Dialog } from "../../components/ui/Dialog";
 import { ErrorMessage } from "../../components/ui/ErrorState";
 import { Icon } from "../../components/ui/Icon";
@@ -11,7 +11,7 @@ import { useSessionsQuery } from "../../hooks/useSessionsQuery";
 import { useModelCatalog } from "../../hooks/useModelCatalog";
 import { useProjectionQuery } from "../../hooks/useProjectionQuery";
 import { useI18n } from "../../i18n/I18nProvider";
-import { formatNumber, truncateTitle } from "../../lib/format";
+import { formatBytes, formatNumber, truncateTitle } from "../../lib/format";
 import { modelDisplayName, presetFor, type ModelRecord } from "../../lib/modelCatalog";
 import { qk } from "../../lib/queryKeys";
 import { useUiStore } from "../../state/uiStore";
@@ -90,7 +90,10 @@ export function Composer() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [infoDialog, setInfoDialog] = useState<"permission" | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
   const modelWrapRef = useRef<HTMLDivElement>(null);
+  const permissionWrapRef = useRef<HTMLDivElement>(null);
+  const [attachments, setAttachments] = useState<PickedFile[]>([]);
   const slashData = useSlashData(scope, true);
   const modelCatalog = useModelCatalog(scope);
   const sessionsQuery = useSessionsQuery(scope, currentSessionId !== null);
@@ -154,6 +157,11 @@ export function Composer() {
           .map((value) => value.trim())
           .filter(Boolean),
       };
+      if (attachments.length > 0) {
+        context.attachments = attachments.map(
+          (attachment) => `File: ${attachment.name}\n${attachment.text}`,
+        );
+      }
       const start = localDateTimeToISO(windowStart);
       const end = localDateTimeToISO(windowEnd);
       if (start !== undefined) {
@@ -171,6 +179,7 @@ export function Composer() {
       setLastText(null);
       setSlash(null);
       setMenuOpen(false);
+      setAttachments([]);
       setCurrentSession(sessionID);
       void queryClient.invalidateQueries({ queryKey: qk.sessions(scope) });
       void queryClient.invalidateQueries({ queryKey: qk.transcript(scope, sessionID) });
@@ -281,6 +290,24 @@ export function Composer() {
     }, 0);
   }
 
+  async function attachFiles() {
+    setMenuOpen(false);
+    try {
+      const picked = await bridge.pickFiles();
+      setAttachments((current) => {
+        const merged = [...current];
+        for (const file of picked) {
+          if (!merged.some((item) => item.name === file.name && item.size === file.size)) {
+            merged.push(file);
+          }
+        }
+        return merged.slice(0, 8);
+      });
+    } catch (cause) {
+      showNotice(toDesktopError(cause).message);
+    }
+  }
+
   function openSlash() {
     const element = textareaRef.current;
     const caret = element?.selectionStart ?? draft.length;
@@ -349,6 +376,28 @@ export function Composer() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [modelMenuOpen]);
+
+  useEffect(() => {
+    if (!permissionMenuOpen) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (!permissionWrapRef.current?.contains(event.target as Node)) {
+        setPermissionMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPermissionMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [permissionMenuOpen]);
 
   const hasContext =
     environment.trim() !== "" ||
@@ -459,6 +508,32 @@ export function Composer() {
             onHover={setSlashIndex}
           />
         ) : null}
+        {attachments.length > 0 ? (
+          <div className="composer__attachments" aria-label={t("composer.attachments")}>
+            {attachments.map((attachment) => (
+              <span className="composer__attachment" key={`${attachment.name}-${attachment.size}`}>
+                <Icon name="paperclip" size={13} />
+                <span className="composer__attachment-name">{attachment.name}</span>
+                <span className="composer__attachment-size">{formatBytes(attachment.size)}</span>
+                <button
+                  type="button"
+                  className="composer__attachment-remove"
+                  onClick={() =>
+                    setAttachments((current) =>
+                      current.filter(
+                        (item) => !(item.name === attachment.name && item.size === attachment.size),
+                      ),
+                    )
+                  }
+                  aria-label={t("composer.removeAttachment", { name: attachment.name })}
+                >
+                  <Icon name="close" size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
         <label className="visually-hidden" htmlFor="composer-input">
           {t("composer.placeholder")}
         </label>
@@ -521,6 +596,12 @@ export function Composer() {
                     <Icon name="sliders" /> {t("composer.context")}
                     {hasContext ? <span className="composer__dot" aria-hidden="true" /> : null}
                   </button>
+                  <button type="button" role="menuitem" onClick={() => void attachFiles()}>
+                    <Icon name="paperclip" /> {t("composer.attach")}
+                    {attachments.length > 0 ? (
+                      <span className="composer__menu-count">{attachments.length}</span>
+                    ) : null}
+                  </button>
                   <button
                     type="button"
                     role="menuitem"
@@ -545,16 +626,49 @@ export function Composer() {
                 </div>
               ) : null}
             </div>
-            <button
-              type="button"
-              className="composer__pill"
-              title={t("composer.permission")}
-              onClick={() => setInfoDialog("permission")}
-            >
-              <Icon name="shield" />
-              <span>{t(`composer.role.${role}`)}</span>
-              <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
-            </button>
+
+            <div className="composer__permission-wrap" ref={permissionWrapRef}>
+              <button
+                type="button"
+                className="composer__pill"
+                title={t("composer.permission")}
+                aria-haspopup="menu"
+                aria-expanded={permissionMenuOpen}
+                onClick={() => {
+                  setPermissionMenuOpen((open) => !open);
+                  setModelMenuOpen(false);
+                }}
+              >
+                <Icon name="shield" />
+                <span>{t(`composer.role.${role}`)}</span>
+                <Icon name="chevron-down" size={12} className="composer__pill-chevron" />
+              </button>
+              {permissionMenuOpen ? (
+                <div className="composer-permission-menu" role="menu">
+                  <div className="composer-permission-menu__current" data-selected="true">
+                    <Icon name="shield" size={14} />
+                    <span>{t(`composer.role.${role}`)}</span>
+                    <Icon name="check" size={14} />
+                  </div>
+                  <p className="composer-permission-menu__note">
+                    {t("composer.permissionLocked")}
+                  </p>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setPermissionMenuOpen(false);
+                      setInfoDialog("permission");
+                    }}
+                  >
+                    {t("composer.permissionDetails")}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="composer__trailing">
             <div className="composer__model-wrap" ref={modelWrapRef}>
               <button
                 type="button"
@@ -562,7 +676,10 @@ export function Composer() {
                 title={t("composer.model")}
                 aria-haspopup="menu"
                 aria-expanded={modelMenuOpen}
-                onClick={() => setModelMenuOpen((open) => !open)}
+                onClick={() => {
+                  setModelMenuOpen((open) => !open);
+                  setPermissionMenuOpen(false);
+                }}
               >
                 <Icon name="cpu" />
                 <span>{modelLabel !== "" ? modelLabel : t("composer.model")}</span>
@@ -618,17 +735,18 @@ export function Composer() {
                 </div>
               ) : null}
             </div>
+
+            <button
+              type="button"
+              className="composer__send"
+              onClick={() => submit(draft)}
+              disabled={offline || mutation.isPending || draft.trim() === ""}
+              aria-label={mutation.isPending ? t("composer.sending") : t("composer.send")}
+              title={mutation.isPending ? t("composer.sending") : t("composer.send")}
+            >
+              {mutation.isPending ? <span className="spinner" /> : <Icon name="arrow-up" size={18} />}
+            </button>
           </div>
-          <button
-            type="button"
-            className="composer__send"
-            onClick={() => submit(draft)}
-            disabled={offline || mutation.isPending || draft.trim() === ""}
-            aria-label={mutation.isPending ? t("composer.sending") : t("composer.send")}
-            title={mutation.isPending ? t("composer.sending") : t("composer.send")}
-          >
-            {mutation.isPending ? <span className="spinner" /> : <Icon name="arrow-up" size={18} />}
-          </button>
         </div>
       </div>
 

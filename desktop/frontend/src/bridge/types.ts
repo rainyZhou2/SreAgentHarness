@@ -211,11 +211,18 @@ export interface RunStep {
   capabilities?: Array<{ ref: string; role: string }>;
 }
 
+export interface PickedFile {
+  name: string;
+  size: number;
+  text: string;
+}
+
 export interface TurnContext {
   environment: string;
   services: string[];
   window_start?: string;
   window_end?: string;
+  attachments?: string[];
 }
 
 export interface CommandRequest {
@@ -439,6 +446,7 @@ export interface AppBridge {
   Lock(): Promise<void>;
   Unlock(): Promise<unknown>;
   Locked(): Promise<boolean>;
+  PickFiles(): Promise<PickedFile[]>;
   Disconnect(): Promise<void>;
   SetNetwork(network: NetworkSettings): Promise<void>;
   NetworkDiagnostics(): Promise<unknown>;

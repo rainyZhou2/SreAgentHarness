@@ -642,6 +642,8 @@ export const en = {
   "composer.permissionTools": "Enabled tools",
   "composer.permissionProfile": "Tool profile",
   "composer.permissionNote": "Tool permissions and approvals are enforced by the server policy; this client cannot grant broader access.",
+  "composer.permissionDetails": "View effective permissions",
+  "composer.permissionLocked": "Managed by server policy",
   "composer.modelTitle": "Model routing",
   "composer.modelCurrent": "Current model",
   "composer.modelAvailable": "Tenant models",
@@ -649,6 +651,9 @@ export const en = {
   "composer.modelNote": "Model endpoints are managed by administrators; the client shows the model new runs will use.",
   "composer.newConversation": "New conversation",
   "composer.export": "Export conversation",
+  "composer.attach": "Attach text file",
+  "composer.attachments": "Attachments",
+  "composer.removeAttachment": "Remove {name}",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1280,6 +1285,8 @@ export const zh: Record<MessageKey, string> = {
   "composer.permissionTools": "已启用工具",
   "composer.permissionProfile": "工具 Profile",
   "composer.permissionNote": "工具权限与审批由服务端策略强制执行；客户端不能扩大权限。",
+  "composer.permissionDetails": "查看生效权限",
+  "composer.permissionLocked": "由服务端策略决定",
   "composer.modelTitle": "模型路由",
   "composer.modelCurrent": "当前模型",
   "composer.modelAvailable": "租户模型",
@@ -1287,6 +1294,9 @@ export const zh: Record<MessageKey, string> = {
   "composer.modelNote": "模型端点由管理员管理；客户端展示新 Run 将使用的模型。",
   "composer.newConversation": "新建会话",
   "composer.export": "导出会话",
+  "composer.attach": "附加文本文件",
+  "composer.attachments": "附件",
+  "composer.removeAttachment": "移除 {name}",
 };
 
 export const dictionaries: Record<Locale, Record<MessageKey, string>> = { en, zh };

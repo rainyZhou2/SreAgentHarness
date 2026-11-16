@@ -17,6 +17,9 @@ type TurnContext struct {
 	Services    []string `json:"services,omitempty"`
 	WindowStart string   `json:"window_start,omitempty"`
 	WindowEnd   string   `json:"window_end,omitempty"`
+	// Attachments are UTF-8 text files selected for this turn. The server
+	// treats them as untrusted context, never as instructions.
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 // SendTurn submits a turn with optional pinned context.
@@ -56,6 +59,9 @@ func (a *App) SendTurn(sessionID, text string, input TurnContext) (map[string]an
 			window["end"] = end.Format(time.RFC3339)
 		}
 		context["window"] = window
+	}
+	if len(input.Attachments) > 0 {
+		context["attachments"] = input.Attachments
 	}
 	if len(context) > 0 {
 		body["context"] = context

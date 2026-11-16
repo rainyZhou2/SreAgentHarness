@@ -22,7 +22,8 @@ export type IconName =
   | "chevron-down"
   | "check"
   | "external"
-  | "search";
+  | "search"
+  | "paperclip";
 
 const paths: Record<IconName, ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
@@ -69,6 +70,7 @@ const paths: Record<IconName, ReactNode> = {
       <path d="m20 20-4-4" />
     </>
   ),
+  paperclip: <path d="m21 11.5-8.5 8.5a5 5 0 0 1-7-7l8.5-8.5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3l7.5-7.5" />,
   shield: <path d="M12 3 19 6v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z" />,
   cpu: (
     <>

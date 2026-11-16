@@ -74,3 +74,19 @@ func TestListRevocations(t *testing.T) {
 		t.Fatalf("revocations = %+v", out.Revocations)
 	}
 }
+
+func TestRunContextAttachments(t *testing.T) {
+	body := &runContextBody{Attachments: []string{"file contents"}}
+	gc, msg := body.goalContext("test")
+	if msg != "" || len(gc.Attachments) != 1 || gc.Attachments[0] != "file contents" {
+		t.Fatalf("attachments: %+v %q", gc, msg)
+	}
+	tooMany := &runContextBody{Attachments: make([]string, 9)}
+	if _, msg := tooMany.goalContext("test"); msg == "" {
+		t.Fatal("expected too-many-attachments error")
+	}
+	tooLarge := &runContextBody{Attachments: []string{string(make([]byte, 64<<10+1))}}
+	if _, msg := tooLarge.goalContext("test"); msg == "" {
+		t.Fatal("expected attachment-size error")
+	}
+}

@@ -17,6 +17,7 @@ export function createMockBridge(overrides: Partial<AppBridge> = {}): AppBridge 
     Lock: async () => undefined,
     Unlock: async () => testWhoami,
     Locked: async () => false,
+    PickFiles: async () => [],
     Disconnect: async () => undefined,
     SetNetwork: async () => undefined,
     NetworkDiagnostics: async () => ({}),
